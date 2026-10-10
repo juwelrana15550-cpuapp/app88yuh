@@ -2,7 +2,7 @@
 session_set_cookie_params(['httponly' => true, 'samesite' => 'Lax', 'secure' => !empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https']);
 session_start();
 
-const SITE_NAME = 'Virtual shop';
+const SITE_NAME = 'MySite';
 
 function db(): PDO {
     static $pdo = null;
@@ -35,7 +35,42 @@ function db(): PDO {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX (user_id)
     ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS settings (
+        k VARCHAR(60) PRIMARY KEY,
+        v TEXT NOT NULL
+    ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS media (
+        k VARCHAR(30) PRIMARY KEY,
+        mime VARCHAR(40) NOT NULL,
+        data MEDIUMBLOB NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB");
     return $pdo;
+}
+
+function setting(string $k, string $default = ''): string {
+    static $cache = null;
+    if ($cache === null) {
+        $cache = [];
+        try { foreach (db()->query('SELECT k, v FROM settings') as $r) $cache[$r['k']] = $r['v']; } catch (Throwable $ex) {}
+    }
+    return (isset($cache[$k]) && $cache[$k] !== '') ? $cache[$k] : $default;
+}
+function save_setting(string $k, string $v): void {
+    db()->prepare('INSERT INTO settings (k, v) VALUES (?,?) ON DUPLICATE KEY UPDATE v = VALUES(v)')->execute([$k, $v]);
+}
+function site_name(): string { return setting('site_name', SITE_NAME); }
+function media_url(string $k): ?string {
+    static $m = null;
+    if ($m === null) {
+        $m = [];
+        try { foreach (db()->query('SELECT k, UNIX_TIMESTAMP(updated_at) AS t FROM media') as $r) $m[$r['k']] = $r['t']; } catch (Throwable $ex) {}
+    }
+    return isset($m[$k]) ? '/media.php?k=' . urlencode($k) . '&v=' . $m[$k] : null;
+}
+function logo_html(string $fallback): string {
+    $u = media_url('logo');
+    return $u ? '<div class="logo has-img"><img src="' . e($u) . '" alt=""></div>' : '<div class="logo">' . $fallback . '</div>';
 }
 
 function e($s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
@@ -66,11 +101,11 @@ function header_html(string $title, ?array $user = null, string $variant = 'app'
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title><?= e($title) ?> - <?= SITE_NAME ?></title>
+<title><?= e($title) ?> - <?= e(site_name()) ?></title>
 <link rel="stylesheet" href="/style.css">
 </head><body class="<?= e($variant) ?>">
 <?php if ($variant === 'auth'): ?><span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span><?php endif; ?>
-<nav><a class="brand" href="/"><?= SITE_NAME ?></a>
+<nav><a class="brand" href="/"><?php if ($lg = media_url('logo')): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><?= e(site_name()) ?></a>
 <div class="links">
 <?php if ($admin): ?>
   <span class="hide">Admin Panel</span>
