@@ -16,6 +16,37 @@ function go(string $p, ?string $ok = null): void {
     exit;
 }
 
+/** Save an uploaded icon image (PNG/JPG/WEBP/GIF) in the media table. Returns "img:xxxxxxxx", or null if no file was chosen. */
+function icon_from_upload(?array $f): ?string {
+    if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) return null;
+    if ($f['error'] !== UPLOAD_ERR_OK || $f['size'] > 1048576) throw new RuntimeException('Icon image is too large (max 1 MB).');
+    $info = @getimagesize($f['tmp_name']);
+    if (!$info || !in_array($info['mime'], ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) throw new RuntimeException('Icon must be a PNG, JPG, WEBP or GIF image.');
+    $bin = file_get_contents($f['tmp_name']); $mime = $info['mime'];
+    if (function_exists('imagecreatefromstring') && function_exists('imagepng') && ($im = @imagecreatefromstring($bin))) {
+        // shrink to fit a 128x128 transparent square (keeps the whole logo, keeps the database small)
+        $w = imagesx($im); $h = imagesy($im); $sc = min(1, 128 / max($w, $h)); $nw = max(1, (int)round($w * $sc)); $nh = max(1, (int)round($h * $sc));
+        $dst = imagecreatetruecolor(128, 128); imagealphablending($dst, false); imagesavealpha($dst, true);
+        imagefill($dst, 0, 0, imagecolorallocatealpha($dst, 0, 0, 0, 127));
+        imagecopyresampled($dst, $im, (int)((128 - $nw) / 2), (int)((128 - $nh) / 2), 0, 0, $nw, $nh, $w, $h);
+        ob_start(); imagepng($dst); $bin = ob_get_clean(); $mime = 'image/png';
+    } elseif ($f['size'] > 204800) {
+        throw new RuntimeException('Icon image is too large (max 200 KB on this server).');
+    }
+    $pdo = db();
+    do { $id = bin2hex(random_bytes(4)); $ex = $pdo->prepare('SELECT 1 FROM media WHERE k = ?'); $ex->execute(['ic' . $id]); } while ($ex->fetchColumn());
+    $st = $pdo->prepare('INSERT INTO media (k, mime, data) VALUES (?,?,?)');
+    $st->bindValue(1, 'ic' . $id); $st->bindValue(2, $mime); $st->bindValue(3, $bin, PDO::PARAM_LOB);
+    $st->execute();
+    return 'img:' . $id;
+}
+/** Remove uploaded icon images that no product or category uses any more. */
+function icon_gc(PDO $pdo): void {
+    try {
+        $pdo->exec("DELETE FROM media WHERE k LIKE 'ic________' AND k NOT IN (SELECT CONCAT('ic', SUBSTRING(icon, 5)) FROM products WHERE icon LIKE 'img:%') AND k NOT IN (SELECT CONCAT('ic', SUBSTRING(icon, 5)) FROM categories WHERE icon LIKE 'img:%')");
+    } catch (Throwable $ex) { error_log('icon_gc: ' . $ex->getMessage()); }
+}
+
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
     return [
@@ -31,6 +62,7 @@ function product_fields(): array {
             $ic = trim($_POST['picon'] ?? '');
             if ($ic === '') return '';
             if (strncmp($ic, 'app:', 4) === 0) return isset(app_icons()[substr($ic, 4)]) ? $ic : '';
+            if (preg_match('/^img:[a-f0-9]{8}$/', $ic)) return $ic;   // an uploaded image
             return mb_substr($ic, 0, 8);
         })(),
     ];
@@ -39,6 +71,8 @@ function category_fields(): array {
     $ic = trim($_POST['cicon'] ?? '');
     if (strncmp($ic, 'app:', 4) === 0) {
         if (!isset(app_icons()[substr($ic, 4)])) $ic = 'app:shop';   // unknown key -> default
+    } elseif (preg_match('/^img:[a-f0-9]{8}$/', $ic)) {
+        // an uploaded image: keep as is
     } else {
         $ic = mb_substr($ic, 0, 8) ?: 'app:shop';                    // plain emoji
     }
@@ -104,8 +138,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'products';
             $isEdit = isset($_POST['update_product']);
             $f = product_fields();
-            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
-                $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
+            $bad = ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) ? 'Enter a product name (max 80 chars) and a price above 0.' : '';
+            if (!$bad) { try { if ($up = icon_from_upload($_FILES['picon_file'] ?? null)) $f['icon'] = $up; } catch (RuntimeException $ex) { $bad = $ex->getMessage(); } }
+            if ($bad) {
+                $prodErr = $bad;
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
                     'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'],
@@ -115,11 +151,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=? WHERE id=?')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
+                icon_gc($pdo);
                 go('products', 'Product saved.');
             } else {
                 $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon) VALUES (?,?,?,?,?,?,?,?,?)')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon']]);
                 if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
+                icon_gc($pdo);
                 go('products', 'Product added.');
             }
 
@@ -127,14 +165,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'categories';
             $isEdit = isset($_POST['update_category']);
             $f = category_fields();
-            if ($f['name'] === '' || mb_strlen($f['name']) > 40) {
-                $catErr = 'Enter a category name (max 40 chars).';
+            $bad = ($f['name'] === '' || mb_strlen($f['name']) > 40) ? 'Enter a category name (max 40 chars).' : '';
+            if (!$bad) { try { if ($up = icon_from_upload($_FILES['cicon_file'] ?? null)) $f['icon'] = $up; } catch (RuntimeException $ex) { $bad = $ex->getMessage(); } }
+            if ($bad) {
+                $catErr = $bad;
                 $reopen = ['t' => 'category', 'id' => $isEdit ? (int)$_POST['update_category'] : 0, 'v' => ['name' => $f['name'], 'icon' => $f['icon'], 'sort' => $f['sort']]];
             } elseif ($isEdit) {
                 $pdo->prepare('UPDATE categories SET name=?, icon=?, sort_order=? WHERE id=?')->execute([$f['name'], $f['icon'], $f['sort'], (int)$_POST['update_category']]);
+                icon_gc($pdo);
                 go('categories', 'Category saved.');
             } else {
                 $pdo->prepare('INSERT INTO categories (name, icon, sort_order) VALUES (?,?,?)')->execute([$f['name'], $f['icon'], $f['sort']]);
+                icon_gc($pdo);
                 go('categories', 'Category added.');
             }
 
@@ -148,6 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('UPDATE products SET category_id = NULL WHERE category_id = ?')->execute([$cid]);
                 $pdo->prepare('DELETE FROM categories WHERE id = ?')->execute([$cid]);
             });
+            icon_gc($pdo);
             go('categories', 'Category deleted.');
 
         } elseif (isset($_POST['upload_stock'])) {
@@ -271,11 +314,12 @@ function icon_picker_html(string $pre, string $field, string $initial, bool $aut
     <?php $lastG = null; $open = false;
     foreach (app_icons() as $key => $d):
       if ($d[1] !== $lastG) { if ($open) echo '</div>'; echo '<div class="ipk-g" data-g>' . e($d[1]) . '</div><div class="ipk-grid">'; $lastG = $d[1]; $open = true; } ?>
-      <button type="button" class="ipk-o" data-v="app:<?= e($key) ?>" data-n="<?= e($d[0]) ?>" title="<?= e($d[0]) ?>"><?= app_icon_svg($key, '40px') ?><span><?= e($d[0]) ?></span></button>
+      <button type="button" class="ipk-o" data-v="app:<?= e($key) ?>" data-n="<?= e($d[0]) ?>" title="<?= e($d[0]) ?>"><?= app_icon_svg($key, '30px') ?><span><?= e($d[0]) ?></span></button>
     <?php endforeach; if ($open) echo '</div>'; ?>
       <div class="ipk-none" id="<?= e($pre) ?>None">No icon found. Use an emoji below.</div>
     </div>
     <div class="ipk-em"><label for="<?= e($pre) ?>Emoji">Or type an emoji <small>(optional)</small></label><input type="text" id="<?= e($pre) ?>Emoji" maxlength="8" placeholder="📧"></div>
+    <div class="ipk-up"><label for="<?= e($pre) ?>File">Or upload your own image <small>(PNG / JPG / WEBP, up to 1 MB)</small></label><input type="file" name="<?= e($field) ?>_file" id="<?= e($pre) ?>File" accept="image/png,image/jpeg,image/webp,image/gif"><small class="ipk-hint">Your logo is resized automatically. A square image with a transparent background looks best.</small></div>
   </div>
   <input type="hidden" name="<?= e($field) ?>" id="<?= e($pre) ?>Val" value="<?= e($initial) ?>">
 </div>
@@ -321,6 +365,18 @@ $lg = media_url('logo');
 <?= icon_tags() ?>
 </head><body class="adm">
 <?= app_icon_sprite() ?>
+<style>
+/* icon picker: small, tidy tiles */
+.ipk-grid{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(60px,1fr))!important;gap:6px!important}
+.ipk-o{display:flex!important;flex-direction:column!important;align-items:center!important;gap:3px!important;padding:7px 2px 5px!important;border-radius:10px!important;min-width:0}
+.ipk-o svg{width:30px!important;height:30px!important}
+.ipk-o span{font-size:10.5px!important;line-height:1.15!important;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ipk-g{font-size:11px!important;margin:12px 0 6px!important}
+.ipk-up{margin-top:12px;padding-top:12px;border-top:1px dashed #e2e8f0}
+.ipk-up label{margin-top:0}
+.ipk-hint{display:block;margin-top:6px}
+.ipk-cur img{display:block;border-radius:8px}
+</style>
 <div class="shell">
 <div class="shade" onclick="document.body.classList.remove('menu')"></div>
 <aside class="side">
@@ -428,7 +484,7 @@ $lg = media_url('logo');
   <div class="empty" id="pnone" <?= $products ? 'style="display:none"' : '' ?>>No products yet. Click “Add product” to create the first one.</div>
 </div>
 
-<dialog id="pdlg"><form method="post" class="dlg"><?= csrf_field() ?>
+<dialog id="pdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
   <div class="dlg-h"><h3 id="pTitle">Add product</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($prodErr): ?><div class="err" style="margin-top:12px"><?= e($prodErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="pname" id="p_name" maxlength="80" required>
@@ -485,7 +541,7 @@ $lg = media_url('logo');
   <?php endforeach; if (!$cats): ?><tr><td colspan="5">No categories yet. Click “Add category”, then assign products to it.</td></tr><?php endif; ?></tbody></table></div>
 </div>
 
-<dialog id="cdlg"><form method="post" class="dlg"><?= csrf_field() ?>
+<dialog id="cdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
   <div class="dlg-h"><h3 id="cTitle">Add category</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($catErr): ?><div class="err" style="margin-top:12px"><?= e($catErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="cname" id="c_name" maxlength="40" required placeholder="e.g. Gmail Account">
@@ -550,9 +606,12 @@ $lg = media_url('logo');
   /* icon picker: prefix = element id prefix, defVal = value used when nothing is chosen ('' = automatic) */
   function picker(pre,defVal,guess){
     var hid=$('#'+pre+'Val'), cur=$('#'+pre+'Cur'), nm=$('#'+pre+'Name'), pop=$('#'+pre+'Pop'), btn=$('#'+pre+'Btn'), em=$('#'+pre+'Emoji'),
-        q=$('#'+pre+'Q'), list=$('#'+pre+'List'), none=$('#'+pre+'None'), auto=$('#'+pre+'Auto'), opts=$$('.ipk-o',list);
+        q=$('#'+pre+'Q'), list=$('#'+pre+'List'), none=$('#'+pre+'None'), auto=$('#'+pre+'Auto'), opts=$$('.ipk-o',list), fileIn=$('#'+pre+'File');
+    var imgTag=function(u){ return '<img src="'+u+'" width="32" height="32" alt="" style="object-fit:contain">'; };
+    var hasFile=function(){ return !!(fileIn && fileIn.files && fileIn.files.length); };
     function setIcon(v){
       v=(v===undefined||v===null)?defVal:String(v); hid.value=v;
+      if(fileIn) fileIn.value='';   // choosing any other icon cancels a picked image
       opts.forEach(function(o){ o.classList.toggle('sel',o.dataset.v===v); });
       function show(opt){
         cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai[0-9a-f]+_\d+[gs]/g,function(m){return m+pre;});
@@ -564,6 +623,7 @@ $lg = media_url('logo');
         if(go){ show(go); nm.textContent='Automatic \u00B7 '+go.dataset.n; } else { cur.textContent='\u2728'; nm.textContent='Automatic'; }
         return;
       }
+      if(v.indexOf('img:')===0){ cur.innerHTML=imgTag('/icon.php?k=ic'+v.slice(4)); nm.textContent='Custom image'; em.value=''; return; }
       if(v.indexOf('app:')===0){
         var opt=opts.filter(function(o){return o.dataset.v===v;})[0];
         if(!opt){ if(v===defVal) return; return setIcon(defVal); }
@@ -582,8 +642,15 @@ $lg = media_url('logo');
     opts.forEach(function(o){ o.addEventListener('click',function(){ setIcon(o.dataset.v); toggle(false); }); });
     if(auto) auto.addEventListener('click',function(){ setIcon(''); toggle(false); });
     em.addEventListener('input',function(){ var v=em.value.trim(); setIcon(v?v:defVal); });
+    if(fileIn) fileIn.addEventListener('change',function(){
+      var f=fileIn.files&&fileIn.files[0]; if(!f) return;
+      if(f.size>1048576){ alert('That image is larger than 1 MB. Please choose a smaller one.'); fileIn.value=''; return; }
+      cur.innerHTML=imgTag(URL.createObjectURL(f)); nm.textContent='Custom image'; em.value='';
+      opts.forEach(function(o){ o.classList.remove('sel'); });
+      toggle(false);
+    });
     setIcon(hid.value===''?defVal:hid.value);
-    return {set:setIcon, close:function(){ toggle(false); }, refresh:function(){ if(hid.value==='') setIcon(''); }};
+    return {set:setIcon, close:function(){ toggle(false); }, refresh:function(){ if(hid.value===''&&!hasFile()) setIcon(''); }};
   }
 
   /* ---------- products ---------- */

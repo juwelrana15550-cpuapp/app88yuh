@@ -329,36 +329,42 @@ document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){document.
 <?php }
 
 function user_start(string $title, array $u, string $active): void {
-    $items = [
-        'dashboard'    => ['/dashboard.php', 'Dashboard', 'gauge'],
-        'deposits'     => ['/deposits.php', 'Deposits', 'coins'],
-        'orders'       => ['/orders.php', 'My Orders', 'cart'],
-        'otp'          => ['/otp.php', 'Read OTP', 'shield'],
-        'referrals'    => ['/referrals.php', 'Referrals', 'users'],
-        'transactions' => ['/transactions.php', 'Transactions', 'swap'],
-        'apikeys'      => ['/api_keys.php', 'API Keys', 'key'],
+    $groups = [
+        'Shop'    => [['dashboard', '/dashboard.php', 'Home', 'home'], ['orders', '/orders.php', 'My Orders', 'cart'], ['otp', '/otp.php', 'Read OTP', 'mail']],
+        'Wallet'  => [['deposits', '/deposits.php', 'Deposits', 'coins'], ['transactions', '/transactions.php', 'Transactions', 'history'], ['referrals', '/referrals.php', 'Referrals', 'users']],
+        'Account' => [['apikeys', '/api_keys.php', 'API Keys', 'key'], ['profile', '/profile.php', 'Profile', 'usercog']],
     ];
     $name = ucfirst(strstr($u['email'], '@', true) ?: $u['email']);
     $lg = media_url('logo');
+    $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
     $GLOBALS['__active'] = $active;
     page_head($title, 'app'); ?>
-<div class="top"><button class="burger" type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
+<div class="top"><button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
 <a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><?= e(site_name()) ?></a></div>
 <div class="shade" onclick="document.body.classList.remove('menu')"></div>
-<aside class="side">
-  <div class="sh">
-    <div class="shr"><b>My Account</b><button type="button" class="x" aria-label="Close" onclick="document.body.classList.remove('menu')"><?= icon('x') ?></button></div>
-    <div class="who"><div class="av"><?= e(mb_strtoupper(mb_substr($name, 0, 1))) ?></div><div><b><?= e($name) ?></b><small><?= e($u['email']) ?></small></div></div>
-    <div class="bal"><span>Balance</span><b><?= money($u['coins']) ?></b></div>
+<aside class="side sd" aria-label="Account menu">
+  <div class="sd-head">
+    <div class="sd-top"><span>My account</span><button type="button" class="x sd-x" aria-label="Close menu" onclick="document.body.classList.remove('menu')"><?= icon('x') ?></button></div>
+    <div class="sd-user"><div class="sd-av"><?= e(mb_strtoupper(mb_substr($name, 0, 1))) ?></div><div class="sd-id"><b><?= e($name) ?></b><small><?= e($u['email']) ?></small></div></div>
+    <div class="sd-bal"><div><span>Wallet balance</span><b><?= money($u['coins']) ?></b></div><a class="sd-add" href="/deposits.php"><?= icon('plus') ?>Add funds</a></div>
   </div>
-  <div class="mn">
-  <?php foreach ($items as $k => $it): ?>
-    <a href="<?= $it[0] ?>" class="<?= $k === $active ? 'on' : '' ?>"><span class="mi"><?= icon($it[2]) ?></span><span><?= e($it[1]) ?></span></a>
+  <nav class="sd-nav">
+  <?php foreach ($groups as $grp => $items): ?>
+    <div class="sd-grp"><?= e($grp) ?></div>
+    <?php foreach ($items as [$k, $href, $label, $ic]): ?>
+    <a href="<?= $href ?>" class="<?= $k === $active ? 'on' : '' ?>"<?= $k === $active ? ' aria-current="page"' : '' ?>><span class="sd-ic"><?= icon($ic) ?></span><span class="sd-t"><?= e($label) ?></span></a>
+    <?php endforeach; ?>
   <?php endforeach; ?>
-    <hr class="sep">
-    <a href="/profile.php" class="<?= $active === 'profile' ? 'on' : '' ?>"><span class="mi"><?= icon('usercog') ?></span><span>Profile</span></a>
+  </nav>
+  <div class="sd-foot">
+  <?php if ($tg || $wa): ?>
+    <div class="sd-sup"><span>Need help?</span>
+      <?php if ($tg): ?><a href="<?= e($tg) ?>" target="_blank" rel="noopener"><?= icon('send') ?>Telegram</a><?php endif; ?>
+      <?php if ($wa): ?><a href="<?= e($wa) ?>" target="_blank" rel="noopener"><?= icon('phone') ?>WhatsApp</a><?php endif; ?>
+    </div>
+  <?php endif; ?>
+    <form method="post" action="/logout.php" class="sd-lo"><?= csrf_field() ?><button type="submit"><?= icon('logout') ?><span>Log out</span></button></form>
   </div>
-  <form method="post" action="/logout.php" class="lo"><?= csrf_field() ?><button type="submit"><span class="mi red"><?= icon('logout') ?></span><span>Logout</span></button></form>
 </aside>
 <main class="wide with-side">
 <?php flash_html(); }

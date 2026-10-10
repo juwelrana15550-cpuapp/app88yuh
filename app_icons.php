@@ -96,6 +96,62 @@ function app_icons(): array {
             . '<path d="M24 17c-3-1-6-4-4-6s5 1 4 6zm0 0c3-1 6-4 4-6s-5 1-4 6z" fill="none" stroke="#fff" stroke-width="2.400" stroke-linejoin="round"/>'],
         'crown' => ['Premium', 'General', '#FFC04A', '#E27D06',
             '<path d="M12 33.500V19l6.500 5.500L24 14l5.500 10.500L36 19v14.500z" fill="#fff"/><rect x="12" y="35.500" width="24" height="2.800" rx="1.400" fill="#fff"/>'],
+
+        // ---------- Generic: Apps & Tools (neutral symbols, not brand logos) ----------
+        'mail' => ['Mail', 'Apps & Tools', '#5B8DEF', '#3B63D8',
+            '<g fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><rect x="11" y="14" width="26" height="20" rx="3.5"/><path d="m12 17.500 12 9 12-9"/></g>'],
+        'chat' => ['Chat', 'Apps & Tools', '#34C3A0', '#0F9D7A',
+            '<path d="M13 15h22a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H26l-7 5.500V32h-6a3 3 0 0 1-3-3V18a3 3 0 0 1 3-3z" fill="#fff"/>'],
+        'doc' => ['Document', 'Apps & Tools', '#4C86F0', '#2459C9',
+            '<path d="M15 11h13l7 7v19a2 2 0 0 1-2 2H15a2 2 0 0 1-2-2V13a2 2 0 0 1 2-2z" fill="#fff"/><path d="M28 11v7h7" fill="none" stroke="#9DB9F5" stroke-width="2" stroke-linejoin="round"/><path d="M18 25h12M18 29.500h12M18 34h7" stroke="#2F66D6" stroke-width="2.200" stroke-linecap="round"/>'],
+        'sheet' => ['Spreadsheet', 'Apps & Tools', '#3FBF7F', '#12894F',
+            '<rect x="12" y="12" width="24" height="24" rx="3" fill="#fff"/><path d="M12 20h24M12 28h24M22 12v24" stroke="#17995A" stroke-width="2.200"/>'],
+        'slides' => ['Slides', 'Apps & Tools', '#FF8A4C', '#E2561B',
+            '<rect x="11" y="13" width="26" height="18" rx="3" fill="#fff"/><path d="M17 26v-4M24 26v-8M31 26v-6" stroke="#E86A2C" stroke-width="2.600" stroke-linecap="round"/><path d="M24 31v5M18 37h12" stroke="#fff" stroke-width="2.600" stroke-linecap="round"/>'],
+        'cloud' => ['Cloud', 'Apps & Tools', '#4FB6F5', '#2386D8',
+            '<path d="M19 35a7 7 0 0 1-1-13.900A9 9 0 0 1 35.200 20 6.500 6.500 0 0 1 34 35z" fill="#fff"/>'],
+        'folder' => ['Folder', 'Apps & Tools', '#FFB43B', '#E58A06',
+            '<path d="M10 17a3 3 0 0 1 3-3h7l3.500 4H35a3 3 0 0 1 3 3v13a3 3 0 0 1-3 3H13a3 3 0 0 1-3-3z" fill="#fff"/>'],
+        'calendar' => ['Calendar', 'Apps & Tools', '#6C8CF5', '#4A5FD8',
+            '<rect x="11" y="14" width="26" height="23" rx="4" fill="#fff"/><path d="M11 21h26" stroke="#5B6FE0" stroke-width="2.400"/><path d="M18 11v6M30 11v6" stroke="#fff" stroke-width="2.800" stroke-linecap="round"/><circle cx="18.500" cy="27" r="1.800" fill="#5B6FE0"/><circle cx="24" cy="27" r="1.800" fill="#5B6FE0"/><circle cx="29.500" cy="27" r="1.800" fill="#5B6FE0"/><circle cx="18.500" cy="32" r="1.800" fill="#5B6FE0"/>'],
+        'user' => ['Account', 'Apps & Tools', '#8B7CF6', '#6246E0',
+            '<circle cx="24" cy="19" r="6.500" fill="#fff"/><path d="M11.500 37c.8-6.500 6-10 12.500-10s11.700 3.500 12.500 10z" fill="#fff"/>'],
+        'lock' => ['Lock / Security', 'Apps & Tools', '#475569', '#1E293B',
+            '<rect x="13" y="22" width="22" height="15" rx="3.500" fill="#fff"/><path d="M18 22v-4a6 6 0 0 1 12 0v4" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/><circle cx="24" cy="29.500" r="2.200" fill="#334155"/>'],
+        'globe' => ['Web / Domain', 'Apps & Tools', '#2DB5D6', '#0E7FA0',
+            '<g fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="12"/><path d="M12 24h24"/><path d="M24 12c-4.500 4-4.500 20 0 24M24 12c4.500 4 4.500 20 0 24"/></g>'],
+        'phone2' => ['Phone / SMS', 'Apps & Tools', '#44C46B', '#1E9444',
+            '<path d="M18.500 12.500h-3a2.500 2.500 0 0 0-2.500 2.700C14 27 21 34 32.800 35a2.500 2.500 0 0 0 2.700-2.500v-3a1.500 1.500 0 0 0-1.100-1.400l-4.200-1.200a1.500 1.500 0 0 0-1.500.4l-1.500 1.500c-3-1.400-5.400-3.800-6.800-6.800l1.500-1.500a1.500 1.500 0 0 0 .4-1.500l-1.200-4.200a1.500 1.500 0 0 0-1.400-1.100z" fill="#fff"/>'],
+        'code' => ['Code / Dev', 'Apps & Tools', '#2D3748', '#111827',
+            '<g fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m19 17-7 7 7 7"/><path d="m29 17 7 7-7 7"/><path d="m26 14-4 20"/></g>'],
+
+        // ---------- Generic: Media & Games ----------
+        'video' => ['Video', 'Media & Games', '#F2575F', '#CB1F3A',
+            '<rect x="10" y="15" width="28" height="18" rx="5" fill="#fff"/><path d="M21.500 19.500v9l7.500-4.500z" fill="#D92B45"/>'],
+        'music' => ['Music', 'Media & Games', '#B06BF2', '#7F31D6',
+            '<path d="M20 31.500V16l15-3v15.500" fill="none" stroke="#fff" stroke-width="2.800" stroke-linejoin="round" stroke-linecap="round"/><circle cx="16.500" cy="32" r="4" fill="#fff"/><circle cx="31.500" cy="29" r="4" fill="#fff"/>'],
+        'camera' => ['Camera / Photos', 'Media & Games', '#F27BB0', '#D13D85',
+            '<path d="M12 19a3 3 0 0 1 3-3h3l2-3h8l2 3h3a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3z" fill="#fff"/><circle cx="24" cy="25.500" r="5.200" fill="none" stroke="#D13D85" stroke-width="2.800"/>'],
+        'game' => ['Game', 'Media & Games', '#6D7CF3', '#3F46D1',
+            '<path d="M16 17h16a6 6 0 0 1 5.900 5l1.300 8a3.800 3.800 0 0 1-6.700 3L29 29.500H19L14.500 33a3.800 3.800 0 0 1-6.700-3l1.300-8A6 6 0 0 1 16 17z" fill="#fff"/><path d="M17 21.500v5M14.500 24h5" stroke="#4A52D8" stroke-width="2.200" stroke-linecap="round"/><circle cx="30" cy="22.500" r="1.600" fill="#4A52D8"/><circle cx="33.500" cy="25.500" r="1.600" fill="#4A52D8"/>'],
+        'star' => ['Star', 'Media & Games', '#FFC53D', '#F59E0B',
+            '<path d="m24 11.500 3.800 8 8.700 1.100-6.400 6 1.700 8.700-7.800-4.300-7.800 4.300 1.700-8.700-6.400-6 8.700-1.100z" fill="#fff"/>'],
+        'bolt' => ['Fast / Bolt', 'Media & Games', '#FFB020', '#F97316',
+            '<path d="M27.500 10.500 14 27h9l-2.500 10.500L34 21h-9z" fill="#fff"/>'],
+        'heart' => ['Heart / Dating', 'Media & Games', '#FF6B81', '#E0245E',
+            '<path d="M24 36.500S11.500 29 11.500 20.500a6.700 6.700 0 0 1 12.500-3.400 6.700 6.700 0 0 1 12.500 3.400C36.500 29 24 36.500 24 36.500z" fill="#fff"/>'],
+
+        // ---------- Generic: Money & Shopping ----------
+        'wallet' => ['Wallet / Pay', 'Money & Shopping', '#1FB38A', '#0B7A5E',
+            '<path d="M12 18a3 3 0 0 1 3-3h17v5" fill="none" stroke="#fff" stroke-width="2.800" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="18" width="26" height="18" rx="3.500" fill="#fff"/><circle cx="31.500" cy="27" r="2.300" fill="#0E8F6F"/>'],
+        'coin' => ['Coin / Crypto', 'Money & Shopping', '#F7B731', '#D68A00',
+            '<circle cx="24" cy="24" r="12.500" fill="#fff"/><path d="M24 17v14M20.500 20.500h5.200a2.500 2.500 0 0 1 0 5h-4.400a2.500 2.500 0 0 0 0 5H28" fill="none" stroke="#E09A0A" stroke-width="2.400" stroke-linecap="round" stroke-linejoin="round"/>'],
+        'card' => ['Bank card', 'Money & Shopping', '#5A6BE8', '#3340C0',
+            '<rect x="10" y="14" width="28" height="20" rx="3.500" fill="#fff"/><rect x="10" y="19" width="28" height="4.500" fill="#3F4DD0"/><rect x="14" y="28" width="9" height="2.600" rx="1.300" fill="#9AA5F0"/>'],
+        'cart' => ['Cart', 'Money & Shopping', '#8E7CF3', '#6A3FE0',
+            '<g fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 13h4l3.500 15h14L36 18H16.500"/><circle cx="21" cy="34.500" r="1.800" fill="#fff"/><circle cx="31" cy="34.500" r="1.800" fill="#fff"/></g>'],
+        'tag' => ['Offer / Tag', 'Money & Shopping', '#F2685B', '#D1352B',
+            '<path d="M12 13.500h12.500l11 11a2.500 2.500 0 0 1 0 3.500L28 35.500a2.500 2.500 0 0 1-3.500 0l-11-11z" fill="#fff"/><circle cx="19" cy="20" r="2.300" fill="#DE4A3F"/>'],
     ];
     return $s;
 }
@@ -126,16 +182,21 @@ function cat_icon($v, string $size = '1.1em'): string {
     $v = trim((string)$v);
     if ($v === '') $v = 'app:shop';
     if (strncmp($v, 'app:', 4) === 0) return app_icon_svg(substr($v, 4), $size);
+    if (preg_match('/^img:[a-f0-9]{8}$/', $v)) {   // image uploaded by the admin (stored in the media table, served by icon.php)
+        $sz = htmlspecialchars($size, ENT_QUOTES, 'UTF-8');
+        return '<img class="appi appi-img" src="/icon.php?k=ic' . substr($v, 4) . '" alt="" loading="lazy" decoding="async" style="width:' . $sz . ';height:' . $sz . ';object-fit:contain;border-radius:22%;display:inline-block;vertical-align:-.22em">';
+    }
     return htmlspecialchars($v, ENT_QUOTES, 'UTF-8');
 }
 
 /** Plain-text version (for <option> lists, which cannot hold SVG). */
 function cat_icon_text($v): string {
     $v = trim((string)$v);
-    return ($v === '' || strncmp($v, 'app:', 4) === 0) ? '' : $v;
+    return ($v === '' || strncmp($v, 'app:', 4) === 0 || strncmp($v, 'img:', 4) === 0) ? '' : $v;
 }
 function cat_icon_label($v): string {
     $v = trim((string)$v);
     if (strncmp($v, 'app:', 4) === 0) return app_icons()[substr($v, 4)][0] ?? 'Shop (default)';
+    if (strncmp($v, 'img:', 4) === 0) return 'Custom image';
     return $v === '' ? 'Shop (default)' : 'Emoji ' . $v;
 }
