@@ -86,5 +86,4 @@ if (isset($_GET['ajax'])) { header('Content-Type: text/html; charset=utf-8'); he
 user_start('Home', $u, 'dashboard'); ?>
 <div class="card wallet bbar"><div><small>Available balance</small><b><?= money($u['coins']) ?></b></div><a class="btn sm" href="/deposits.php">+ Add Funds</a></div>
 <?php catalog_html($cats, $rows, $c, $q, $total, (float)$u['coins']); ?>
-<script>var a=document.querySelector('.chip.on');if(a&&a.scrollIntoView)a.scrollIntoView({inline:'center',block:'nearest'});</script>
 <?php user_end();

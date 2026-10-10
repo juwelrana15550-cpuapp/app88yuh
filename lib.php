@@ -384,7 +384,7 @@ function catalog_url(array $x): string {
 function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
-    $card = function (array $p) use ($byId, $c, $q) {
+    $card = function (array $p) use ($byId) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
         $icon = $k['icon'] ?? '';
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
@@ -400,9 +400,9 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
-      <form method="post"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1">
-        <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
+      <div class="pc-buy">
+        <button type="button" class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
+      </div>
     </div>
 <?php }; ?>
 <?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e(catalog_url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
@@ -413,74 +413,108 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
 <?php if (!$rows): ?><div class="card empty"><div class="ei">🔎</div><b>No products found</b><p><?= $q !== '' ? 'Try a different search or category.' : 'Products will appear here once they are added.' ?></p></div><?php endif; ?>
 <?php }
 
-/** Home catalog: search box, category chips and product cards grouped by category. */
+/** Home catalog: search box, categories shown directly as tiles (no dropdown), and the product cards. */
 function catalog_html(array $cats, array $rows, int $c, string $q, int $total, float $balance = 0.0): void {
     echo app_icon_sprite(); ?>
+<style>
+/* Category tiles - self-contained, does not depend on style.css */
+.sx-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(98px,1fr));gap:10px;margin:14px 0 18px}
+.sx-cat{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding:12px 6px 10px;background:#fff;border:1.5px solid #e2e8f0;border-radius:14px;text-align:center;color:#1e293b;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:transform .15s,border-color .15s,box-shadow .15s,background .15s}
+.sx-cat:hover{transform:translateY(-2px);border-color:#a5b4fc}
+.sx-cat:active{transform:scale(.97)}
+.sx-cat .sx-ci{display:flex;align-items:center;justify-content:center;height:34px;font-size:26px;line-height:1;color:#4f46e5}
+.sx-cat .sx-ci svg{width:34px;height:34px}
+.sx-cat b{font-size:13px;font-weight:600;line-height:1.25;word-break:break-word}
+.sx-cat em{font-style:normal;font-size:11px;color:#64748b}
+.sx-cat.on{border-color:#4f46e5;background:#eef2ff;box-shadow:0 0 0 3px rgba(79,70,229,.15)}
+.sx-cat.on b{color:#3730a3}
+#cat-res{scroll-margin-top:72px}
+#cat-res.busy{opacity:.55;transition:opacity .15s}
+/* Buy Now dialog - self-contained, compact, centered */
+.bx{position:fixed;left:0;right:0;top:0;bottom:0;z-index:3000;display:none;align-items:center;justify-content:center;padding:16px}
+.bx.open{display:flex}
+.bx-bd{position:absolute;left:0;right:0;top:0;bottom:0;background:rgba(15,23,42,.5);opacity:0;transition:opacity .2s}
+.bx-sh{position:relative;width:100%;max-width:340px;max-height:calc(100vh - 32px);overflow:auto;background:#fff;color:#1e293b;border-radius:16px;padding:16px;box-shadow:0 20px 50px rgba(15,23,42,.3);opacity:0;transform:scale(.95) translateY(8px);transition:opacity .2s ease,transform .2s ease}
+.bx.show .bx-bd{opacity:1}
+.bx.show .bx-sh{opacity:1;transform:none}
+.bx-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.bx-ic{flex:none;display:flex;align-items:center;justify-content:center;width:36px;height:36px;font-size:22px}
+.bx-ic svg{width:36px;height:36px}
+.bx-t{flex:1;min-width:0}
+.bx-t b{display:block;font-size:15px;line-height:1.25;word-break:break-word}
+.bx-t small{display:block;color:#64748b;font-size:12px;margin-top:1px}
+.bx-x{flex:none;width:28px;height:28px;border:0;border-radius:50%;background:#f1f5f9;color:#475569;font-size:18px;line-height:1;cursor:pointer}
+.bx-rows{background:#f8fafc;border-radius:10px;padding:2px 12px;margin-bottom:12px}
+.bx-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;font-size:13px}
+.bx-row+.bx-row{border-top:1px solid #e2e8f0}
+.bx-row span{color:#64748b}
+.bx-l{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:5px}
+.bx-qty{display:flex;gap:6px;margin-bottom:8px}
+.bx-qty button{flex:none;width:38px;height:38px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;color:#1e293b;font-size:18px;cursor:pointer}
+.bx-qty button:disabled{opacity:.4;cursor:not-allowed}
+.bx-qty input{flex:1;min-width:0;height:38px;text-align:center;border:1px solid #e2e8f0;border-radius:10px;font-size:15px;font-weight:600;background:#fff;color:#1e293b;-moz-appearance:textfield}
+.bx-qty input::-webkit-outer-spin-button,.bx-qty input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.bx-qc{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.bx-qc:empty{display:none}
+.bx-qc button{padding:4px 11px;border:1px solid #e2e8f0;border-radius:99px;background:#fff;color:#334155;font-size:12px;font-weight:600;cursor:pointer}
+.bx-qc button.on{border-color:#4f46e5;background:#eef2ff;color:#3730a3}
+.bx-tot{display:flex;justify-content:space-between;align-items:center;font-size:14px;padding:10px 0 2px;border-top:1px dashed #cbd5e1}
+.bx-tot b{font-size:18px;color:#4f46e5}
+.bx-bal{display:flex;justify-content:space-between;font-size:12px;color:#64748b;padding-bottom:10px}
+.bx.low .bx-bal b{color:#dc2626}
+.bx-msg{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:#fef2f2;color:#b91c1c;font-size:12.5px}
+.bx-msg[hidden]{display:none}
+.bx-msg a{color:#4f46e5;font-weight:700;text-decoration:underline}
+.bx-f{display:flex;gap:8px}
+.bx-btn{flex:1;padding:11px 8px;border:0;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+.bx-no{background:#f1f5f9;color:#334155}
+.bx-ok{flex:1.5;background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff}
+.bx-btn:disabled{opacity:.5;cursor:not-allowed}
+</style>
 <form class="search" id="catF" method="get" action="/dashboard.php">
   <?= icon('search') ?><input type="text" name="q" value="<?= e($q) ?>" placeholder="Search products or ID" autocomplete="off" maxlength="80">
   <?php if ($c): ?><input type="hidden" name="c" value="<?= $c ?>"><?php endif; ?>
   <button>Search</button>
 </form>
-<button type="button" class="catbtn" id="catBtn" aria-haspopup="dialog"><span class="cb-ic" id="cbIc"></span><span class="cb-t"><small>Category</small><b id="cbName">All</b></span><em id="cbN"></em><span class="cb-chev" aria-hidden="true"></span></button>
-<div class="chips-row" id="chipsRow">
-  <a class="chip <?= $c ? '' : 'on' ?>" data-c="0" href="<?= e(catalog_url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
+<div class="sx-cats" id="catRow">
+  <a class="sx-cat <?= $c ? '' : 'on' ?>" data-c="0" href="<?= e(catalog_url(['q' => $q])) ?>"><span class="sx-ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><b>All</b><em><?= (int)$total ?> items</em></a>
   <?php foreach ($cats as $k): ?>
-  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= cat_icon($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
+  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '34px') ?></span><b><?= e($k['name']) ?></b><em><?= (int)$k['n'] ?> items</em></a>
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
-<?php ob_start(); cat_sheet_html(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it can sit above the tab bar ?>
-<?php }
-
-/** Category picker sheet for phones: lists every category (copied from the chips row by JS) with a search box. */
-function cat_sheet_html(): void { ?>
-<div class="mdl" id="catM" hidden>
-  <div class="mdl-bd" data-cx></div>
-  <div class="mdl-sh" role="dialog" aria-modal="true" aria-labelledby="csT">
-    <span class="mdl-grip" aria-hidden="true"></span>
-    <div class="mdl-h"><span class="mdl-ic"><?= icon('search') ?></span><div class="mdl-t"><b id="csT">Choose a category</b><small>Tap one to filter products</small></div>
-      <button type="button" class="mdl-x" data-cx aria-label="Close"><?= icon('x') ?></button></div>
-    <div class="cs-b">
-      <div class="cs-s"><?= icon('search') ?><input type="search" id="csQ" placeholder="Search categories" autocomplete="off"></div>
-      <div class="cs-list" id="csList"></div>
-      <div class="cs-none" id="csNone" hidden>No category found.</div>
-    </div>
-  </div>
-</div>
+<?php ob_start(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it sits above the tab bar ?>
 <?php }
 
 /** "Buy Now" confirmation sheet: quantity stepper, live total, wallet check. Opened by buttons carrying data-buy. */
 function buy_modal_html(float $balance, int $c, string $q): void { ?>
-<div class="mdl" id="buyM" hidden>
-  <div class="mdl-bd" data-x></div>
-  <form method="post" class="mdl-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off"><?= csrf_field() ?>
+<div class="bx" id="buyM" aria-hidden="true">
+  <div class="bx-bd" data-x></div>
+  <form method="post" action="/dashboard.php" class="bx-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off"><?= csrf_field() ?>
     <input type="hidden" name="product_id" id="bmId" value="">
     <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-    <span class="mdl-grip" aria-hidden="true"></span>
-    <div class="mdl-h">
-      <span class="mdl-ic" id="bmIc"></span>
-      <div class="mdl-t"><b id="bmT">Product</b><small id="bmSub">Review your order</small></div>
-      <button type="button" class="mdl-x" data-x aria-label="Close"><?= icon('x') ?></button>
+    <div class="bx-h">
+      <span class="bx-ic" id="bmIc"></span>
+      <div class="bx-t"><b id="bmT">Product</b><small id="bmSub">Review your order</small></div>
+      <button type="button" class="bx-x" data-x aria-label="Close">&times;</button>
     </div>
-    <div class="mdl-b">
-      <div class="mdl-rows">
-        <div class="mdl-row"><span>Price</span><b id="bmP"></b></div>
-        <div class="mdl-row"><span>Available</span><b id="bmA"></b></div>
-      </div>
-      <label for="bmQ">Quantity</label>
-      <div class="qty">
-        <button type="button" id="bmMinus" aria-label="Decrease quantity">&minus;</button>
-        <input type="number" id="bmQ" name="qty" value="1" min="1" step="1" inputmode="numeric" required>
-        <button type="button" id="bmPlus" aria-label="Increase quantity">+</button>
-      </div>
-      <div class="qchips" id="bmChips"></div>
-      <div class="mdl-tot"><span>Total</span><b id="bmTot"></b></div>
-      <div class="mdl-bal" id="bmBal"><span>Wallet balance</span><b><?= e(money($balance)) ?></b></div>
-      <div class="mdl-msg" id="bmMsg" role="alert" hidden></div>
+    <div class="bx-rows">
+      <div class="bx-row"><span>Price</span><b id="bmP"></b></div>
+      <div class="bx-row"><span>Available</span><b id="bmA"></b></div>
     </div>
-    <div class="mdl-f">
-      <button type="button" class="btn ghost" data-x>Cancel</button>
-      <button class="btn" id="bmGo">Confirm Purchase</button>
+    <label class="bx-l" for="bmQ">Quantity</label>
+    <div class="bx-qty">
+      <button type="button" id="bmMinus" aria-label="Decrease quantity">&minus;</button>
+      <input type="number" id="bmQ" name="qty" value="1" min="1" step="1" inputmode="numeric" required>
+      <button type="button" id="bmPlus" aria-label="Increase quantity">+</button>
+    </div>
+    <div class="bx-qc" id="bmChips"></div>
+    <div class="bx-tot"><span>Total</span><b id="bmTot"></b></div>
+    <div class="bx-bal"><span>Wallet balance</span><b><?= e(money($balance)) ?></b></div>
+    <div class="bx-msg" id="bmMsg" role="alert" hidden></div>
+    <div class="bx-f">
+      <button type="button" class="bx-btn bx-no" data-x>Cancel</button>
+      <button type="submit" class="bx-btn bx-ok" id="bmGo">Confirm Purchase</button>
     </div>
   </form>
 </div>
@@ -492,7 +526,10 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
   var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null, hideT=null;
   var fmt=function(n){return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
   function maxQty(){ return cur.stock===null ? CAP : Math.max(0, Math.min(cur.stock, CAP)); }
-  function showMsg(t,link){ msg.hidden=!t; msg.innerHTML=''; if(t){ msg.appendChild(document.createTextNode(t)); if(link){ var a=document.createElement('a'); a.href='/deposits.php'; a.textContent=' Add funds'; msg.appendChild(a);} } }
+  function showMsg(t,link){
+    msg.hidden=!t; msg.innerHTML='';
+    if(t){ msg.appendChild(document.createTextNode(t)); if(link){ var a=document.createElement('a'); a.href='/deposits.php'; a.textContent=' Add funds'; msg.appendChild(a); } }
+  }
   function render(){
     var raw=parseInt(Q.value,10), q=isNaN(raw)?0:raw, mx=maxQty();
     var cents=Math.round(cur.price*100)*Math.max(q,0), total=cents/100;
@@ -509,131 +546,107 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     go.disabled=!!bad;
     Array.prototype.forEach.call($('bmChips').children,function(b){ b.classList.toggle('on', parseInt(b.dataset.q,10)===q); });
   }
+  function addChip(box,n,t){
+    var b=document.createElement('button'); b.type='button'; b.dataset.q=n; b.textContent=t;
+    b.addEventListener('click',function(){ Q.value=n; render(); }); box.appendChild(b);
+  }
   function chips(){
     var box=$('bmChips'), mx=maxQty(); box.innerHTML='';
-    [1,5,10,50,100].forEach(function(n){ if(n<=mx) add(n,String(n)); });
+    [1,5,10,50,100].forEach(function(n){ if(n<=mx) addChip(box,n,String(n)); });
     var afford=cur.price>0?Math.floor(Math.round(BAL*100)/Math.round(cur.price*100)):0, best=Math.min(mx,afford);
-    if(best>1 && [1,5,10,50,100].indexOf(best)<0) add(best,'Max ('+best.toLocaleString('en-US')+')');
-    function add(n,t){ var b=document.createElement('button'); b.type='button'; b.className='qchip'; b.dataset.q=n; b.textContent=t; b.addEventListener('click',function(){ Q.value=n; render(); }); box.appendChild(b); }
+    if(best>1 && [1,5,10,50,100].indexOf(best)<0) addChip(box,best,'Max ('+best.toLocaleString('en-US')+')');
   }
   function open(btn){
     last=btn;
-    cur={id:btn.dataset.id,name:btn.dataset.name,price:parseFloat(btn.dataset.price),unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
+    cur={id:btn.dataset.id,name:btn.dataset.name,price:parseFloat(btn.dataset.price)||0,unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
     cur.auto=btn.dataset.auto==='1';
-    if(hideT){ clearTimeout(hideT); hideT=null; }   // a pending "hide" from a just-closed sheet must not hide this one
+    if(hideT){ clearTimeout(hideT); hideT=null; }
     $('bmId').value=cur.id; $('bmT').textContent=cur.name;
     $('bmSub').textContent=cur.auto?'\u26A1 Instant delivery after purchase':'Review your order';
     $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'');
     $('bmA').textContent=cur.stock===null?'In stock':cur.stock.toLocaleString('en-US')+' pcs';
     var card=btn.closest('.pc'), ic=card&&card.querySelector('.pc-ic'); $('bmIc').innerHTML=ic?ic.innerHTML:'';
     Q.value=1; Q.max=maxQty()||''; chips(); go.textContent='Confirm Purchase'; render();
-    M.hidden=false; document.body.classList.add('modal');
-    requestAnimationFrame(function(){ M.classList.add('show'); });
-    setTimeout(function(){ try{ Q.focus(); Q.select(); }catch(e){} }, 120);
+    M.classList.add('open'); M.setAttribute('aria-hidden','false');
+    document.documentElement.style.overflow='hidden';
+    void M.offsetWidth;                       // force a reflow so the slide-up animation runs
+    M.classList.add('show');
+    setTimeout(function(){ try{ Q.focus({preventScroll:true}); Q.select(); }catch(e){} }, 150);
   }
   function close(){
-    M.classList.remove('show'); document.body.classList.remove('modal');
+    M.classList.remove('show'); M.setAttribute('aria-hidden','true');
+    document.documentElement.style.overflow='';
     if(hideT) clearTimeout(hideT);
-    hideT=setTimeout(function(){ M.hidden=true; hideT=null; }, 200);
-    if(last){ try{ last.focus(); }catch(e){} }
+    hideT=setTimeout(function(){ M.classList.remove('open'); hideT=null; }, 230);
+    if(last){ try{ last.focus({preventScroll:true}); }catch(e){} }
   }
-  // Delegated + capture phase: works for buttons added later by the category switcher and cannot be swallowed by another handler.
+  // Delegated click on the document: also works for cards added later by the category switcher.
   document.addEventListener('click',function(e){
     var b=e.target.closest&&e.target.closest('[data-buy]'); if(!b||b.disabled) return;
     e.preventDefault();
-    try{ open(b); }catch(err){ if(window.console) console.error(err); location.reload(); }   // never leave the button dead: reload a clean copy of the page
-  },true);
+    try{ open(b); }
+    catch(err){
+      if(window.console) console.error(err);
+      // last-resort fallback: plain confirm box, then post the order for quantity 1
+      if(window.confirm('Buy 1 \u00D7 '+(b.dataset.name||'this product')+'?')){ $('bmId').value=b.dataset.id; Q.value=1; F.submit(); }
+    }
+  });
   M.querySelectorAll('[data-x]').forEach(function(x){ x.addEventListener('click',close); });
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape' && !M.hidden) close(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape' && M.classList.contains('open')) close(); });
   $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
   $('bmPlus').addEventListener('click',function(){ Q.value=Math.min(maxQty(),(parseInt(Q.value,10)||0)+1); render(); });
   Q.addEventListener('input',render);
   F.addEventListener('submit',function(e){
+    if(!cur){ e.preventDefault(); return; }
     render(); if(go.disabled){ e.preventDefault(); return; }
     go.disabled=true; go.textContent='Processing\u2026';   // stops double-clicks from buying twice
   });
-  window.addEventListener('pageshow',function(ev){ if(ev.persisted){ M.hidden=true; M.classList.remove('show'); document.body.classList.remove('modal'); } });
+  window.addEventListener('pageshow',function(ev){
+    if(ev.persisted){ M.classList.remove('open','show'); document.documentElement.style.overflow=''; go.disabled=false; go.textContent='Confirm Purchase'; }
+  });
 })();
 </script>
 <script>
-/* Category chips + search: swap the product list in place (no full page load) */
+/* Category tiles + search: swap the product list in place (no full page load) */
 (function(){
-  var res=document.getElementById('cat-res'), row=document.getElementById('chipsRow'), form=document.getElementById('catF'), buy=document.getElementById('buyF');
-  if(!res||!row||!form||!window.fetch) return;
+  var res=document.getElementById('cat-res'), row=document.getElementById('catRow'), form=document.getElementById('catF'), buy=document.getElementById('buyF');
+  if(!res||!row||!form||!window.fetch) return;   // without fetch the tiles are normal links and still work
   var qIn=form.elements.q, state={c:0,q:''}, ctl=null, seq=0, tmo=null;
-  var on=row.querySelector('.chip.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
+  var on=row.querySelector('.sx-cat.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
   function qs(c,q){ var p=[]; if(c) p.push('c='+c); if(q) p.push('q='+encodeURIComponent(q)); return p.join('&'); }
-  /* compact category button + sheet (phones) */
-  var cb=document.getElementById('catBtn'), cm=document.getElementById('catM'), cl=document.getElementById('csList'), cq=document.getElementById('csQ'), cNone=document.getElementById('csNone'), cHide=null;
-  function uid(h,k){ return h.replace(/(ai[0-9a-f]+_\d+[gs])/g,'$1'+k); }   // chips row is hidden on phones: gradients must live in the copy itself, with their own ids
-  function labelBtn(){
-    var a=row.querySelector('.chip.on')||row.firstElementChild; if(!cb||!a) return;
-    var ci=a.querySelector('.ci'), nm=a.querySelector('span:not(.ci)'), n=a.querySelector('em');
-    document.getElementById('cbIc').innerHTML=ci?uid(ci.innerHTML,'b'):'\u25A6';
-    document.getElementById('cbName').textContent=nm?nm.textContent:'All';
-    document.getElementById('cbN').textContent=n?n.textContent:'';
-  }
-  function sheetOpen(){
-    if(!cm) return; if(cHide){ clearTimeout(cHide); cHide=null; }
-    cl.innerHTML='';
-    Array.prototype.forEach.call(row.children,function(a){
-      var b=document.createElement('button'); b.type='button'; b.className='cs-i'+(a.classList.contains('on')?' on':''); b.dataset.c=a.dataset.c; b.innerHTML=uid(a.innerHTML,'s');
-      var nm=a.querySelector('span:not(.ci)'); b.dataset.n=(nm?nm.textContent:'').toLowerCase(); cl.appendChild(b);
-    });
-    cq.value=''; cNone.hidden=true; cm.hidden=false; document.body.classList.add('modal');
-    requestAnimationFrame(function(){ cm.classList.add('show'); });
-  }
-  function sheetClose(){
-    if(!cm||cm.hidden) return; cm.classList.remove('show'); document.body.classList.remove('modal');
-    cHide=setTimeout(function(){ cm.hidden=true; cHide=null; },200);
-  }
-  if(cb&&cm){
-    cb.addEventListener('click',sheetOpen);
-    cm.querySelectorAll('[data-cx]').forEach(function(x){ x.addEventListener('click',sheetClose); });
-    document.addEventListener('keydown',function(e){ if(e.key==='Escape') sheetClose(); });
-    cq.addEventListener('input',function(){
-      var t=cq.value.trim().toLowerCase(), any=false;
-      Array.prototype.forEach.call(cl.children,function(b){ var ok=!t||b.dataset.n.indexOf(t)>-1; b.style.display=ok?'':'none'; if(ok) any=true; });
-      cNone.hidden=any;
-    });
-    cl.addEventListener('click',function(e){
-      var b=e.target.closest('.cs-i'); if(!b) return;
-      var a=row.querySelector('.chip[data-c="'+b.dataset.c+'"]'); sheetClose(); if(a) a.click();   // reuse the chip's own handler
-    });
-    labelBtn();
-  }
   function sync(){
     Array.prototype.forEach.call(row.children,function(a){ a.classList.toggle('on',(parseInt(a.dataset.c,10)||0)===state.c); });
-    labelBtn();
     var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
-    buy.elements.c.value=state.c||''; buy.elements.q.value=state.q;
-    var a=row.querySelector('.chip.on'); if(a&&a.scrollIntoView) a.scrollIntoView({inline:'center',block:'nearest',behavior:'smooth'});
+    if(buy){ buy.elements.c.value=state.c||''; buy.elements.q.value=state.q; }
   }
-  function load(c,q,push){
+  function toResults(){ try{ res.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} }
+  function load(c,q,push,scroll){
     state.c=c; state.q=q; qIn.value=q; sync();
     var s=qs(c,q), url='/dashboard.php'+(s?'?'+s:'');
     if(push!==false) try{ history.pushState({c:c,q:q},'',url); }catch(e){}
     var my=++seq, timedOut=false;
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
-    clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);   // slow / hung request: do a normal page load instead of leaving the list greyed out
+    clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);
     res.classList.add('busy'); res.setAttribute('aria-busy','true');
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
       .then(function(h){
-        if(my!==seq) return;                       // a newer click already replaced this request
+        if(my!==seq) return;
         clearTimeout(tmo); res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy');
+        if(scroll) toResults();
       })
-      .catch(function(e){ if(my!==seq) return; if(e&&e.name==='AbortError'&&!timedOut) return; clearTimeout(tmo); location.href=url; });   // any problem: fall back to a normal page load
+      .catch(function(e){ if(my!==seq) return; if(e&&e.name==='AbortError'&&!timedOut) return; clearTimeout(tmo); location.href=url; });
   }
   row.addEventListener('click',function(e){
-    var a=e.target.closest('.chip'); if(!a||e.ctrlKey||e.metaKey||e.shiftKey||e.button) return;
-    e.preventDefault(); var c=parseInt(a.dataset.c,10)||0; if(c===state.c&&qIn.value.trim()===state.q) return;
-    load(c,qIn.value.trim());
+    var a=e.target.closest('.sx-cat'); if(!a||e.ctrlKey||e.metaKey||e.shiftKey||e.button) return;
+    e.preventDefault(); var c=parseInt(a.dataset.c,10)||0;
+    if(c===state.c&&qIn.value.trim()===state.q){ toResults(); return; }
+    load(c,qIn.value.trim(),true,true);
   });
-  form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim()); });
-  res.addEventListener('click',function(e){ var a=e.target.closest('.res a'); if(!a) return; e.preventDefault(); load(state.c,''); });
+  form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim(),true,true); });
+  res.addEventListener('click',function(e){ var a=e.target.closest('.res a'); if(!a) return; e.preventDefault(); load(state.c,'',true,false); });
   window.addEventListener('popstate',function(){
-    var p=new URLSearchParams(location.search); load(parseInt(p.get('c'),10)||0,(p.get('q')||'').slice(0,80),false);
+    var p=new URLSearchParams(location.search); load(parseInt(p.get('c'),10)||0,(p.get('q')||'').slice(0,80),false,false);
   });
 })();
 </script>
