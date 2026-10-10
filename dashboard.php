@@ -15,23 +15,31 @@ $s = db()->prepare('SELECT COUNT(*) FROM users WHERE referred_by = ?'); $s->exec
 $refCount = (int)$s->fetchColumn();
 $s = db()->prepare('SELECT * FROM deposits WHERE user_id = ? ORDER BY id DESC LIMIT 20'); $s->execute([$u['id']]);
 $deps = $s->fetchAll();
-$scheme = (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) ? $_SERVER['HTTP_X_FORWARDED_PROTO'] : 'http');
+$scheme = !empty($_SERVER['HTTP_X_FORWARDED_PROTO']) ? $_SERVER['HTTP_X_FORWARDED_PROTO'] : 'http';
 $link = $scheme . '://' . $_SERVER['HTTP_HOST'] . '/register.php?ref=' . $u['referral_code'];
 header_html('Dashboard', $u); ?>
-<div class="card"><small><?= e($u['email']) ?></small><div class="big"><?= number_format((float)$u['coins'], 2) ?> coins</div></div>
-<div class="card"><h3>Referral</h3>
-<p>Your code: <b><?= e($u['referral_code']) ?></b> · Referred users: <?= $refCount ?></p>
-<input type="text" readonly value="<?= e($link) ?>" onclick="this.select()"></div>
+<div class="card wallet"><small><?= e($u['email']) ?></small><div class="big"><?= number_format((float)$u['coins'], 2) ?> coins</div><small>Wallet balance</small></div>
+
+<div class="stats">
+  <div class="stat"><span>Referral code</span><b><?= e($u['referral_code']) ?></b></div>
+  <div class="stat"><span>Referred users</span><b><?= $refCount ?></b></div>
+</div>
+
+<div class="card"><h3>Invite &amp; earn</h3>
+<small>Share your link. You get bonus coins when your friend makes their first deposit.</small>
+<div class="row" style="margin-top:10px"><input type="text" id="reflink" readonly value="<?= e($link) ?>"><button type="button" class="btn sm" data-copy="#reflink">Copy</button></div></div>
+
 <div class="card"><h3>Add coins</h3>
 <?php if ($msg): ?><div class="ok"><?= e($msg) ?></div><?php endif; ?>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
 <label>Amount</label><input type="number" name="amount" step="0.01" min="1" required>
-<label>Payment reference / note</label><input type="text" name="note" maxlength="255">
+<label>Payment reference / note</label><input type="text" name="note" maxlength="255" placeholder="Transaction ID or note">
 <button class="btn">Submit deposit request</button></form></div>
+
 <div class="card"><h3>Deposit history</h3>
-<table><tr><th>#</th><th>Amount</th><th>Status</th><th>Date</th></tr>
+<div class="tw"><table><tr><th>#</th><th>Amount</th><th>Status</th><th>Date</th></tr>
 <?php foreach ($deps as $d): ?>
-<tr><td><?= $d['id'] ?></td><td><?= e($d['amount']) ?></td><td><?= e($d['status']) ?></td><td><?= e($d['created_at']) ?></td></tr>
-<?php endforeach; if (!$deps): ?><tr><td colspan="4">No deposits yet.</td></tr><?php endif; ?></table></div>
+<tr><td><?= (int)$d['id'] ?></td><td><?= e($d['amount']) ?></td><td><span class="badge <?= e($d['status']) ?>"><?= e($d['status']) ?></span></td><td><?= e($d['created_at']) ?></td></tr>
+<?php endforeach; if (!$deps): ?><tr><td colspan="4">No deposits yet.</td></tr><?php endif; ?></table></div></div>
 <?php footer_html();
