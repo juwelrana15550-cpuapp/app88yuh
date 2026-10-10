@@ -2,7 +2,7 @@
 session_set_cookie_params(['httponly' => true, 'samesite' => 'Lax', 'secure' => !empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https']);
 session_start();
 
-const SITE_NAME = 'MySite';
+const SITE_NAME = 'Virtual shop';
 
 function db(): PDO {
     static $pdo = null;
@@ -62,25 +62,39 @@ function require_login(): array {
     return $u;
 }
 
-function header_html(string $title, ?array $user = null): void { ?>
+function header_html(string $title, ?array $user = null, string $variant = 'app', bool $admin = false): void { ?>
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($title) ?> - <?= SITE_NAME ?></title>
 <link rel="stylesheet" href="/style.css">
-</head><body>
+</head><body class="<?= e($variant) ?>">
+<?php if ($variant === 'auth'): ?><span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span><?php endif; ?>
 <nav><a class="brand" href="/"><?= SITE_NAME ?></a>
-<div>
-<?php if ($user): ?>
+<div class="links">
+<?php if ($admin): ?>
+  <span class="hide">Admin Panel</span>
+  <form method="post" action="/admin.php" class="inl"><?= csrf_field() ?><button class="link" name="admin_logout" value="1">Logout</button></form>
+<?php elseif ($user): ?>
   <a href="/dashboard.php">Dashboard</a>
-  <form method="post" action="/logout.php" style="display:inline"><?= csrf_field() ?><button class="link">Logout</button></form>
+  <form method="post" action="/logout.php" class="inl"><?= csrf_field() ?><button class="link">Logout</button></form>
 <?php else: ?>
-  <a href="/">Home</a><a href="/login.php">Login</a><a href="/register.php">Register</a>
+  <a href="/">Home</a><a href="/login.php">Login</a><a class="pill" href="/register.php">Register</a>
 <?php endif; ?>
 </div></nav>
-<main>
+<main class="<?= $variant === 'auth' ? 'narrow' : 'wide' ?>">
 <?php }
 
 function footer_html(): void { ?>
-</main></body></html>
+</main>
+<script>
+document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
+  var t=document.querySelector(b.dataset.copy);t.select();
+  try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand('copy')}
+  var o=b.textContent;b.textContent='Copied!';setTimeout(function(){b.textContent=o},1500);});});
+document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
+  var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
+  b.textContent=i.type==='password'?'Show':'Hide';});});
+</script>
+</body></html>
 <?php }
