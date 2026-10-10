@@ -434,7 +434,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
       </form>
     </div>
 <?php }; ?>
@@ -525,67 +525,45 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
-<?php ob_start(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it sits above the tab bar ?>
+<?php buy_modal_html($balance, $c, $q); ?>
 <?php }
 
-/** "Buy Now" confirmation sheet: quantity stepper, live total, wallet check. Opened by buttons carrying data-buy. */
-function buy_modal_html(float $balance, int $c, string $q): void { ?>
-<div class="bx" id="buyM" aria-hidden="true">
-  <div class="bx-bd" data-x></div>
-  <form method="post" action="/dashboard.php" class="bx-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off"><?= csrf_field() ?>
-    <input type="hidden" name="product_id" id="bmId" value="">
-    <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-    <div class="bx-h">
-      <span class="bx-ic" id="bmIc"></span>
-      <div class="bx-t"><b id="bmT">Product</b><small id="bmSub">Review your order</small></div>
-      <button type="button" class="bx-x" data-x aria-label="Close">&times;</button>
-    </div>
-    <div class="bx-rows">
-      <div class="bx-row"><span>Price</span><b id="bmP"></b></div>
-      <div class="bx-row"><span>Available</span><b id="bmA"></b></div>
-    </div>
-    <label class="bx-l" for="bmQ">Quantity</label>
-    <div class="bx-qty">
-      <button type="button" id="bmMinus" aria-label="Decrease quantity">&minus;</button>
-      <input type="number" id="bmQ" name="qty" value="1" min="1" step="1" inputmode="numeric" required>
-      <button type="button" id="bmPlus" aria-label="Increase quantity">+</button>
-    </div>
-    <div class="bx-qc" id="bmChips"></div>
-    <div class="bx-tot"><span>Total</span><b id="bmTot"></b></div>
-    <div class="bx-bal"><span>Wallet balance</span><b><?= e(money($balance)) ?></b></div>
-    <div class="bx-msg" id="bmMsg" role="alert" hidden></div>
-    <div class="bx-f">
-      <button type="button" class="bx-btn bx-no" data-x>Cancel</button>
-      <button type="submit" class="bx-btn bx-ok" id="bmGo">Confirm Purchase</button>
-    </div>
-  </form>
-</div>
+/** "Buy Now": the dialog is built by JS on the first click and attached to <body> (always above everything, no server-side hand-off needed). */
+function buy_modal_html(float $balance, int $c, string $q): void {
+    csrf_field();   // makes sure the session has a CSRF token
+    $cfg = ['csrf' => (string)($_SESSION['csrf'] ?? ''), 'bal' => round($balance, 2), 'c' => $c ?: '', 'q' => $q]; ?>
 <script>
 (function(){
-  var M=document.getElementById('buyM');
-  // Registered first, in the capture phase (nothing else on the page can swallow the click). If the dialog cannot open for any
-  // reason, a plain confirm box is shown and the card's own form buys 1 item - so Buy Now never ends up dead.
-  document.addEventListener('click',function(e){
-    var b=e.target&&e.target.closest?e.target.closest('[data-buy]'):null; if(!b||b.disabled) return;
-    e.preventDefault();
-    try{ if(!M) throw new Error('buy dialog missing'); open(b); }
-    catch(err){
-      if(window.console) console.error(err);
-      if(window.confirm('Buy 1 \u00D7 '+(b.dataset.name||'this product')+'?') && b.form){ b.disabled=true; b.form.submit(); }
-    }
-  },true);
-  if(!M) return;
-  var BAL=<?= json_encode(round($balance, 2)) ?>, CAP=10000;
+  var SX=window.SX=<?= json_encode($cfg, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+  var CAP=10000, M=null, F,Q,go,msg, cur=null, last=null, hideT=null;
   var $=function(i){return document.getElementById(i)};
-  var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null, hideT=null;
   var fmt=function(n){return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
+  var TPL='<div class="bx-bd" data-x></div>'
+   +'<form method="post" action="/dashboard.php" class="bx-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off">'
+   +'<input type="hidden" name="csrf" value=""><input type="hidden" name="product_id" id="bmId" value=""><input type="hidden" name="c" value=""><input type="hidden" name="q" value="">'
+   +'<div class="bx-h"><span class="bx-ic" id="bmIc"></span><div class="bx-t"><b id="bmT">Product</b><small id="bmSub">Review your order</small></div><button type="button" class="bx-x" data-x aria-label="Close">&times;</button></div>'
+   +'<div class="bx-rows"><div class="bx-row"><span>Price</span><b id="bmP"></b></div><div class="bx-row"><span>Available</span><b id="bmA"></b></div></div>'
+   +'<label class="bx-l" for="bmQ">Quantity</label>'
+   +'<div class="bx-qty"><button type="button" id="bmMinus" aria-label="Decrease quantity">&minus;</button><input type="number" id="bmQ" name="qty" value="1" min="1" step="1" inputmode="numeric" required><button type="button" id="bmPlus" aria-label="Increase quantity">+</button></div>'
+   +'<div class="bx-qc" id="bmChips"></div>'
+   +'<div class="bx-tot"><span>Total</span><b id="bmTot"></b></div>'
+   +'<div class="bx-bal"><span>Wallet balance</span><b id="bmBal"></b></div>'
+   +'<div class="bx-msg" id="bmMsg" role="alert" hidden></div>'
+   +'<div class="bx-f"><button type="button" class="bx-btn bx-no" data-x>Cancel</button><button type="submit" class="bx-btn bx-ok" id="bmGo">Confirm Purchase</button></div>'
+   +'</form>';
+  function toast(t){
+    var d=document.createElement('div');
+    d.style.cssText='position:fixed;left:12px;right:12px;top:12px;z-index:4000;background:#7f1d1d;color:#fff;padding:12px 14px;border-radius:12px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.35)';
+    d.textContent=t; document.body.appendChild(d); setTimeout(function(){ if(d.parentNode) d.parentNode.removeChild(d); },9000);
+  }
+  window.addEventListener('error',function(e){ toast('Script error: '+(e&&e.message?e.message:'unknown')); });
   function maxQty(){ return cur.stock===null ? CAP : Math.max(0, Math.min(cur.stock, CAP)); }
   function showMsg(t,link){
     msg.hidden=!t; msg.innerHTML='';
     if(t){ msg.appendChild(document.createTextNode(t)); if(link){ var a=document.createElement('a'); a.href='/deposits.php'; a.textContent=' Add funds'; msg.appendChild(a); } }
   }
   function render(){
-    var raw=parseInt(Q.value,10), q=isNaN(raw)?0:raw, mx=maxQty();
+    var raw=parseInt(Q.value,10), q=isNaN(raw)?0:raw, mx=maxQty(), BAL=SX.bal;
     var cents=Math.round(cur.price*100)*Math.max(q,0), total=cents/100;
     $('bmTot').textContent=fmt(total);
     $('bmMinus').disabled = q<=1;
@@ -605,17 +583,43 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     b.addEventListener('click',function(){ Q.value=n; render(); }); box.appendChild(b);
   }
   function chips(){
-    var box=$('bmChips'), mx=maxQty(); box.innerHTML='';
+    var box=$('bmChips'), mx=maxQty(), BAL=SX.bal; box.innerHTML='';
     [1,5,10,50,100].forEach(function(n){ if(n<=mx) addChip(box,n,String(n)); });
     var afford=cur.price>0?Math.floor(Math.round(BAL*100)/Math.round(cur.price*100)):0, best=Math.min(mx,afford);
     if(best>1 && [1,5,10,50,100].indexOf(best)<0) addChip(box,best,'Max ('+best.toLocaleString('en-US')+')');
   }
+  function close(){
+    M.classList.remove('show'); M.setAttribute('aria-hidden','true');
+    document.documentElement.style.overflow='';
+    if(hideT) clearTimeout(hideT);
+    hideT=setTimeout(function(){ M.classList.remove('open'); hideT=null; }, 230);
+  }
+  function build(){
+    if(M) return;
+    var d=document.createElement('div'); d.className='bx'; d.id='buyM'; d.setAttribute('aria-hidden','true'); d.innerHTML=TPL;
+    document.body.appendChild(d);
+    M=d; F=$('buyF'); Q=$('bmQ'); go=$('bmGo'); msg=$('bmMsg');
+    Array.prototype.forEach.call(M.querySelectorAll('[data-x]'),function(x){ x.addEventListener('click',close); });
+    $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
+    $('bmPlus').addEventListener('click',function(){ Q.value=Math.min(maxQty(),(parseInt(Q.value,10)||0)+1); render(); });
+    Q.addEventListener('input',render);
+    F.addEventListener('submit',function(e){
+      if(!cur){ e.preventDefault(); return; }
+      render(); if(go.disabled){ e.preventDefault(); return; }
+      go.disabled=true; go.textContent='Processing\u2026';   // stops double-clicks from buying twice
+    });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape' && M.classList.contains('open')) close(); });
+    window.addEventListener('pageshow',function(ev){
+      if(ev.persisted){ M.classList.remove('open','show'); document.documentElement.style.overflow=''; go.disabled=false; go.textContent='Confirm Purchase'; }
+    });
+  }
   function open(btn){
     last=btn;
-    cur={id:btn.dataset.id,name:btn.dataset.name,price:parseFloat(btn.dataset.price)||0,unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
+    cur={id:btn.dataset.id,name:btn.dataset.name||'',price:parseFloat(btn.dataset.price)||0,unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
     cur.auto=btn.dataset.auto==='1';
     if(hideT){ clearTimeout(hideT); hideT=null; }
-    $('bmId').value=cur.id; $('bmT').textContent=cur.name;
+    F.elements.csrf.value=SX.csrf; F.elements.c.value=SX.c||''; F.elements.q.value=SX.q||'';
+    $('bmId').value=cur.id; $('bmT').textContent=cur.name; $('bmBal').textContent=fmt(SX.bal);
     $('bmSub').textContent=cur.auto?'\u26A1 Instant delivery after purchase':'Review your order';
     $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'');
     $('bmA').textContent=cur.stock===null?'In stock':cur.stock.toLocaleString('en-US')+' pcs';
@@ -623,36 +627,26 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     Q.value=1; Q.max=maxQty()||''; chips(); go.textContent='Confirm Purchase'; render();
     M.classList.add('open'); M.setAttribute('aria-hidden','false');
     document.documentElement.style.overflow='hidden';
-    void M.offsetWidth;                       // force a reflow so the slide-up animation runs
+    void M.offsetWidth;                       // force a reflow so the animation runs
     M.classList.add('show');
     if(!(window.matchMedia&&matchMedia('(pointer:coarse)').matches)) setTimeout(function(){ try{ Q.focus({preventScroll:true}); Q.select(); }catch(e){} }, 150);
   }
-  function close(){
-    M.classList.remove('show'); M.setAttribute('aria-hidden','true');
-    document.documentElement.style.overflow='';
-    if(hideT) clearTimeout(hideT);
-    hideT=setTimeout(function(){ M.classList.remove('open'); hideT=null; }, 230);
-    if(last){ try{ last.focus({preventScroll:true}); }catch(e){} }
-  }
-  M.querySelectorAll('[data-x]').forEach(function(x){ x.addEventListener('click',close); });
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape' && M.classList.contains('open')) close(); });
-  $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
-  $('bmPlus').addEventListener('click',function(){ Q.value=Math.min(maxQty(),(parseInt(Q.value,10)||0)+1); render(); });
-  Q.addEventListener('input',render);
-  F.addEventListener('submit',function(e){
-    if(!cur){ e.preventDefault(); return; }
-    render(); if(go.disabled){ e.preventDefault(); return; }
-    go.disabled=true; go.textContent='Processing\u2026';   // stops double-clicks from buying twice
-  });
-  window.addEventListener('pageshow',function(ev){
-    if(ev.persisted){ M.classList.remove('open','show'); document.documentElement.style.overflow=''; go.disabled=false; go.textContent='Confirm Purchase'; }
-  });
+  // Called by the onclick of every Buy Now button. Returning false stops the button's own form from posting.
+  window.sxBuy=function(b){
+    if(b.disabled) return false;
+    try{ build(); open(b); return false; }
+    catch(err){
+      toast('Buy Now error: '+(err&&err.message?err.message:err));
+      if(window.console) console.error(err);
+      return window.confirm('Buy 1 \u00D7 '+(b.dataset.name||'this product')+'?');   // OK = the card form buys 1 item
+    }
+  };
 })();
 </script>
 <script>
 /* Category tiles + search: swap the product list in place (no full page load) */
 (function(){
-  var res=document.getElementById('cat-res'), row=document.getElementById('catRow'), form=document.getElementById('catF'), buy=document.getElementById('buyF');
+  var res=document.getElementById('cat-res'), row=document.getElementById('catRow'), form=document.getElementById('catF'), buy=null;
   if(!res||!row||!form||!window.fetch) return;   // without fetch the tiles are normal links and still work
   var qIn=form.elements.q, state={c:0,q:''}, ctl=null, seq=0, tmo=null;
   var on=row.querySelector('.sx-cat.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
@@ -660,7 +654,7 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
   function sync(){
     Array.prototype.forEach.call(row.children,function(a){ a.classList.toggle('on',(parseInt(a.dataset.c,10)||0)===state.c); });
     var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
-    if(buy){ buy.elements.c.value=state.c||''; buy.elements.q.value=state.q; }
+    if(window.SX){ SX.c=state.c||''; SX.q=state.q; }
   }
   function toResults(){ try{ res.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} }
   function load(c,q,push,scroll){
