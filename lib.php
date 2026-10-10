@@ -7,11 +7,20 @@ const SITE_NAME = 'MySite';
 function db(): PDO {
     static $pdo = null;
     if ($pdo) return $pdo;
-    $h = getenv('MYSQLHOST') ?: '127.0.0.1';
-    $p = getenv('MYSQLPORT') ?: '3306';
-    $n = getenv('MYSQLDATABASE') ?: 'railway';
-    $u = getenv('MYSQLUSER') ?: 'root';
-    $w = getenv('MYSQLPASSWORD') ?: '';
+    $url = getenv('MYSQL_PUBLIC_URL') ?: getenv('MYSQL_URL');
+    if ($url && ($c = parse_url($url)) && !empty($c['host'])) {
+        $h = $c['host'];
+        $p = (string)($c['port'] ?? 3306);
+        $n = ltrim($c['path'] ?? '/railway', '/') ?: 'railway';
+        $u = urldecode($c['user'] ?? 'root');
+        $w = urldecode($c['pass'] ?? '');
+    } else {
+        $h = getenv('MYSQLHOST') ?: '127.0.0.1';
+        $p = getenv('MYSQLPORT') ?: '3306';
+        $n = getenv('MYSQLDATABASE') ?: 'railway';
+        $u = getenv('MYSQLUSER') ?: 'root';
+        $w = getenv('MYSQLPASSWORD') ?: '';
+    }
     $pdo = new PDO("mysql:host=$h;port=$p;dbname=$n;charset=utf8mb4", $u, $w, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
