@@ -368,13 +368,12 @@ function user_start(string $title, array $u, string $active): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
     $GLOBALS['__active'] = $active;
     page_head($title, 'app'); ?>
-<div class="top">
-<a class="tp-prof<?= $active === 'profile' ? ' on' : '' ?>" href="/profile.php" aria-label="Profile" title="Profile"><?= icon('user') ?></a>
+<div class="top"><button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
+<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><span class="bn"><?= e(site_name()) ?></span></a>
 <?php if (usd_rate() > 0): $curNow = cur_code(); ?>
 <div class="cur" role="group" aria-label="Currency"><a href="?cur=usd" data-cur="usd" class="<?= $curNow === 'usd' ? 'on' : '' ?>">$</a><a href="?cur=bdt" data-cur="bdt" class="<?= $curNow === 'bdt' ? 'on' : '' ?>">BDT</a></div>
 <?php endif; ?>
-<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><span class="bn"><?= e(site_name()) ?></span></a>
-<button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button></div>
+<a class="tp-prof<?= $active === 'profile' ? ' on' : '' ?>" href="/profile.php" aria-label="Profile" title="Profile"><?= icon('user') ?></a></div>
 <div class="shade" onclick="document.body.classList.remove('menu')"></div>
 <aside class="side sd" aria-label="Account menu">
   <div class="sd-head">

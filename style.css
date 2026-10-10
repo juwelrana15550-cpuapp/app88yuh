@@ -438,7 +438,7 @@ body.modal{overflow:hidden}
 @media(min-width:900px){.side.sd{width:290px;max-width:290px}.sd-x{display:none}}
 body.menu .fab{opacity:0;pointer-events:none}
 
-/* ===== Top bar: profile icon + currency switch (left), brand, menu button (right) ===== */
+/* ===== Top bar: menu button + brand (left), currency switch + profile icon (right) ===== */
 .top{gap:10px}
 .tp-prof{width:38px;height:38px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:12px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);color:#fff}
 .tp-prof svg.i{width:20px;height:20px}
@@ -448,5 +448,7 @@ body.menu .fab{opacity:0;pointer-events:none}
 .cur a.on{background:#fff;color:#4338ca;box-shadow:0 4px 10px -4px rgba(0,0,0,.4)}
 .top .brand{min-width:0}
 .top .brand .bn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.top .burger{margin-left:auto;flex:none}
+.top .burger{flex:none}
+.top .brand{flex:1}
+.top .cur{margin-left:auto}
 @media(max-width:380px){.top{gap:8px;padding-left:12px;padding-right:12px}.cur a{min-width:30px;padding:7px 8px}}
