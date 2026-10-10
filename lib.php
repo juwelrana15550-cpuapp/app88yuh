@@ -4,6 +4,7 @@ $__https = (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && stripos($_SERVER['HTTP
 ini_set('session.gc_maxlifetime', '2592000');
 session_set_cookie_params(['lifetime' => 2592000, 'httponly' => true, 'samesite' => 'Lax', 'secure' => $__https]);
 session_start();
+require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
 const SCHEMA_VERSION = '4';
@@ -350,6 +351,7 @@ function user_end(): void {
 
 /** Home catalog: search box, category chips and product cards grouped by category. */
 function catalog_html(array $cats, array $rows, int $c, string $q, int $total): void {
+    echo app_icon_sprite();
     $url = function (array $x): string {
         $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
         return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
@@ -358,7 +360,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total): 
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
     $card = function (array $p) use ($byId, $c, $q) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
-        $icon = $k['icon'] ?? '📦';
+        $icon = $k['icon'] ?? '';
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
         if ($stock === null) { $sl = 'In Stock'; $sc = ''; }
         elseif ($stock <= 0) { $sl = 'Out of stock'; $sc = 'out'; }
@@ -367,7 +369,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total): 
         $out = $stock !== null && $stock <= 0; ?>
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
-      <div class="pc-h"><span class="pc-ic"><?= e($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
+      <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
       <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
@@ -384,12 +386,12 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total): 
 <div class="chips-row">
   <a class="chip <?= $c ? '' : 'on' ?>" href="<?= e($url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
   <?php foreach ($cats as $k): ?>
-  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" href="<?= e($url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= e($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
+  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" href="<?= e($url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= cat_icon($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
   <?php endforeach; ?>
 </div>
 <?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e($url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
 <?php foreach ($groups as $cid => $list): $k = $byId[$cid] ?? null; ?>
-  <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= e($k['icon'] ?? '📦') ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
+  <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= cat_icon($k['icon'] ?? '') ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
   <div class="catalog"><?php foreach ($list as $p) $card($p); ?></div>
 <?php endforeach; ?>
 <?php if (!$rows): ?><div class="card empty"><div class="ei">🔎</div><b>No products found</b><p><?= $q !== '' ? 'Try a different search or category.' : 'Products will appear here once they are added.' ?></p></div><?php endif; ?>
