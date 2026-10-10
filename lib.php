@@ -457,14 +457,12 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
     echo app_icon_sprite(); ?>
 <style>
 /* Category tiles - self-contained, does not depend on style.css */
-.sx-cats{display:flex;flex-wrap:nowrap;gap:8px;margin:10px -16px 12px;padding:4px 16px 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity;scroll-padding-left:16px;overscroll-behavior-x:contain}
-.sx-cats::-webkit-scrollbar{display:none}
-.sx-cat{flex:none;scroll-snap-align:start}
-@media(min-width:700px){.sx-cats{flex-wrap:wrap;overflow:visible;margin:12px 0 14px;padding:0}}
+.sx-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:8px;margin:12px 0 14px;padding:0}
+@media(min-width:700px){.sx-cats{display:flex;flex-wrap:wrap}}
 .sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s,border-color .15s,color .15s,box-shadow .15s,transform .1s}
 .sx-cat:hover{border-color:#c7d2fe;color:#3730a3}
 .sx-cat:active{transform:scale(.97)}
-.sx-cat.sx-all{padding:0 15px}
+.sx-cat.sx-all{padding:0 15px;justify-content:center}
 .sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#f1f5f9;font-size:14px;line-height:1;overflow:hidden}
 .sx-cat .sx-ci svg{width:16px;height:16px;display:block}
 .sx-cat b{min-width:0;max-width:200px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
