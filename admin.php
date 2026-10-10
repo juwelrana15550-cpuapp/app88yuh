@@ -2,13 +2,40 @@
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = '';
+$err = ''; $setErr = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (isset($_POST['admin_logout'])) { unset($_SESSION['admin']); header('Location: /admin.php'); exit; }
     if (isset($_POST['admin_pw'])) {
         if (hash_equals($adminPw, $_POST['admin_pw'])) { session_regenerate_id(true); $_SESSION['admin'] = true; header('Location: /admin.php'); exit; }
         sleep(1); $err = 'Wrong password.';
+    } elseif (!empty($_SESSION['admin']) && isset($_POST['save_settings'])) {
+        $name = trim($_POST['site_name'] ?? '');
+        if ($name === '' || mb_strlen($name) > 40) {
+            $setErr = 'Site name is required (max 40 characters).';
+        } else {
+            save_setting('site_name', $name);
+            save_setting('tagline', mb_substr(trim($_POST['tagline'] ?? ''), 0, 120));
+            save_setting('subtitle', mb_substr(trim($_POST['subtitle'] ?? ''), 0, 300));
+            $sup = trim($_POST['support_url'] ?? '');
+            save_setting('support_url', preg_match('#^https?://#i', $sup) ? $sup : '');
+            foreach (['logo' => 1048576, 'banner' => 2097152] as $k => $max) {
+                if (!empty($_POST['remove_' . $k])) { db()->prepare('DELETE FROM media WHERE k = ?')->execute([$k]); continue; }
+                $f = $_FILES[$k] ?? null;
+                if (!$f || $f['error'] === UPLOAD_ERR_NO_FILE) continue;
+                if ($f['error'] !== UPLOAD_ERR_OK || $f['size'] > $max) { $setErr = ucfirst($k) . ' is too large (max ' . ($max / 1048576) . ' MB).'; continue; }
+                $info = @getimagesize($f['tmp_name']);
+                if (!$info || !in_array($info['mime'], ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) {
+                    $setErr = ucfirst($k) . ' must be a PNG, JPG, WEBP or GIF image.'; continue;
+                }
+                $st = db()->prepare('REPLACE INTO media (k, mime, data) VALUES (?,?,?)');
+                $st->bindValue(1, $k);
+                $st->bindValue(2, $info['mime']);
+                $st->bindValue(3, file_get_contents($f['tmp_name']), PDO::PARAM_LOB);
+                $st->execute();
+            }
+            if (!$setErr) { header('Location: /admin.php?saved=1'); exit; }
+        }
     } elseif (!empty($_SESSION['admin']) && isset($_POST['id'], $_POST['action'])) {
         $pdo = db(); $pdo->beginTransaction();
         $s = $pdo->prepare("SELECT * FROM deposits WHERE id = ? AND status = 'pending' FOR UPDATE");
@@ -36,7 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 if (empty($_SESSION['admin'])) {
     header_html('Admin Login', null, 'auth'); ?>
 <div class="card">
-<div class="logo">🛡️</div>
+<?= logo_html('🛡️') ?>
 <h2>Admin Panel</h2>
 <p class="sub">Enter the admin password to continue</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
@@ -62,6 +89,23 @@ header_html('Admin', null, 'app', true); ?>
   <div class="stat"><span>Coins in wallets</span><b><?= number_format($coins, 2) ?></b></div>
   <div class="stat"><span>Total approved</span><b><?= number_format($approved, 2) ?></b></div>
 </div>
+
+<div class="card"><h3>Site settings</h3>
+<?php if (!empty($_GET['saved'])): ?><div class="ok">Settings saved.</div><?php endif; ?>
+<?php if ($setErr): ?><div class="err"><?= e($setErr) ?></div><?php endif; ?>
+<form method="post" enctype="multipart/form-data"><?= csrf_field() ?>
+<label>Site name</label><input type="text" name="site_name" maxlength="40" required value="<?= e(site_name()) ?>">
+<label>Headline (homepage)</label><input type="text" name="tagline" maxlength="120" value="<?= e(setting('tagline')) ?>" placeholder="Shown big on the homepage">
+<label>Sub-headline</label><input type="text" name="subtitle" maxlength="300" value="<?= e(setting('subtitle')) ?>" placeholder="One or two lines under the headline">
+<label>Support link (optional)</label><input type="text" name="support_url" value="<?= e(setting('support_url')) ?>" placeholder="https://t.me/your_username">
+<label>Logo <small>(PNG/JPG/WEBP, up to 1 MB, square works best)</small></label>
+<input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif">
+<?php if ($lg = media_url('logo')): ?><img class="preview" src="<?= e($lg) ?>" alt="Logo"><label class="rm"><input type="checkbox" name="remove_logo" value="1"> Remove logo</label><?php endif; ?>
+<label>Homepage banner <small>(PNG/JPG/WEBP, up to 2 MB, wide image)</small></label>
+<input type="file" name="banner" accept="image/png,image/jpeg,image/webp,image/gif">
+<?php if ($bn = media_url('banner')): ?><img class="preview" src="<?= e($bn) ?>" alt="Banner"><label class="rm"><input type="checkbox" name="remove_banner" value="1"> Remove banner</label><?php endif; ?>
+<button class="btn" name="save_settings" value="1">Save settings</button>
+</form></div>
 
 <div class="card"><h3>Pending deposits</h3>
 <div class="tw"><table><tr><th>User</th><th>Amount</th><th>Note</th><th>Date</th><th></th></tr>
