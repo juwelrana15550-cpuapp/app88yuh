@@ -1,0 +1,16 @@
+:root{--c:#7b1040;--bg:#faf7f8;--t:#222}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--t)}
+nav{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:var(--c)}
+nav a,nav .link{color:#fff;text-decoration:none;margin-left:16px;background:none;border:0;font:inherit;cursor:pointer}
+nav .brand{font-weight:700;font-size:1.2rem;margin:0}
+main{max-width:640px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:10px;padding:22px;box-shadow:0 1px 6px #0001;margin-bottom:18px}
+label{display:block;margin:12px 0 4px;font-weight:600}
+input[type=email],input[type=password],input[type=text],input[type=number]{width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font:inherit}
+small{color:#666}
+button.btn{margin-top:16px;width:100%;padding:11px;background:var(--c);color:#fff;border:0;border-radius:6px;font:inherit;cursor:pointer}
+.err{background:#fde8ea;color:#a1122a;padding:10px;border-radius:6px;margin-bottom:12px}
+.ok{background:#e6f6ea;color:#17692e;padding:10px;border-radius:6px;margin-bottom:12px}
+table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #eee;text-align:left}
+.big{font-size:2rem;font-weight:700;color:var(--c)}
