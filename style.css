@@ -1,61 +1,52 @@
-:root{--a:#6d28d9;--b:#db2777;--c:#2563eb;--ink:#1e293b;--mut:#64748b}
-*{box-sizing:border-box;margin:0}
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);min-height:100vh;overflow-x:hidden}
-a{color:var(--a);text-decoration:none}
-body.auth{background:linear-gradient(120deg,var(--a),var(--b),var(--c),var(--a));background-size:300% 300%;animation:flow 12s ease infinite;position:relative}
-body.app{background:linear-gradient(180deg,#ede9fe 0,#f1f5f9 260px)}
-@keyframes flow{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}
-.orb{position:fixed;border-radius:50%;background:#fff;opacity:.22;animation:float 9s ease-in-out infinite;pointer-events:none}
-.o1{width:220px;height:220px;top:10%;left:-60px}
-.o2{width:140px;height:140px;bottom:10%;right:6%;animation-delay:-3s}
-.o3{width:90px;height:90px;top:28%;right:16%;animation-delay:-6s}
-@keyframes float{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-40px) scale(1.08)}}
-nav{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:linear-gradient(90deg,var(--a),var(--b));color:#fff;position:relative;z-index:5}
-nav .brand{color:#fff;font-weight:800;font-size:1.2rem}
-nav .links{display:flex;align-items:center;gap:14px}
-nav .links a,nav .link,nav .links span{color:#fff;font-size:.93rem;background:none;border:0;font-family:inherit;cursor:pointer}
-nav .links .pill{background:#fff;color:var(--a);padding:7px 16px;border-radius:99px;font-weight:600}
-.inl{display:inline}
-main{margin:0 auto;padding:24px 16px 50px;position:relative;z-index:2}
-main.narrow{max-width:440px;padding-top:50px}
-main.wide{max-width:900px}
-.card{background:#fff;border-radius:18px;padding:24px;box-shadow:0 6px 24px #0f172a14;margin-bottom:18px;animation:up .6s both}
-body.auth .card{background:rgba(255,255,255,.96);box-shadow:0 20px 50px #0004}
-@keyframes up{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
-.logo{width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,var(--a),var(--b));color:#fff;font-size:1.6rem;display:flex;align-items:center;justify-content:center;margin:0 auto 12px}
-h1,h2{text-align:center;margin-bottom:4px}
-h3{margin-bottom:12px}
-.sub{text-align:center;color:var(--mut);margin-bottom:18px;font-size:.94rem}
-label{display:block;margin:14px 0 5px;font-weight:600;font-size:.92rem}
-input[type=email],input[type=password],input[type=text],input[type=number]{width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font:inherit;transition:border .2s,box-shadow .2s;background:#fff}
-input:focus{outline:0;border-color:var(--a);box-shadow:0 0 0 4px #6d28d91f}
-.pw{position:relative}
-.pw button{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--a);font-weight:600;cursor:pointer;font-size:.85rem}
-small{color:var(--mut);font-size:.82rem}
-.chk{display:flex;gap:8px;align-items:flex-start;font-weight:400;font-size:.88rem;margin-top:14px}
-.chk input{margin-top:3px}
-.btn{display:block;width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:linear-gradient(90deg,var(--a),var(--b));color:#fff;font:inherit;font-weight:700;cursor:pointer;transition:transform .2s,box-shadow .2s}
-.btn:hover{transform:translateY(-2px);box-shadow:0 10px 22px #6d28d94d}
-.btn.sm{display:inline-block;width:auto;margin:0;padding:7px 14px;font-size:.85rem}
-.btn.red{background:linear-gradient(90deg,#ef4444,#be123c)}
-.btn.ghost{background:#eef2ff;color:var(--a)}
-.alt{text-align:center;margin-top:16px;font-size:.92rem;color:var(--mut)}
-.err{background:#fee2e2;color:#b91c1c;padding:11px 14px;border-radius:10px;margin-bottom:12px;font-size:.92rem}
-.ok{background:#dcfce7;color:#166534;padding:11px 14px;border-radius:10px;margin-bottom:12px;font-size:.92rem}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:18px}
-.stat{background:#fff;border-radius:16px;padding:18px;box-shadow:0 6px 24px #0f172a14;animation:up .6s both;border-top:4px solid var(--a)}
-.stat:nth-child(2){border-color:var(--b)}.stat:nth-child(3){border-color:var(--c)}.stat:nth-child(4){border-color:#16a34a}
-.stat span{display:block;color:var(--mut);font-size:.82rem}
-.stat b{font-size:1.6rem;background:linear-gradient(90deg,var(--a),var(--b));-webkit-background-clip:text;background-clip:text;color:transparent}
-.wallet{background:linear-gradient(120deg,var(--a),var(--b),var(--c));background-size:200% 200%;animation:flow 8s ease infinite;color:#fff}
-.wallet small{color:#ffffffcc}
-.wallet .big{font-size:2.4rem;font-weight:800;margin-top:4px}
-.row{display:flex;gap:8px}.row input{flex:1}
-.tw{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:.9rem;min-width:420px}
-th{color:var(--mut);font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
-td,th{padding:10px 8px;border-bottom:1px solid #f1f5f9;text-align:left;white-space:nowrap}
-.badge{padding:3px 10px;border-radius:99px;font-size:.78rem;font-weight:600}
-.pending{background:#fef3c7;color:#92400e}.approved{background:#dcfce7;color:#166534}.rejected{background:#fee2e2;color:#b91c1c}
-.acts{display:flex;gap:6px}
-@media(max-width:600px){nav .links .hide{display:none}}
+<?php require __DIR__ . '/lib.php';
+if (current_user()) { header('Location: /dashboard.php'); exit; }
+$err = ''; $ref = trim($_GET['ref'] ?? '');
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $email = strtolower(trim($_POST['email'] ?? ''));
+    $pw = $_POST['password'] ?? ''; $pw2 = $_POST['confirm'] ?? '';
+    $ref = trim($_POST['referral'] ?? '');
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) $err = 'Invalid email address.';
+    elseif (strlen($pw) < 8) $err = 'Password must be at least 8 characters.';
+    elseif ($pw !== $pw2) $err = 'Passwords do not match.';
+    elseif (empty($_POST['terms'])) $err = 'You must accept the Terms of Service.';
+    else {
+        $referrer = null;
+        if ($ref !== '') {
+            $s = db()->prepare('SELECT id FROM users WHERE referral_code = ?'); $s->execute([$ref]);
+            $referrer = $s->fetchColumn() ?: null;
+        }
+        try {
+            $s = db()->prepare('INSERT INTO users (email, password_hash, referral_code, referred_by) VALUES (?,?,?,?)');
+            $s->execute([$email, password_hash($pw, PASSWORD_DEFAULT), strtoupper(bin2hex(random_bytes(4))), $referrer]);
+            session_regenerate_id(true);
+            $_SESSION['uid'] = (int)db()->lastInsertId();
+            header('Location: /dashboard.php'); exit;
+        } catch (PDOException $ex) {
+            error_log('REGISTER ERROR: ' . $ex->getMessage());
+            $err = $ex->getCode() === '23000' ? 'This email is already registered.' : 'Something went wrong. Try again.';
+        }
+    }
+}
+header_html('Register', null, 'auth'); ?>
+<div class="card">
+<?= logo_html('✨') ?>
+<h2>Create Account</h2>
+<p class="sub">Join in less than a minute</p>
+<?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
+<form method="post"><?= csrf_field() ?>
+<label>Email Address</label><input type="email" name="email" required placeholder="you@example.com" value="<?= e($_POST['email'] ?? '') ?>">
+<label>Password</label>
+<div class="pw"><input type="password" id="p1" name="password" required minlength="8"><button type="button" data-toggle="#p1">Show</button></div>
+<small>Must be at least 8 characters</small>
+<label>Confirm Password</label>
+<div class="pw"><input type="password" id="p2" name="confirm" required><button type="button" data-toggle="#p2">Show</button></div>
+<label>Referral Code (Optional)</label><input type="text" name="referral" value="<?= e($ref) ?>">
+<small>Get bonus coins when your referrer makes their first deposit!</small>
+<label class="chk"><input type="checkbox" name="terms" value="1"> <span>I agree to the Terms of Service and Privacy Policy</span></label>
+<button class="btn">Register</button>
+</form>
+<p class="alt">Already have an account? <a href="/login.php">Login</a></p>
+</div>
+<?php footer_html();
+  
