@@ -186,7 +186,10 @@ function icon(string $n): string {
         'phone'   => '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>',
         'chat'    => '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/>',
         'plus'    => '<path d="M5 12h14"/><path d="M12 5v14"/>',
-        'bag'     => '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
+        'home'    => '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+        'history' => '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+        'mail'    => '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/><rect x="2" y="4" width="20" height="16" rx="2"/>',
+        'bag'     =>'<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
     ];
     return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . ($p[$n] ?? '') . '</svg>';
 }
@@ -267,6 +270,7 @@ function user_start(string $title, array $u, string $active): void {
     ];
     $name = ucfirst(strstr($u['email'], '@', true) ?: $u['email']);
     $lg = media_url('logo');
+    $GLOBALS['__active'] = $active;
     page_head($title, 'app'); ?>
 <div class="top"><button class="burger" type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
 <a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><?= e(site_name()) ?></a></div>
@@ -291,8 +295,22 @@ function user_start(string $title, array $u, string $active): void {
 
 function user_end(): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
-    echo "</main>\n"; // the support button must sit outside <main>, otherwise the menu overlay covers it
-    if ($tg || $wa): ?>
+    echo "</main>\n"; // the tab bar and support button must sit outside <main>, otherwise the menu overlay covers them
+    $act = $GLOBALS['__active'] ?? '';
+    $tabs = [
+        'dashboard'    => ['/dashboard.php', 'Home', 'home'],
+        'deposits'     => ['/deposits.php', 'Deposit', 'coins'],
+        'orders'       => ['/orders.php', 'Orders', 'cart'],
+        'referrals'    => ['/referrals.php', 'Referrals', 'users'],
+        'transactions' => ['/transactions.php', 'History', 'history'],
+        'otp'          => ['/otp.php', 'Gmail', 'mail'],
+    ]; ?>
+<nav class="tabbar" aria-label="Quick navigation">
+<?php foreach ($tabs as $k => $t): ?>
+  <a href="<?= $t[0] ?>" class="<?= $k === $act ? 'on' : '' ?>"<?= $k === $act ? ' aria-current="page"' : '' ?>><span class="ico"><?= icon($t[2]) ?></span><span class="tl"><?= e($t[1]) ?></span></a>
+<?php endforeach; ?>
+</nav>
+<?php if ($tg || $wa): ?>
 <div class="fab" id="fab">
   <?php if ($tg): ?><a class="fab-i tg" href="<?= e($tg) ?>" target="_blank" rel="noopener"><span class="lbl">Telegram Support</span><b><?= icon('send') ?></b></a><?php endif; ?>
   <?php if ($wa): ?><a class="fab-i wa" href="<?= e($wa) ?>" target="_blank" rel="noopener"><span class="lbl">WhatsApp Support</span><b><?= icon('phone') ?></b></a><?php endif; ?>
