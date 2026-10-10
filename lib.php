@@ -451,16 +451,17 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
     echo app_icon_sprite(); ?>
 <style>
 /* Category tiles - self-contained, does not depend on style.css */
-.sx-cats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0 18px}
-@media(min-width:640px){.sx-cats{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}}
-.sx-cat{display:flex;align-items:center;gap:10px;min-width:0;min-height:52px;padding:10px 12px;background:#fff;border:1.5px solid #e2e8f0;border-radius:12px;color:#1e293b;font-size:15px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:border-color .15s,box-shadow .15s,background .15s,transform .1s}
-.sx-cat:hover{border-color:#c4b5fd}
-.sx-cat:active{transform:scale(.98)}
-.sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:30px;height:30px;font-size:22px;line-height:1}
-.sx-cat .sx-ci svg{width:30px;height:30px;display:block}
-.sx-cat b{flex:1;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sx-cat.on{border-color:#7c3aed;background:#f5f3ff;box-shadow:0 0 0 2px rgba(124,58,237,.18)}
-.sx-cat.on b{color:#5b21b6}
+.sx-cats{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 14px}
+.sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s,border-color .15s,color .15s,box-shadow .15s,transform .1s}
+.sx-cat:hover{border-color:#c7d2fe;color:#3730a3}
+.sx-cat:active{transform:scale(.97)}
+.sx-cat.sx-all{padding:0 15px}
+.sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#f1f5f9;font-size:14px;line-height:1;overflow:hidden}
+.sx-cat .sx-ci svg{width:16px;height:16px;display:block}
+.sx-cat b{min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 6px 14px -6px rgba(79,70,229,.75)}
+.sx-cat.on b{color:#fff}
+.sx-cat.on .sx-ci{background:#fff}
 #cat-res{scroll-margin-top:72px}
 #cat-res.busy{opacity:.55;transition:opacity .15s}
 /* Product card: stock badge + ID */
@@ -519,9 +520,9 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
   <button>Search</button>
 </form>
 <div class="sx-cats" id="catRow">
-  <a class="sx-cat <?= $c ? '' : 'on' ?>" data-c="0" title="All (<?= (int)$total ?>)" href="<?= e(catalog_url(['q' => $q])) ?>"><b>All</b></a>
+  <a class="sx-cat sx-all <?= $c ? '' : 'on' ?>" data-c="0" title="All (<?= (int)$total ?>)" href="<?= e(catalog_url(['q' => $q])) ?>"><b>All</b></a>
   <?php foreach ($cats as $k): ?>
-  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '30px') ?></span><b><?= e($k['name']) ?></b></a>
+  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '16px') ?></span><b><?= e($k['name']) ?></b></a>
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
@@ -664,21 +665,21 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     var my=++seq, timedOut=false;
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
     clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);
-    res.classList.add('busy'); res.setAttribute('aria-busy','true');
+    var y0=window.pageYOffset; res.style.minHeight=res.offsetHeight+'px'; res.classList.add('busy'); res.setAttribute('aria-busy','true');
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
       .then(function(h){
         if(my!==seq) return;
-        clearTimeout(tmo); res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy');
-        if(scroll) toResults();
+        clearTimeout(tmo); res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy'); window.scrollTo(0,y0);
+        res.style.minHeight=Math.max(160,Math.round(window.innerHeight-res.getBoundingClientRect().top))+'px';   // list never gets shorter than the screen, so the page can't jump up
       })
       .catch(function(e){ if(my!==seq) return; if(e&&e.name==='AbortError'&&!timedOut) return; clearTimeout(tmo); location.href=url; });
   }
   row.addEventListener('click',function(e){
     var a=e.target.closest('.sx-cat'); if(!a||e.ctrlKey||e.metaKey||e.shiftKey||e.button) return;
     e.preventDefault(); var c=parseInt(a.dataset.c,10)||0;
-    if(c===state.c&&qIn.value.trim()===state.q){ toResults(); return; }
-    load(c,qIn.value.trim(),true,true);
+    if(c===state.c&&qIn.value.trim()===state.q) return;
+    load(c,qIn.value.trim(),true,false);
   });
   form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim(),true,true); });
   res.addEventListener('click',function(e){ var a=e.target.closest('.res a'); if(!a) return; e.preventDefault(); load(state.c,'',true,false); });
