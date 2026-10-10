@@ -2,36 +2,36 @@
 require __DIR__ . '/lib.php';
 $u = current_user();
 
-/* ====== এখান থেকে নিজের তথ্য বদলাও ====== */
+/* ====== Edit your details here ====== */
 $brand   = 'MySite';
-$tagline = 'আপনার প্রয়োজনীয় ডিজিটাল টুল, এক জায়গায়';
-$sub     = 'সাশ্রয়ী দামে প্রিমিয়াম সফটওয়্যার ও ডিজিটাল টুল সাবস্ক্রিপশন। দ্রুত অ্যাক্টিভেশন, নির্ভরযোগ্য সাপোর্ট।';
-$support = 'https://t.me/your_username';   // নিজের Telegram লিংক দাও
+$tagline = 'Premium Digital Tools, All in One Place';
+$sub     = 'Affordable software and digital tool subscriptions. Fast activation and reliable support.';
+$support = 'https://t.me/your_username';   // put your Telegram link here
 $plans = [
-  ['name' => 'Starter',  'price' => '৳৫০০',   'per' => '/ মাস', 'hot' => false,
-   'items' => ['১টি টুল অ্যাক্সেস', 'ইমেইল সাপোর্ট', 'মাসিক রিনিউ']],
-  ['name' => 'Pro',      'price' => '৳১,২০০', 'per' => '/ মাস', 'hot' => true,
-   'items' => ['৫টি টুল অ্যাক্সেস', '২৪/৭ সাপোর্ট', 'দ্রুত অ্যাক্টিভেশন', 'রেফারেল বোনাস']],
-  ['name' => 'Business', 'price' => '৳২,৫০০', 'per' => '/ মাস', 'hot' => false,
-   'items' => ['সব টুল অ্যাক্সেস', 'প্রায়োরিটি সাপোর্ট', 'টিমের জন্য একাধিক সিট']],
+  ['name' => 'Starter',  'price' => '৳500',   'per' => '/ month', 'hot' => false,
+   'items' => ['1 tool access', 'Email support', 'Monthly renewal']],
+  ['name' => 'Pro',      'price' => '৳1,200', 'per' => '/ month', 'hot' => true,
+   'items' => ['5 tools access', '24/7 support', 'Fast activation', 'Referral bonus']],
+  ['name' => 'Business', 'price' => '৳2,500', 'per' => '/ month', 'hot' => false,
+   'items' => ['All tools access', 'Priority support', 'Multiple team seats']],
 ];
 $features = [
-  ['⚡', 'দ্রুত অ্যাক্টিভেশন', 'পেমেন্ট কনফার্মের পর অল্প সময়ে সাবস্ক্রিপশন চালু।'],
-  ['🛡️', 'নিরাপদ লেনদেন', 'আপনার ওয়ালেট ও অ্যাকাউন্ট সুরক্ষিত পাসওয়ার্ড হ্যাশিংয়ে রাখা হয়।'],
-  ['🎧', '২৪/৭ সাপোর্ট', 'যেকোনো সমস্যায় Telegram-এ সরাসরি যোগাযোগ করুন।'],
-  ['🎁', 'রেফারেল বোনাস', 'বন্ধুকে রেফার করুন, তার প্রথম ডিপোজিটে বোনাস কয়েন পান।'],
+  ['⚡', 'Fast Activation', 'Your subscription goes live shortly after payment is confirmed.'],
+  ['🛡️', 'Secure Payments', 'Your wallet and account are protected with secure password hashing.'],
+  ['🎧', '24/7 Support', 'Contact us directly on Telegram for any issue.'],
+  ['🎁', 'Referral Bonus', 'Refer a friend and earn bonus coins on their first deposit.'],
 ];
 /* ======================================== */
 ?>
 <!DOCTYPE html>
-<html lang="bn"><head>
+<html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($brand) ?> - <?= e($tagline) ?></title>
 <style>
 :root{--a:#6d28d9;--b:#db2777;--c:#2563eb;--dark:#0f172a}
 *{box-sizing:border-box;margin:0}
 html{scroll-behavior:smooth}
-body{font-family:system-ui,"Noto Sans Bengali",sans-serif;color:#1e293b;background:#f8fafc;overflow-x:hidden}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1e293b;background:#f8fafc;overflow-x:hidden}
 a{text-decoration:none;color:inherit}
 nav{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:rgba(15,23,42,.55);backdrop-filter:blur(10px);color:#fff}
 nav .brand{font-weight:800;font-size:1.2rem}
@@ -86,7 +86,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 
 <nav><a class="brand" href="/"><?= e($brand) ?></a>
 <div class="links">
-<a class="hide" href="#features">ফিচার</a><a class="hide" href="#plans">প্ল্যান</a>
+<a class="hide" href="#features">Features</a><a class="hide" href="#plans">Plans</a>
 <?php if ($u): ?>
   <a class="pill" href="/dashboard.php">Dashboard</a>
 <?php else: ?>
@@ -100,15 +100,15 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
     <h1><?= e($tagline) ?></h1>
     <p><?= e($sub) ?></p>
     <div class="btns">
-      <a class="btn w" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">শুরু করুন</a>
-      <a class="btn o" href="#plans">প্ল্যান দেখুন</a>
+      <a class="btn w" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Get Started</a>
+      <a class="btn o" href="#plans">View Plans</a>
     </div>
   </div>
 </header>
 
 <section id="features">
-  <h2 class="rv">কেন <?= e($brand) ?>?</h2>
-  <p class="lead rv">আপনার সুবিধার কথা ভেবেই সাজানো</p>
+  <h2 class="rv">Why Choose <?= e($brand) ?>?</h2>
+  <p class="lead rv">Built with your convenience in mind</p>
   <div class="grid">
   <?php foreach ($features as $f): ?>
     <div class="card rv"><div class="ic"><?= $f[0] ?></div><h3><?= e($f[1]) ?></h3><p><?= e($f[2]) ?></p></div>
@@ -117,28 +117,28 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 </section>
 
 <section id="plans" class="plans">
-  <h2 class="rv">আমাদের প্ল্যান</h2>
-  <p class="lead rv">আপনার প্রয়োজন অনুযায়ী বেছে নিন</p>
+  <h2 class="rv">Our Plans</h2>
+  <p class="lead rv">Pick the plan that fits your needs</p>
   <div class="grid">
   <?php foreach ($plans as $p): ?>
     <div class="card plan rv <?= $p['hot'] ? 'hot' : '' ?>">
-      <?php if ($p['hot']): ?><span class="tag">জনপ্রিয়</span><?php endif; ?>
+      <?php if ($p['hot']): ?><span class="tag">Popular</span><?php endif; ?>
       <h3><?= e($p['name']) ?></h3>
       <div class="price"><?= e($p['price']) ?><small> <?= e($p['per']) ?></small></div>
       <ul><?php foreach ($p['items'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul>
-      <a class="btn" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">নিন</a>
+      <a class="btn" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Choose Plan</a>
     </div>
   <?php endforeach; ?>
   </div>
 </section>
 
 <section class="cta">
-  <h2 class="rv">আজই শুরু করুন</h2>
-  <p class="rv">অ্যাকাউন্ট খুলুন, কয়েন যোগ করুন, আর রেফারেল বোনাস নিন।</p>
-  <a class="btn w rv" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">অ্যাকাউন্ট খুলুন</a>
+  <h2 class="rv">Start Today</h2>
+  <p class="rv">Create an account, add coins, and earn referral bonuses.</p>
+  <a class="btn w rv" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Create Account</a>
 </section>
 
-<footer>© <?= date('Y') ?> <?= e($brand) ?> · <a href="<?= e($support) ?>" style="color:var(--a)">Telegram সাপোর্ট</a></footer>
+<footer>© <?= date('Y') ?> <?= e($brand) ?> · <a href="<?= e($support) ?>" style="color:var(--a)">Telegram Support</a></footer>
 
 <script>
 const io=new IntersectionObserver(es=>es.forEach(x=>{if(x.isIntersecting){x.target.classList.add('show');io.unobserve(x.target)}}),{threshold:.15});
