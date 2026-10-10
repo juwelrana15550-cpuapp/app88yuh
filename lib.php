@@ -409,11 +409,10 @@ function user_end(): void {
     $act = $GLOBALS['__active'] ?? '';
     $tabs = [
         'dashboard'    => ['/dashboard.php', 'Home', 'home'],
-        'deposits'     => ['/deposits.php', 'Deposit', 'coins'],
         'orders'       => ['/orders.php', 'Orders', 'cart'],
-        'referrals'    => ['/referrals.php', 'Referrals', 'users'],
+        'deposits'     => ['/deposits.php', 'Deposit', 'coins'],
         'transactions' => ['/transactions.php', 'History', 'history'],
-        'otp'          => ['/otp.php', 'Gmail', 'mail'],
+        'otp'          => ['/otp.php', 'Get OTP', 'key'],
     ]; ?>
 <nav class="tabbar" aria-label="Quick navigation">
 <?php foreach ($tabs as $k => $t): ?>
@@ -504,6 +503,8 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .sx-cat.on .sx-ci{background:#fff}
 #cat-res{scroll-margin-top:72px}
 #cat-res.busy{opacity:.55;transition:opacity .15s}
+/* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
+.btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
 .sx-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
 .sx-stk{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;line-height:1.3;background:#dcfce7;color:#15803d;border:1px solid #86efac}
