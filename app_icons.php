@@ -100,36 +100,31 @@ function app_icons(): array {
     return $s;
 }
 
-/** Hidden SVG sprite (output once per page, before any icon is used). */
-function app_icon_sprite(): string {
-    static $done = false;
-    if ($done) return '';
-    $done = true;
-    $icons = app_icons();
-    $h = '<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>'
-       . '<linearGradient id="ai-gloss" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient>';
-    foreach ($icons as $k => $d) {
-        if ($d[3]) $h .= '<linearGradient id="ag-' . $k . '" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' . $d[2] . '"/><stop offset="1" stop-color="' . $d[3] . '"/></linearGradient>';
-    }
-    $h .= '</defs>';
-    foreach ($icons as $k => $d) {
-        $fill = $d[3] ? 'url(#ag-' . $k . ')' : $d[2];
-        $h .= '<symbol id="ai-' . $k . '" viewBox="0 0 48 48"><rect width="48" height="48" rx="11" fill="' . $fill . '"/>' . $d[4]
-            . '<rect width="48" height="48" rx="11" fill="url(#ai-gloss)"/>'
-            . '<rect x=".5" y=".5" width="47" height="47" rx="10.5" fill="none" stroke="#000" stroke-opacity=".10"/></symbol>';
-    }
-    return $h . '</svg>';
+/** Kept for compatibility: icons are now self-contained inline SVGs, so no sprite is needed. */
+function app_icon_sprite(): string { return ''; }
+
+/** One self-contained inline SVG icon (own gradients, unique ids) - works in every browser/WebView. */
+function app_icon_svg(string $k, string $size = '1.1em'): string {
+    static $n = 0;
+    $set = app_icons();
+    if (!isset($set[$k])) $k = 'shop';
+    $d = $set[$k];
+    $u = 'ai' . (++$n);
+    $fill = $d[3] ? 'url(#' . $u . 'g)' : $d[2];
+    $defs = '<defs>'
+        . ($d[3] ? '<linearGradient id="' . $u . 'g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' . $d[2] . '"/><stop offset="1" stop-color="' . $d[3] . '"/></linearGradient>' : '')
+        . '<linearGradient id="' . $u . 's" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>';
+    return '<svg class="appi" width="' . $size . '" height="' . $size . '" viewBox="0 0 48 48" aria-hidden="true" style="display:inline-block;vertical-align:-.22em">'
+        . $defs . '<rect width="48" height="48" rx="11" fill="' . $fill . '"/>' . $d[4]
+        . '<rect width="48" height="48" rx="11" fill="url(#' . $u . 's)"/>'
+        . '<rect x=".5" y=".5" width="47" height="47" rx="10.5" fill="none" stroke="#000" stroke-opacity=".10"/></svg>';
 }
 
-/** Category icon as HTML: premium app icon ("app:gmail") or a plain emoji. Needs app_icon_sprite() on the page. */
+/** Category icon as HTML: premium app icon ("app:gmail") or a plain emoji. */
 function cat_icon($v, string $size = '1.1em'): string {
     $v = trim((string)$v);
     if ($v === '') $v = 'app:shop';
-    if (strncmp($v, 'app:', 4) === 0) {
-        $k = substr($v, 4);
-        if (!isset(app_icons()[$k])) $k = 'shop';
-        return '<svg class="appi" width="' . $size . '" height="' . $size . '" viewBox="0 0 48 48" aria-hidden="true" style="display:inline-block;vertical-align:-.22em"><use href="#ai-' . $k . '"/></svg>';
-    }
+    if (strncmp($v, 'app:', 4) === 0) return app_icon_svg(substr($v, 4), $size);
     return htmlspecialchars($v, ENT_QUOTES, 'UTF-8');
 }
 

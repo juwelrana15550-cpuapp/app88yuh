@@ -177,3 +177,19 @@ dialog::backdrop{background:rgba(20,14,48,.55)}
   .ipk-grid{grid-template-columns:repeat(3,1fr)}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* ---------- fixes: search-icon overlap + phone-friendly product/category lists ---------- */
+.adm .srch input{padding-left:40px}
+@media (max-width:640px){
+  .adm table.rt{min-width:0}
+  .rt thead{display:none}
+  .rt,.rt tbody{display:block}
+  .rt tr{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;padding:14px 0;border-bottom:1px solid var(--line)}
+  .rt tr:last-child{border-bottom:0}
+  .adm .rt td{padding:0;border:0;display:block}
+  .adm .rt tbody tr:hover td{background:none}
+  .rt td:first-child{flex:1 1 100%}
+  .rt td.ra{margin-left:auto}
+  .rt td[colspan]{flex:1 1 100%}
+}
+@media (max-width:640px){.adm .rt td.hm{display:none}}

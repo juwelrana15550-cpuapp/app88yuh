@@ -7,7 +7,7 @@ session_start();
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 
 function db(): PDO {
     static $pdo = null;
@@ -126,6 +126,8 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT ''",
         "ALTER TABLE products ADD COLUMN popular TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD INDEX idx_category (category_id)",
+        "ALTER TABLE orders ADD COLUMN qty INT NOT NULL DEFAULT 1",
+        "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
@@ -217,6 +219,10 @@ function icon(string $n): string {
         'home'    => '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
         'history' => '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
         'mail'    => '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/><rect x="2" y="4" width="20" height="16" rx="2"/>',
+        'back'    => '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+        'download'=> '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+        'copy'    => '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+        'box'     => '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
         'bag'     =>'<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
     ];
     return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . ($p[$n] ?? '') . '</svg>';
@@ -325,6 +331,7 @@ function user_start(string $title, array $u, string $active): void {
 function user_end(): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
     echo "</main>\n"; // the tab bar and support button must sit outside <main>, otherwise the menu overlay covers them
+    echo $GLOBALS['__modal'] ?? '';
     $act = $GLOBALS['__active'] ?? '';
     $tabs = [
         'dashboard'    => ['/dashboard.php', 'Home', 'home'],
@@ -349,13 +356,13 @@ function user_end(): void {
     footer_html(false);
 }
 
-/** Home catalog: search box, category chips and product cards grouped by category. */
-function catalog_html(array $cats, array $rows, int $c, string $q, int $total): void {
-    echo app_icon_sprite();
-    $url = function (array $x): string {
-        $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
-        return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
-    };
+function catalog_url(array $x): string {
+    $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
+    return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
+}
+
+/** Product list (search-result line + groups of cards). Also returned on its own to the page's AJAX category switcher. */
+function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
     $card = function (array $p) use ($byId, $c, $q) {
@@ -373,26 +380,169 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total): 
       <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
-      <form method="post"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>">
+      <form method="post"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1">
         <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-        <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return confirm(<?= e(json_encode('Buy "' . $p['name'] . '" for ' . money($p['price']) . '?')) ?>)"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
     </div>
 <?php }; ?>
-<form class="search" method="get" action="/dashboard.php">
-  <?= icon('search') ?><input type="text" name="q" value="<?= e($q) ?>" placeholder="Search products or ID" autocomplete="off" maxlength="80">
-  <?php if ($c): ?><input type="hidden" name="c" value="<?= $c ?>"><?php endif; ?>
-  <button>Search</button>
-</form>
-<div class="chips-row">
-  <a class="chip <?= $c ? '' : 'on' ?>" href="<?= e($url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
-  <?php foreach ($cats as $k): ?>
-  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" href="<?= e($url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= cat_icon($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
-  <?php endforeach; ?>
-</div>
-<?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e($url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
+<?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e(catalog_url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
 <?php foreach ($groups as $cid => $list): $k = $byId[$cid] ?? null; ?>
   <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= cat_icon($k['icon'] ?? '') ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
   <div class="catalog"><?php foreach ($list as $p) $card($p); ?></div>
 <?php endforeach; ?>
 <?php if (!$rows): ?><div class="card empty"><div class="ei">🔎</div><b>No products found</b><p><?= $q !== '' ? 'Try a different search or category.' : 'Products will appear here once they are added.' ?></p></div><?php endif; ?>
+<?php }
+
+/** Home catalog: search box, category chips and product cards grouped by category. */
+function catalog_html(array $cats, array $rows, int $c, string $q, int $total, float $balance = 0.0): void {
+    echo app_icon_sprite(); ?>
+<form class="search" id="catF" method="get" action="/dashboard.php">
+  <?= icon('search') ?><input type="text" name="q" value="<?= e($q) ?>" placeholder="Search products or ID" autocomplete="off" maxlength="80">
+  <?php if ($c): ?><input type="hidden" name="c" value="<?= $c ?>"><?php endif; ?>
+  <button>Search</button>
+</form>
+<div class="chips-row" id="chipsRow">
+  <a class="chip <?= $c ? '' : 'on' ?>" data-c="0" href="<?= e(catalog_url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
+  <?php foreach ($cats as $k): ?>
+  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= cat_icon($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
+  <?php endforeach; ?>
+</div>
+<div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
+<?php ob_start(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it can sit above the tab bar ?>
+<?php }
+
+/** "Buy Now" confirmation sheet: quantity stepper, live total, wallet check. Opened by buttons carrying data-buy. */
+function buy_modal_html(float $balance, int $c, string $q): void { ?>
+<div class="mdl" id="buyM" hidden>
+  <div class="mdl-bd" data-x></div>
+  <form method="post" class="mdl-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off"><?= csrf_field() ?>
+    <input type="hidden" name="product_id" id="bmId" value="">
+    <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
+    <span class="mdl-grip" aria-hidden="true"></span>
+    <div class="mdl-h">
+      <span class="mdl-ic" id="bmIc"></span>
+      <div class="mdl-t"><b id="bmT">Product</b><small>Review your order</small></div>
+      <button type="button" class="mdl-x" data-x aria-label="Close"><?= icon('x') ?></button>
+    </div>
+    <div class="mdl-b">
+      <div class="mdl-rows">
+        <div class="mdl-row"><span>Price</span><b id="bmP"></b></div>
+        <div class="mdl-row"><span>Available</span><b id="bmA"></b></div>
+      </div>
+      <label for="bmQ">Quantity</label>
+      <div class="qty">
+        <button type="button" id="bmMinus" aria-label="Decrease quantity">&minus;</button>
+        <input type="number" id="bmQ" name="qty" value="1" min="1" step="1" inputmode="numeric" required>
+        <button type="button" id="bmPlus" aria-label="Increase quantity">+</button>
+      </div>
+      <div class="qchips" id="bmChips"></div>
+      <div class="mdl-tot"><span>Total</span><b id="bmTot"></b></div>
+      <div class="mdl-bal" id="bmBal"><span>Wallet balance</span><b><?= e(money($balance)) ?></b></div>
+      <div class="mdl-msg" id="bmMsg" role="alert" hidden></div>
+    </div>
+    <div class="mdl-f">
+      <button type="button" class="btn ghost" data-x>Cancel</button>
+      <button class="btn" id="bmGo">Confirm Purchase</button>
+    </div>
+  </form>
+</div>
+<script>
+(function(){
+  var M=document.getElementById('buyM'); if(!M) return;
+  var BAL=<?= json_encode(round($balance, 2)) ?>, CAP=10000;
+  var $=function(i){return document.getElementById(i)};
+  var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null;
+  var fmt=function(n){return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
+  function maxQty(){ return cur.stock===null ? CAP : Math.max(0, Math.min(cur.stock, CAP)); }
+  function showMsg(t,link){ msg.hidden=!t; msg.innerHTML=''; if(t){ msg.appendChild(document.createTextNode(t)); if(link){ var a=document.createElement('a'); a.href='/deposits.php'; a.textContent=' Add funds'; msg.appendChild(a);} } }
+  function render(){
+    var raw=parseInt(Q.value,10), q=isNaN(raw)?0:raw, mx=maxQty();
+    var cents=Math.round(cur.price*100)*Math.max(q,0), total=cents/100;
+    $('bmTot').textContent=fmt(total);
+    $('bmMinus').disabled = q<=1;
+    $('bmPlus').disabled = q>=mx;
+    var bad=null, funds=false;
+    if(mx<1) bad='This product is out of stock.';
+    else if(q<1) bad='Enter a quantity of at least 1.';
+    else if(q>mx) bad=(cur.stock!==null&&q>cur.stock)?'Only '+cur.stock.toLocaleString('en-US')+' available right now.':'You can buy up to '+CAP.toLocaleString('en-US')+' per order.';
+    else if(cents>Math.round(BAL*100)){ bad='Not enough balance. You need '+fmt(total-BAL)+' more.'; funds=true; }
+    showMsg(bad,funds);
+    M.classList.toggle('low', funds);
+    go.disabled=!!bad;
+    Array.prototype.forEach.call($('bmChips').children,function(b){ b.classList.toggle('on', parseInt(b.dataset.q,10)===q); });
+  }
+  function chips(){
+    var box=$('bmChips'), mx=maxQty(); box.innerHTML='';
+    [1,5,10,50,100].forEach(function(n){ if(n<=mx) add(n,String(n)); });
+    var afford=cur.price>0?Math.floor(Math.round(BAL*100)/Math.round(cur.price*100)):0, best=Math.min(mx,afford);
+    if(best>1 && [1,5,10,50,100].indexOf(best)<0) add(best,'Max ('+best.toLocaleString('en-US')+')');
+    function add(n,t){ var b=document.createElement('button'); b.type='button'; b.className='qchip'; b.dataset.q=n; b.textContent=t; b.addEventListener('click',function(){ Q.value=n; render(); }); box.appendChild(b); }
+  }
+  function open(btn){
+    last=btn;
+    cur={id:btn.dataset.id,name:btn.dataset.name,price:parseFloat(btn.dataset.price),unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
+    $('bmId').value=cur.id; $('bmT').textContent=cur.name;
+    $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'');
+    $('bmA').textContent=cur.stock===null?'In stock':cur.stock.toLocaleString('en-US')+' pcs';
+    var card=btn.closest('.pc'), ic=card&&card.querySelector('.pc-ic'); $('bmIc').innerHTML=ic?ic.innerHTML:'';
+    Q.value=1; Q.max=maxQty()||''; chips(); go.textContent='Confirm Purchase'; render();
+    M.hidden=false; document.body.classList.add('modal');
+    requestAnimationFrame(function(){ M.classList.add('show'); });
+    setTimeout(function(){ try{ Q.focus(); Q.select(); }catch(e){} }, 120);
+  }
+  function close(){
+    M.classList.remove('show'); document.body.classList.remove('modal');
+    setTimeout(function(){ M.hidden=true; }, 200);
+    if(last){ try{ last.focus(); }catch(e){} }
+  }
+  document.addEventListener('click',function(e){ var b=e.target.closest&&e.target.closest('[data-buy]'); if(!b||b.disabled) return; e.preventDefault(); open(b); });   // delegated: still works after the list is swapped by the category switcher
+  M.querySelectorAll('[data-x]').forEach(function(x){ x.addEventListener('click',close); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape' && !M.hidden) close(); });
+  $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
+  $('bmPlus').addEventListener('click',function(){ Q.value=Math.min(maxQty(),(parseInt(Q.value,10)||0)+1); render(); });
+  Q.addEventListener('input',render);
+  F.addEventListener('submit',function(e){
+    render(); if(go.disabled){ e.preventDefault(); return; }
+    go.disabled=true; go.textContent='Processing\u2026';   // stops double-clicks from buying twice
+  });
+  window.addEventListener('pageshow',function(ev){ if(ev.persisted){ M.hidden=true; M.classList.remove('show'); document.body.classList.remove('modal'); } });
+})();
+</script>
+<script>
+/* Category chips + search: swap the product list in place (no full page load) */
+(function(){
+  var res=document.getElementById('cat-res'), row=document.getElementById('chipsRow'), form=document.getElementById('catF'), buy=document.getElementById('buyF');
+  if(!res||!row||!form||!window.fetch) return;
+  var qIn=form.elements.q, state={c:0,q:''}, ctl=null;
+  var on=row.querySelector('.chip.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
+  function qs(c,q){ var p=[]; if(c) p.push('c='+c); if(q) p.push('q='+encodeURIComponent(q)); return p.join('&'); }
+  function sync(){
+    Array.prototype.forEach.call(row.children,function(a){ a.classList.toggle('on',(parseInt(a.dataset.c,10)||0)===state.c); });
+    var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
+    buy.elements.c.value=state.c||''; buy.elements.q.value=state.q;
+    var a=row.querySelector('.chip.on'); if(a&&a.scrollIntoView) a.scrollIntoView({inline:'center',block:'nearest',behavior:'smooth'});
+  }
+  function load(c,q,push){
+    state.c=c; state.q=q; qIn.value=q; sync();
+    var s=qs(c,q), url='/dashboard.php'+(s?'?'+s:'');
+    if(push!==false) try{ history.pushState({c:c,q:q},'',url); }catch(e){}
+    if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
+    res.classList.add('busy'); res.setAttribute('aria-busy','true');
+    fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
+      .then(function(h){ res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy'); })
+      .catch(function(e){ if(e&&e.name==='AbortError') return; location.href=url; });   // any problem: fall back to a normal page load
+  }
+  row.addEventListener('click',function(e){
+    var a=e.target.closest('.chip'); if(!a||e.ctrlKey||e.metaKey||e.shiftKey||e.button) return;
+    e.preventDefault(); var c=parseInt(a.dataset.c,10)||0; if(c===state.c&&qIn.value.trim()===state.q) return;
+    load(c,qIn.value.trim());
+  });
+  form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim()); });
+  res.addEventListener('click',function(e){ var a=e.target.closest('.res a'); if(!a) return; e.preventDefault(); load(state.c,''); });
+  window.addEventListener('popstate',function(){
+    var p=new URLSearchParams(location.search); load(parseInt(p.get('c'),10)||0,(p.get('q')||'').slice(0,80),false);
+  });
+})();
+</script>
 <?php }

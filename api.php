@@ -25,7 +25,7 @@ switch ($_GET['action'] ?? '') {
         $r = $pdo->query('SELECT id, name, description, price FROM products WHERE active = 1 ORDER BY id DESC')->fetchAll();
         out(200, ['ok' => true, 'products' => $r]);
     case 'orders':
-        $q = $pdo->prepare('SELECT id, product_name, price, status, delivery, created_at FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 50');
+        $q = $pdo->prepare('SELECT id, product_name, qty, price, status, delivery, created_at FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 50');
         $q->execute([$u['id']]);
         out(200, ['ok' => true, 'orders' => $q->fetchAll()]);
     default:

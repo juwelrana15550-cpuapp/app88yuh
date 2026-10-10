@@ -146,12 +146,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $st->execute([$oid]);
                 if ($o = $st->fetch()) {
                     if (isset($_POST['deliver'])) {
-                        $pdo->prepare("UPDATE orders SET status='delivered', delivery=? WHERE id=?")->execute([mb_substr(trim($_POST['delivery'] ?? ''), 0, 4000), $oid]);
+                        $pdo->prepare("UPDATE orders SET status='delivered', delivery=? WHERE id=?")->execute([mb_substr(trim($_POST['delivery'] ?? ''), 0, 500000), $oid]);
                     } else {
                         $pdo->prepare("UPDATE orders SET status='cancelled' WHERE id=?")->execute([$oid]);
                         $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
                         add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
-                        $pdo->prepare('UPDATE products SET stock = stock + 1 WHERE id = ? AND stock IS NOT NULL')->execute([$o['product_id']]);
+                        $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL')->execute([max(1, (int)$o['qty']), $o['product_id']]);
                     }
                 }
             });
@@ -303,7 +303,7 @@ $lg = media_url('logo');
 <div class="cols">
   <div class="card"><div class="card-h"><h3>Pending orders</h3><a href="/admin.php?p=orders">Open all</a></div>
   <?php foreach (array_slice($pendOrders, 0, 5) as $o): ?>
-    <div class="mini"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?></b><small><?= e($o['email']) ?></small></div><span class="money"><?= money($o['price']) ?></span></div>
+    <div class="mini"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></b><small><?= e($o['email']) ?></small></div><span class="money"><?= money($o['price']) ?></span></div>
   <?php endforeach; if (!$pendOrders): ?><div class="empty">No pending orders.</div><?php endif; ?></div>
   <div class="card"><div class="card-h"><h3>Pending deposits</h3><a href="/admin.php?p=deposits">Open all</a></div>
   <?php foreach (array_slice($rows, 0, 5) as $r): ?>
@@ -319,9 +319,9 @@ $lg = media_url('logo');
 <?php /* ============================ ORDERS ============================ */ elseif ($page === 'orders'): ?>
 <?php foreach ($pendOrders as $o): ?>
 <div class="ord">
-  <div class="ord-h"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?></b><p><?= e($o['email']) ?> · <?= e($o['created_at']) ?></p></div><span class="money"><?= money($o['price']) ?></span></div>
+  <div class="ord-h"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></b><p><?= e($o['email']) ?> · <?= e($o['created_at']) ?></p></div><span class="money"><?= money($o['price']) ?></span></div>
   <form method="post"><?= csrf_field() ?><input type="hidden" name="order_id" value="<?= (int)$o['id'] ?>">
-  <textarea name="delivery" placeholder="Delivery details shown to the customer (account email/password, license key, instructions...)"></textarea>
+  <textarea name="delivery" placeholder="Delivery data for the customer: one item per line, e.g. email|password (they can download it as TXT / CSV / XLSX)"></textarea>
   <div class="acts" style="margin-top:10px"><button class="btn sm ok-b" name="deliver" value="1">Mark delivered</button>
   <button class="btn sm red" name="cancel_order" value="1" onclick="return confirm('Cancel and refund?')">Cancel &amp; refund</button></div></form>
 </div>
@@ -349,7 +349,7 @@ $lg = media_url('logo');
     <select id="pcat" style="width:auto;min-width:170px"><option value="">All categories</option><option value="0">Uncategorised</option>
       <?php foreach ($cats as $k): ?><option value="<?= (int)$k['id'] ?>"><?= e(trim(cat_icon_text($k['icon']) . ' ' . $k['name'])) ?></option><?php endforeach; ?></select>
   </div>
-  <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
+  <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
            'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular']]; ?>
@@ -383,7 +383,7 @@ $lg = media_url('logo');
 
 <?php /* ============================ CATEGORIES ============================ */ elseif ($page === 'categories'): ?>
 <div class="card">
-  <div class="tw"><table><thead><tr><th>Category</th><th class="hm">Products</th><th class="hm">Sort</th><th>Status</th><th></th></tr></thead><tbody>
+  <div class="tw"><table class="rt"><thead><tr><th>Category</th><th class="hm">Products</th><th class="hm">Sort</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($cats as $k):
     $cj = ['id' => (int)$k['id'], 'name' => $k['name'], 'icon' => $k['icon'], 'sort' => (int)$k['sort_order']]; ?>
   <tr>
