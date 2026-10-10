@@ -2,7 +2,27 @@
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = '';
+
+function product_fields(): array {
+    $st = trim($_POST['stock'] ?? '');
+    return [
+        'name'    => trim($_POST['pname'] ?? ''),
+        'desc'    => mb_substr(trim($_POST['pdesc'] ?? ''), 0, 500),
+        'price'   => round((float)($_POST['pprice'] ?? 0), 2),
+        'cat'     => ((int)($_POST['category_id'] ?? 0)) ?: null,
+        'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
+        'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
+        'popular' => empty($_POST['popular']) ? 0 : 1,
+    ];
+}
+function category_fields(): array {
+    return [
+        'name' => trim($_POST['cname'] ?? ''),
+        'icon' => mb_substr(trim($_POST['cicon'] ?? ''), 0, 8) ?: '📦',
+        'sort' => (int)($_POST['csort'] ?? 0),
+    ];
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
@@ -51,12 +71,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
         } elseif (isset($_POST['add_product'])) {
-            $pn = trim($_POST['pname'] ?? ''); $pd = trim($_POST['pdesc'] ?? ''); $pp = round((float)($_POST['pprice'] ?? 0), 2);
-            if ($pn === '' || mb_strlen($pn) > 80 || $pp <= 0) { $prodErr = 'Enter a product name (max 80 chars) and a price above 0.'; }
+            $f = product_fields();
+            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) { $prodErr = 'Enter a product name (max 80 chars) and a price above 0.'; }
             else {
-                $pdo->prepare('INSERT INTO products (name, description, price) VALUES (?,?,?)')->execute([$pn, mb_substr($pd, 0, 500), $pp]);
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular) VALUES (?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular']]);
                 header('Location: /admin.php#products'); exit;
             }
+
+        } elseif (isset($_POST['update_product'])) {
+            $f = product_fields();
+            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) { $prodErr = 'Enter a product name (max 80 chars) and a price above 0.'; }
+            else {
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], (int)$_POST['update_product']]);
+                header('Location: /admin.php#products'); exit;
+            }
+
+        } elseif (isset($_POST['add_category'])) {
+            $f = category_fields();
+            if ($f['name'] === '' || mb_strlen($f['name']) > 40) { $catErr = 'Enter a category name (max 40 chars).'; }
+            else {
+                $pdo->prepare('INSERT INTO categories (name, icon, sort_order) VALUES (?,?,?)')->execute([$f['name'], $f['icon'], $f['sort']]);
+                header('Location: /admin.php#categories'); exit;
+            }
+
+        } elseif (isset($_POST['update_category'])) {
+            $f = category_fields();
+            if ($f['name'] === '' || mb_strlen($f['name']) > 40) { $catErr = 'Enter a category name (max 40 chars).'; }
+            else {
+                $pdo->prepare('UPDATE categories SET name=?, icon=?, sort_order=? WHERE id=?')->execute([$f['name'], $f['icon'], $f['sort'], (int)$_POST['update_category']]);
+                header('Location: /admin.php#categories'); exit;
+            }
+
+        } elseif (isset($_POST['toggle_category'])) {
+            $pdo->prepare('UPDATE categories SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_category']]);
+            header('Location: /admin.php#categories'); exit;
+
+        } elseif (isset($_POST['delete_category'])) {
+            $cid = (int)$_POST['delete_category'];
+            with_tx($pdo, function (PDO $pdo) use ($cid) {
+                $pdo->prepare('UPDATE products SET category_id = NULL WHERE category_id = ?')->execute([$cid]);
+                $pdo->prepare('DELETE FROM categories WHERE id = ?')->execute([$cid]);
+            });
+            header('Location: /admin.php#categories'); exit;
 
         } elseif (isset($_POST['toggle_product'])) {
             $pdo->prepare('UPDATE products SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_product']]);
@@ -74,6 +132,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare("UPDATE orders SET status='cancelled' WHERE id=?")->execute([$oid]);
                         $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
                         add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
+                        $pdo->prepare('UPDATE products SET stock = stock + 1 WHERE id = ? AND stock IS NOT NULL')->execute([$o['product_id']]);
                     }
                 }
             });
@@ -127,6 +186,12 @@ $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->f
 $pendOrders = $pdo->query("SELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
 $products = $pdo->query('SELECT * FROM products ORDER BY id DESC')->fetchAll();
+$cats = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS n FROM categories c ORDER BY c.sort_order, c.id')->fetchAll();
+$catOpts = function ($sel) use ($cats) {
+    $h = '<option value="">— No category —</option>';
+    foreach ($cats as $k) $h .= '<option value="' . (int)$k['id'] . '"' . ((int)$sel === (int)$k['id'] ? ' selected' : '') . '>' . e($k['icon'] . ' ' . $k['name']) . '</option>';
+    return $h;
+};
 $rows = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status='pending' ORDER BY d.id")->fetchAll();
 $users = $pdo->query('SELECT u.id, u.email, u.coins, u.created_at, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs FROM users u ORDER BY u.id DESC LIMIT 100')->fetchAll();
 $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status <> 'pending' ORDER BY d.id DESC LIMIT 30")->fetchAll();
@@ -137,7 +202,7 @@ header_html('Admin', null, 'app', true); ?>
   <div class="stat"><span>Pending orders</span><b><?= count($pendOrders) ?></b></div>
   <div class="stat"><span>Balance in wallets</span><b><?= money($coins) ?></b></div>
 </div>
-<div class="jump"><a href="#orders">Orders</a><a href="#deposits">Deposits</a><a href="#products">Products</a><a href="#settings">Settings</a><a href="#users">Users</a></div>
+<div class="jump"><a href="#orders">Orders</a><a href="#deposits">Deposits</a><a href="#categories">Categories</a><a href="#products">Products</a><a href="#settings">Settings</a><a href="#users">Users</a></div>
 
 <div class="card" id="orders"><h3>Pending orders</h3>
 <?php foreach ($pendOrders as $o): ?>
@@ -160,17 +225,50 @@ header_html('Admin', null, 'app', true); ?>
 <button class="btn sm red" name="action" value="reject">Reject</button></form></td></tr>
 <?php endforeach; if (!$rows): ?><tr><td colspan="5">Nothing pending.</td></tr><?php endif; ?></table></div></div>
 
+<div class="card" id="categories"><h3>Categories</h3>
+<?php if ($catErr): ?><div class="err"><?= e($catErr) ?></div><?php endif; ?>
+<form method="post"><?= csrf_field() ?>
+<div class="grid2"><div><label>Name</label><input type="text" name="cname" maxlength="40" required placeholder="e.g. Gmail Account"></div>
+<div><label>Icon (emoji)</label><input type="text" name="cicon" maxlength="8" placeholder="📧"></div></div>
+<label>Sort order <small>(smaller shows first)</small></label><input type="number" name="csort" value="0">
+<button class="btn" name="add_category" value="1">Add category</button></form>
+<div style="margin-top:16px">
+<?php foreach ($cats as $k): ?>
+<details class="ed"><summary><span><?= e($k['icon']) ?> <b><?= e($k['name']) ?></b></span><small><?= (int)$k['n'] ?> products · <?= $k['active'] ? 'visible' : 'hidden' ?></small></summary>
+<form method="post"><?= csrf_field() ?>
+<div class="grid2"><div><label>Name</label><input type="text" name="cname" maxlength="40" required value="<?= e($k['name']) ?>"></div>
+<div><label>Icon (emoji)</label><input type="text" name="cicon" maxlength="8" value="<?= e($k['icon']) ?>"></div></div>
+<label>Sort order</label><input type="number" name="csort" value="<?= (int)$k['sort_order'] ?>">
+<div class="acts" style="margin-top:12px;flex-wrap:wrap"><button class="btn sm" name="update_category" value="<?= (int)$k['id'] ?>">Save</button>
+<button class="btn sm ghost" name="toggle_category" value="<?= (int)$k['id'] ?>"><?= $k['active'] ? 'Hide' : 'Show' ?></button>
+<button class="btn sm red" name="delete_category" value="<?= (int)$k['id'] ?>" onclick="return confirm('Delete this category? Its products stay but become uncategorised.')">Delete</button></div></form></details>
+<?php endforeach; if (!$cats): ?><p><small>No categories yet. Add one above, then assign products to it.</small></p><?php endif; ?></div></div>
+
 <div class="card" id="products"><h3>Products</h3>
 <?php if ($prodErr): ?><div class="err"><?= e($prodErr) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
 <label>Name</label><input type="text" name="pname" maxlength="80" required>
 <label>Description (optional)</label><input type="text" name="pdesc" maxlength="500">
-<label>Price (৳)</label><input type="number" name="pprice" step="0.01" min="0.01" required>
+<div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" step="0.01" min="0.01" required></div>
+<div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" maxlength="20" placeholder="email"></div></div>
+<div class="grid2"><div><label>Category</label><select name="category_id"><?= $catOpts(0) ?></select></div>
+<div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" min="0" step="1"></div></div>
+<label class="chk"><input type="checkbox" name="popular" value="1"> <span>Mark as Popular</span></label>
 <button class="btn" name="add_product" value="1">Add product</button></form>
 <div style="margin-top:16px">
 <?php foreach ($products as $p): ?>
-<div class="prod"><div><b><?= e($p['name']) ?></b><p><?= money($p['price']) ?> · <?= $p['active'] ? 'visible' : 'hidden' ?></p></div>
-<form method="post"><?= csrf_field() ?><button class="btn sm ghost" name="toggle_product" value="<?= (int)$p['id'] ?>"><?= $p['active'] ? 'Hide' : 'Show' ?></button></form></div>
+<details class="ed"><summary><span><b><?= e($p['name']) ?></b> <?php if ($p['popular']): ?>⭐<?php endif; ?></span>
+<small><?= money($p['price']) ?> · <?= $p['stock'] === null ? 'unlimited' : number_format((int)$p['stock']) . ' in stock' ?> · <?= $p['active'] ? 'visible' : 'hidden' ?></small></summary>
+<form method="post"><?= csrf_field() ?>
+<label>Name</label><input type="text" name="pname" maxlength="80" required value="<?= e($p['name']) ?>">
+<label>Description</label><input type="text" name="pdesc" maxlength="500" value="<?= e($p['description']) ?>">
+<div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" step="0.01" min="0.01" required value="<?= e($p['price']) ?>"></div>
+<div><label>Unit</label><input type="text" name="unit" maxlength="20" value="<?= e($p['unit']) ?>"></div></div>
+<div class="grid2"><div><label>Category</label><select name="category_id"><?= $catOpts($p['category_id']) ?></select></div>
+<div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" min="0" step="1" value="<?= $p['stock'] === null ? '' : (int)$p['stock'] ?>"></div></div>
+<label class="chk"><input type="checkbox" name="popular" value="1" <?= $p['popular'] ? 'checked' : '' ?>> <span>Mark as Popular</span></label>
+<div class="acts" style="margin-top:12px"><button class="btn sm" name="update_product" value="<?= (int)$p['id'] ?>">Save</button></div></form>
+<form method="post" style="padding-top:0"><?= csrf_field() ?><button class="btn sm ghost" name="toggle_product" value="<?= (int)$p['id'] ?>"><?= $p['active'] ? 'Hide from shop' : 'Show in shop' ?></button></form></details>
 <?php endforeach; ?></div></div>
 
 <div class="card" id="settings"><h3>Site settings</h3>

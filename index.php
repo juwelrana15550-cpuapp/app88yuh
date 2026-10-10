@@ -31,6 +31,7 @@ $heroStyle = $banner
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($brand) ?> - <?= e($tagline) ?></title>
+<?= icon_tags() ?>
 <style>
 :root{--a:#4f46e5;--b:#db2777;--c:#2563eb;--dark:#0f172a}
 *{box-sizing:border-box;margin:0}

@@ -6,7 +6,7 @@ session_set_cookie_params(['lifetime' => 2592000, 'httponly' => true, 'samesite'
 session_start();
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 
 function db(): PDO {
     static $pdo = null;
@@ -111,6 +111,24 @@ function migrate(PDO $pdo): void {
         received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX (email, id)
     ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS categories (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(40) NOT NULL,
+        icon VARCHAR(16) NOT NULL DEFAULT '📦',
+        sort_order INT NOT NULL DEFAULT 0,
+        active TINYINT(1) NOT NULL DEFAULT 1
+    ) ENGINE=InnoDB");
+    // New product columns (stock NULL = unlimited, so existing products keep working). Errors 1060/1061 = already there.
+    foreach ([
+        "ALTER TABLE products ADD COLUMN category_id INT NULL",
+        "ALTER TABLE products ADD COLUMN stock INT NULL",
+        "ALTER TABLE products ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT ''",
+        "ALTER TABLE products ADD COLUMN popular TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD INDEX idx_category (category_id)",
+    ] as $sql) {
+        try { $pdo->exec($sql); }
+        catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
+    }
     $pdo->prepare("INSERT INTO settings (k, v) VALUES ('schema_v', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([SCHEMA_VERSION]);
 }
 
@@ -163,6 +181,14 @@ function css_link(): string {
     return '<link rel="stylesheet" href="/style.css?v=' . (is_file($f) ? filemtime($f) : 1) . '">';
 }
 
+/** Browser-tab icon, home-screen icon and theme colour. Uses the admin's uploaded logo for the tab icon when there is one. */
+function icon_tags(): string {
+    $fav = media_url('logo');
+    return '<link rel="icon" href="' . e($fav ?: '/icon.svg') . '"' . ($fav ? '' : ' type="image/svg+xml"') . '>'
+        . '<link rel="apple-touch-icon" href="/icon-180.png"><link rel="manifest" href="/manifest.php">'
+        . '<meta name="theme-color" content="#4338ca"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">';
+}
+
 function flash(string $type, string $msg): void { $_SESSION['flash'][] = [$type, $msg]; }
 function flash_html(): void {
     foreach ($_SESSION['flash'] ?? [] as [$t, $m]) echo '<div class="' . ($t === 'ok' ? 'ok' : 'err') . '">' . e($m) . '</div>';
@@ -186,6 +212,7 @@ function icon(string $n): string {
         'phone'   => '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>',
         'chat'    => '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/>',
         'plus'    => '<path d="M5 12h14"/><path d="M12 5v14"/>',
+        'search'  => '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
         'home'    => '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
         'history' => '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
         'mail'    => '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/><rect x="2" y="4" width="20" height="16" rx="2"/>',
@@ -222,6 +249,7 @@ function page_head(string $title, string $bodyClass): void { ?>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($title) ?> - <?= e(site_name()) ?></title>
 <?= css_link() ?>
+<?= icon_tags() ?>
 </head><body class="<?= e($bodyClass) ?>">
 <?php }
 
@@ -283,12 +311,12 @@ function user_start(string $title, array $u, string $active): void {
   </div>
   <div class="mn">
   <?php foreach ($items as $k => $it): ?>
-    <a href="<?= $it[0] ?>" class="<?= $k === $active ? 'on' : '' ?>"><?= icon($it[2]) ?><span><?= e($it[1]) ?></span></a>
+    <a href="<?= $it[0] ?>" class="<?= $k === $active ? 'on' : '' ?>"><span class="mi"><?= icon($it[2]) ?></span><span><?= e($it[1]) ?></span></a>
   <?php endforeach; ?>
     <hr class="sep">
-    <a href="/profile.php" class="<?= $active === 'profile' ? 'on' : '' ?>"><?= icon('usercog') ?><span>Profile</span></a>
+    <a href="/profile.php" class="<?= $active === 'profile' ? 'on' : '' ?>"><span class="mi"><?= icon('usercog') ?></span><span>Profile</span></a>
   </div>
-  <form method="post" action="/logout.php" class="lo"><?= csrf_field() ?><button type="submit"><?= icon('logout') ?><span>Logout</span></button></form>
+  <form method="post" action="/logout.php" class="lo"><?= csrf_field() ?><button type="submit"><span class="mi red"><?= icon('logout') ?></span><span>Logout</span></button></form>
 </aside>
 <main class="wide with-side">
 <?php flash_html(); }
@@ -319,3 +347,50 @@ function user_end(): void {
 <?php endif;
     footer_html(false);
 }
+
+/** Home catalog: search box, category chips and product cards grouped by category. */
+function catalog_html(array $cats, array $rows, int $c, string $q, int $total): void {
+    $url = function (array $x): string {
+        $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
+        return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
+    };
+    $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
+    $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
+    $card = function (array $p) use ($byId, $c, $q) {
+        $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
+        $icon = $k['icon'] ?? '📦';
+        $stock = $p['stock'] === null ? null : (int)$p['stock'];
+        if ($stock === null) { $sl = 'In Stock'; $sc = ''; }
+        elseif ($stock <= 0) { $sl = 'Out of stock'; $sc = 'out'; }
+        elseif ($stock <= 10) { $sl = 'Low stock · ' . number_format($stock) . ' pcs'; $sc = 'low'; }
+        else { $sl = 'In Stock · ' . number_format($stock) . ' pcs'; $sc = ''; }
+        $out = $stock !== null && $stock <= 0; ?>
+    <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
+      <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
+      <div class="pc-h"><span class="pc-ic"><?= e($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
+      <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
+      <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
+      <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
+      <form method="post"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>">
+        <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return confirm(<?= e(json_encode('Buy "' . $p['name'] . '" for ' . money($p['price']) . '?')) ?>)"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
+    </div>
+<?php }; ?>
+<form class="search" method="get" action="/dashboard.php">
+  <?= icon('search') ?><input type="text" name="q" value="<?= e($q) ?>" placeholder="Search products or ID" autocomplete="off" maxlength="80">
+  <?php if ($c): ?><input type="hidden" name="c" value="<?= $c ?>"><?php endif; ?>
+  <button>Search</button>
+</form>
+<div class="chips-row">
+  <a class="chip <?= $c ? '' : 'on' ?>" href="<?= e($url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
+  <?php foreach ($cats as $k): ?>
+  <a class="chip <?= $c === (int)$k['id'] ? 'on' : '' ?>" href="<?= e($url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="ci"><?= e($k['icon']) ?></span><span><?= e($k['name']) ?></span><em><?= (int)$k['n'] ?></em></a>
+  <?php endforeach; ?>
+</div>
+<?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e($url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
+<?php foreach ($groups as $cid => $list): $k = $byId[$cid] ?? null; ?>
+  <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= e($k['icon'] ?? '📦') ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
+  <div class="catalog"><?php foreach ($list as $p) $card($p); ?></div>
+<?php endforeach; ?>
+<?php if (!$rows): ?><div class="card empty"><div class="ei">🔎</div><b>No products found</b><p><?= $q !== '' ? 'Try a different search or category.' : 'Products will appear here once they are added.' ?></p></div><?php endif; ?>
+<?php }
