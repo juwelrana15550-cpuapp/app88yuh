@@ -5,9 +5,9 @@ $rows = $s->fetchAll();
 user_start('My Orders', $u, 'orders'); ?>
 <div class="card"><h3>My Orders</h3>
 <?php foreach ($rows as $r): ?>
-<div class="prod" style="align-items:flex-start"><div>
+<div class="prod" style="align-items:flex-start"><div style="min-width:0">
   <b>#<?= (int)$r['id'] ?> · <?= e($r['product_name']) ?></b>
-  <p><?= e($r['created_at']) ?> · <?= e($r['price']) ?> coins</p>
+  <p><?= e($r['created_at']) ?> · <?= money($r['price']) ?></p>
   <?php if ($r['status'] === 'delivered' && $r['delivery']): ?><div class="dv"><?= e($r['delivery']) ?></div><?php endif; ?>
 </div><span class="badge <?= e($r['status']) ?>"><?= e($r['status']) ?></span></div>
 <?php endforeach; if (!$rows): ?><p>No orders yet. <a href="/shop.php">Visit the shop</a>.</p><?php endif; ?>

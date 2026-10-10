@@ -2,11 +2,13 @@
 require __DIR__ . '/lib.php';
 $u = current_user();
 
-/* ====== Edit your details here ====== */
-$brand   = 'MySite';
-$tagline = 'Premium Digital Tools, All in One Place';
-$sub     = 'Affordable software and digital tool subscriptions. Fast activation and reliable support.';
-$support = 'https://t.me/your_username';   // put your Telegram link here
+/* Everything below can be changed from Admin > Site settings. The text here is only the default. */
+$brand   = site_name();
+$tagline = setting('tagline', 'Premium Digital Tools, All in One Place');
+$sub     = setting('subtitle', 'Affordable software and digital tool subscriptions. Fast activation and reliable support.');
+$support = setting('telegram_url') ?: setting('support_url');
+$logo    = media_url('logo');
+$banner  = media_url('banner');
 $plans = [
   ['name' => 'Starter',  'price' => '৳500',   'per' => '/ month', 'hot' => false,
    'items' => ['1 tool access', 'Email support', 'Monthly renewal']],
@@ -19,25 +21,27 @@ $features = [
   ['⚡', 'Fast Activation', 'Your subscription goes live shortly after payment is confirmed.'],
   ['🛡️', 'Secure Payments', 'Your wallet and account are protected with secure password hashing.'],
   ['🎧', '24/7 Support', 'Contact us directly on Telegram for any issue.'],
-  ['🎁', 'Referral Bonus', 'Refer a friend and earn bonus coins on their first deposit.'],
+  ['🎁', 'Referral Bonus', 'Refer a friend and earn a bonus on their first deposit.'],
 ];
-/* ======================================== */
+$heroStyle = $banner
+  ? "background-image:linear-gradient(rgba(15,23,42,.55),rgba(15,23,42,.55)),url('" . e($banner) . "');background-size:cover;background-position:center;animation:none"
+  : '';
 ?>
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($brand) ?> - <?= e($tagline) ?></title>
 <style>
-:root{--a:#6d28d9;--b:#db2777;--c:#2563eb;--dark:#0f172a}
+:root{--a:#4f46e5;--b:#db2777;--c:#2563eb;--dark:#0f172a}
 *{box-sizing:border-box;margin:0}
 html{scroll-behavior:smooth}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1e293b;background:#f8fafc;overflow-x:hidden}
 a{text-decoration:none;color:inherit}
 nav{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:rgba(15,23,42,.55);backdrop-filter:blur(10px);color:#fff}
-nav .brand{font-weight:800;font-size:1.2rem}
+nav .brand{font-weight:800;font-size:1.2rem;display:inline-flex;align-items:center;gap:8px}
+nav .brand img{height:30px;border-radius:8px}
 nav .links a{margin-left:14px;font-size:.92rem;opacity:.9}
 nav .links .pill{background:#fff;color:var(--a);padding:7px 16px;border-radius:99px;font-weight:600;opacity:1}
-nav button{background:none;border:0;color:#fff;font:inherit;cursor:pointer;margin-left:14px}
 .hero{position:relative;min-height:100vh;display:flex;align-items:center;padding:100px 22px 80px;color:#fff;
  background:linear-gradient(120deg,var(--a),var(--b),var(--c),var(--a));background-size:300% 300%;animation:flow 12s ease infinite;overflow:hidden}
 @keyframes flow{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}
@@ -60,10 +64,10 @@ h2{text-align:center;font-size:1.9rem;margin-bottom:8px}
 .lead{text-align:center;color:#64748b;margin-bottom:36px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:18px}
 .card{background:#fff;border-radius:16px;padding:26px 22px;box-shadow:0 4px 18px #0001;transition:transform .25s,box-shadow .25s}
-.card:hover{transform:translateY(-8px);box-shadow:0 14px 30px #6d28d933}
+.card:hover{transform:translateY(-8px);box-shadow:0 14px 30px #4f46e533}
 .ic{font-size:2rem;margin-bottom:10px}
 .card h3{margin-bottom:6px}.card p{color:#64748b;font-size:.93rem}
-.plans{background:linear-gradient(180deg,#f1f5f9,#ede9fe);max-width:none}
+.plans{background:linear-gradient(180deg,#f1f5f9,#e0e7ff);max-width:none}
 .plans .grid{max-width:1000px;margin:auto}
 .plan{text-align:center;position:relative}
 .plan .price{font-size:2.2rem;font-weight:800;color:var(--a);margin:10px 0}
@@ -84,7 +88,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 @media(max-width:600px){nav .links a.hide{display:none}.plan.hot{transform:none}.plan.hot:hover{transform:translateY(-8px)}.plan.hot.rv.show{transform:none}}
 </style></head><body>
 
-<nav><a class="brand" href="/"><?= e($brand) ?></a>
+<nav><a class="brand" href="/"><?php if ($logo): ?><img src="<?= e($logo) ?>" alt=""><?php endif; ?><?= e($brand) ?></a>
 <div class="links">
 <a class="hide" href="#features">Features</a><a class="hide" href="#plans">Plans</a>
 <?php if ($u): ?>
@@ -94,7 +98,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 <?php endif; ?>
 </div></nav>
 
-<header class="hero">
+<header class="hero" <?= $heroStyle ? 'style="' . $heroStyle . '"' : '' ?>>
   <span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span>
   <div class="in">
     <h1><?= e($tagline) ?></h1>
@@ -126,7 +130,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
       <h3><?= e($p['name']) ?></h3>
       <div class="price"><?= e($p['price']) ?><small> <?= e($p['per']) ?></small></div>
       <ul><?php foreach ($p['items'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul>
-      <a class="btn" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Choose Plan</a>
+      <a class="btn" href="<?= $u ? '/shop.php' : '/register.php' ?>">Choose Plan</a>
     </div>
   <?php endforeach; ?>
   </div>
@@ -134,11 +138,11 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 
 <section class="cta">
   <h2 class="rv">Start Today</h2>
-  <p class="rv">Create an account, add coins, and earn referral bonuses.</p>
+  <p class="rv">Create an account, add balance, and earn referral bonuses.</p>
   <a class="btn w rv" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Create Account</a>
 </section>
 
-<footer>© <?= date('Y') ?> <?= e($brand) ?> · <a href="<?= e($support) ?>" style="color:var(--a)">Telegram Support</a></footer>
+<footer>© <?= date('Y') ?> <?= e($brand) ?><?php if ($support): ?> · <a href="<?= e($support) ?>" style="color:var(--a)" target="_blank" rel="noopener">Support</a><?php endif; ?></footer>
 
 <script>
 const io=new IntersectionObserver(es=>es.forEach(x=>{if(x.isIntersecting){x.target.classList.add('show');io.unobserve(x.target)}}),{threshold:.15});
