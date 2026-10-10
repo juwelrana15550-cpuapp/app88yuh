@@ -4,6 +4,15 @@ $__https = (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && stripos($_SERVER['HTTP
 ini_set('session.gc_maxlifetime', '2592000');
 session_set_cookie_params(['lifetime' => 2592000, 'httponly' => true, 'samesite' => 'Lax', 'secure' => $__https]);
 session_start();
+// Currency switch: /any-page?cur=usd|bdt remembers the choice in a cookie, then returns to the same page without the parameter.
+if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in_array($_GET['cur'], ['bdt', 'usd'], true)) {
+    setcookie('cur', $_GET['cur'], ['expires' => time() + 31536000, 'path' => '/', 'samesite' => 'Lax', 'secure' => $__https]);
+    $__qs = $_GET; unset($__qs['cur']);
+    $__path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+    if ($__path === '' || $__path[0] !== '/' || strncmp($__path, '//', 2) === 0) $__path = '/';
+    header('Location: ' . $__path . ($__qs ? '?' . http_build_query($__qs) : ''));
+    exit;
+}
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
@@ -184,7 +193,23 @@ function mask_email(string $m): string {
     $p = explode('@', $m, 2);
     return mb_substr($p[0], 0, 2) . '***@' . ($p[1] ?? '');
 }
-function money($n): string { return '৳' . number_format((float)$n, 2); }
+/** Dollar rate set by the admin: how many BDT equal 1 USD. 0 = not set (the $ option is hidden). */
+function usd_rate(): float { $r = (float)setting('usd_rate', '0'); return $r > 0 ? $r : 0.0; }
+/** Currency to show: 'usd' only if the user picked it AND the admin has set a rate. The admin panel always shows BDT. */
+function cur_code(): string {
+    if (!empty($GLOBALS['__bdt_only'])) return 'bdt';
+    return (($_COOKIE['cur'] ?? '') === 'usd' && usd_rate() > 0) ? 'usd' : 'bdt';
+}
+/** Amounts are always stored and charged in BDT; this only changes how they are displayed. */
+function money($n): string {
+    $v = (float)$n;
+    if (cur_code() === 'usd') {
+        $u = $v / usd_rate(); $a = abs($u);
+        $d = $a == 0 ? 2 : ($a < 0.1 ? 4 : ($a < 1 ? 3 : 2));   // tiny dollar amounts keep extra decimals
+        return '$' . number_format($u, $d);
+    }
+    return '৳' . number_format($v, 2);
+}
 
 function setting(string $k, string $default = ''): string {
     static $cache = null;
@@ -235,6 +260,7 @@ function flash_html(): void {
 
 function icon(string $n): string {
     static $p = [
+        'user'    => '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
         'gauge'   => '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
         'coins'   => '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/>',
         'cart'    => '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>',
@@ -324,6 +350,9 @@ document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListene
   var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
   b.textContent=i.type==='password'?'Show':'Hide';});});
 document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){document.body.classList.remove('menu');if(fb)fb.classList.remove('open');}});
+document.querySelectorAll('.cur a').forEach(function(a){a.addEventListener('click',function(e){
+  e.preventDefault();if(a.classList.contains('on'))return;
+  var u=new URL(location.href);u.searchParams.set('cur',a.dataset.cur);location.href=u.toString();});});
 </script>
 </body></html>
 <?php }
@@ -339,8 +368,13 @@ function user_start(string $title, array $u, string $active): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
     $GLOBALS['__active'] = $active;
     page_head($title, 'app'); ?>
-<div class="top"><button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
-<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><?= e(site_name()) ?></a></div>
+<div class="top">
+<a class="tp-prof<?= $active === 'profile' ? ' on' : '' ?>" href="/profile.php" aria-label="Profile" title="Profile"><?= icon('user') ?></a>
+<?php if (usd_rate() > 0): $curNow = cur_code(); ?>
+<div class="cur" role="group" aria-label="Currency"><a href="?cur=usd" data-cur="usd" class="<?= $curNow === 'usd' ? 'on' : '' ?>">$</a><a href="?cur=bdt" data-cur="bdt" class="<?= $curNow === 'bdt' ? 'on' : '' ?>">BDT</a></div>
+<?php endif; ?>
+<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><span class="bn"><?= e(site_name()) ?></span></a>
+<button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button></div>
 <div class="shade" onclick="document.body.classList.remove('menu')"></div>
 <aside class="side sd" aria-label="Account menu">
   <div class="sd-head">
@@ -539,13 +573,17 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 /** "Buy Now": the dialog is built by JS on the first click and attached to <body> (always above everything, no server-side hand-off needed). */
 function buy_modal_html(float $balance, int $c, string $q): void {
     csrf_field();   // makes sure the session has a CSRF token
-    $cfg = ['csrf' => (string)($_SESSION['csrf'] ?? ''), 'bal' => round($balance, 2), 'c' => $c ?: '', 'q' => $q]; ?>
+    $cfg = ['csrf' => (string)($_SESSION['csrf'] ?? ''), 'bal' => round($balance, 2), 'c' => $c ?: '', 'q' => $q, 'cur' => cur_code(), 'rate' => usd_rate()]; ?>
 <script>
 (function(){
   var SX=window.SX=<?= json_encode($cfg, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
   var CAP=10000, M=null, F,Q,go,msg, cur=null, last=null, hideT=null;
   var $=function(i){return document.getElementById(i)};
-  var fmt=function(n){return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
+  // All maths stay in BDT (what is charged); fmt only changes how an amount is shown.
+  var fmt=function(n){
+    if(SX.cur==='usd'&&SX.rate>0){ var u=n/SX.rate, a=Math.abs(u), d=a===0?2:(a<0.1?4:(a<1?3:2)); return '$'+u.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}); }
+    return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  };
   var TPL='<div class="bx-bd" data-x></div>'
    +'<form method="post" action="/dashboard.php" class="bx-sh" id="buyF" role="dialog" aria-modal="true" aria-labelledby="bmT" autocomplete="off">'
    +'<input type="hidden" name="csrf" value=""><input type="hidden" name="product_id" id="bmId" value=""><input type="hidden" name="c" value=""><input type="hidden" name="q" value="">'

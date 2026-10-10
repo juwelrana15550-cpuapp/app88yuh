@@ -1,5 +1,10 @@
 :root{--a:#4f46e5;--b:#7c3aed;--c:#2563eb;--ink:#1e293b;--mut:#64748b;--line:#e2e8f0}
-*{box-sizing:border-box;margin:0}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+/* no blue tap flash / focus box when tapping buttons, links and menus */
+html{-webkit-tap-highlight-color:transparent}
+a,button,summary,label,select,[role=button]{-webkit-tap-highlight-color:transparent;touch-action:manipulation;-webkit-touch-callout:none}
+a:focus,button:focus,summary:focus,[role=button]:focus{outline:0}
+button,.btn,.top,.tabbar,.fab,.sd-nav,.chip,.sx-cat,.cur{-webkit-user-select:none;user-select:none}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);min-height:100vh;overflow-x:hidden;-webkit-text-size-adjust:100%}
 a{color:var(--a);text-decoration:none}
 svg.i{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
@@ -432,3 +437,16 @@ body.modal{overflow:hidden}
 .sd-lo button svg.i{width:18px;height:18px}
 @media(min-width:900px){.side.sd{width:290px;max-width:290px}.sd-x{display:none}}
 body.menu .fab{opacity:0;pointer-events:none}
+
+/* ===== Top bar: profile icon + currency switch (left), brand, menu button (right) ===== */
+.top{gap:10px}
+.tp-prof{width:38px;height:38px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:12px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);color:#fff}
+.tp-prof svg.i{width:20px;height:20px}
+.tp-prof.on{background:rgba(255,255,255,.32)}
+.cur{display:inline-flex;flex:none;padding:3px;border-radius:99px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.26)}
+.cur a{min-width:34px;padding:7px 10px;border-radius:99px;color:rgba(255,255,255,.85);font-size:.78rem;font-weight:700;line-height:1;text-align:center}
+.cur a.on{background:#fff;color:#4338ca;box-shadow:0 4px 10px -4px rgba(0,0,0,.4)}
+.top .brand{min-width:0}
+.top .brand .bn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.top .burger{margin-left:auto;flex:none}
+@media(max-width:380px){.top{gap:8px;padding-left:12px;padding-right:12px}.cur a{min-width:30px;padding:7px 8px}}
