@@ -417,7 +417,7 @@ function catalog_url(array $x): string {
 function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
-    $card = function (array $p) use ($byId) {
+    $card = function (array $p) use ($byId, $c, $q) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
         $icon = product_icon_value($p, $k);
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
@@ -433,9 +433,9 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
-      <div class="pc-buy">
-        <button type="button" class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
-      </div>
+      <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
+      </form>
     </div>
 <?php }; ?>
 <?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e(catalog_url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
@@ -451,16 +451,16 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
     echo app_icon_sprite(); ?>
 <style>
 /* Category tiles - self-contained, does not depend on style.css */
-.sx-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(98px,1fr));gap:10px;margin:14px 0 18px}
-.sx-cat{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding:12px 6px 10px;background:#fff;border:1.5px solid #e2e8f0;border-radius:14px;text-align:center;color:#1e293b;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:transform .15s,border-color .15s,box-shadow .15s,background .15s}
-.sx-cat:hover{transform:translateY(-2px);border-color:#a5b4fc}
-.sx-cat:active{transform:scale(.97)}
-.sx-cat .sx-ci{display:flex;align-items:center;justify-content:center;height:34px;font-size:26px;line-height:1;color:#4f46e5}
-.sx-cat .sx-ci svg{width:34px;height:34px}
-.sx-cat b{font-size:13px;font-weight:600;line-height:1.25;word-break:break-word}
-.sx-cat em{font-style:normal;font-size:11px;color:#64748b}
-.sx-cat.on{border-color:#4f46e5;background:#eef2ff;box-shadow:0 0 0 3px rgba(79,70,229,.15)}
-.sx-cat.on b{color:#3730a3}
+.sx-cats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0 18px}
+@media(min-width:640px){.sx-cats{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}}
+.sx-cat{display:flex;align-items:center;gap:10px;min-width:0;min-height:52px;padding:10px 12px;background:#fff;border:1.5px solid #e2e8f0;border-radius:12px;color:#1e293b;font-size:15px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:border-color .15s,box-shadow .15s,background .15s,transform .1s}
+.sx-cat:hover{border-color:#c4b5fd}
+.sx-cat:active{transform:scale(.98)}
+.sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:30px;height:30px;font-size:22px;line-height:1}
+.sx-cat .sx-ci svg{width:30px;height:30px;display:block}
+.sx-cat b{flex:1;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sx-cat.on{border-color:#7c3aed;background:#f5f3ff;box-shadow:0 0 0 2px rgba(124,58,237,.18)}
+.sx-cat.on b{color:#5b21b6}
 #cat-res{scroll-margin-top:72px}
 #cat-res.busy{opacity:.55;transition:opacity .15s}
 /* Product card: stock badge + ID */
@@ -519,9 +519,9 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
   <button>Search</button>
 </form>
 <div class="sx-cats" id="catRow">
-  <a class="sx-cat <?= $c ? '' : 'on' ?>" data-c="0" href="<?= e(catalog_url(['q' => $q])) ?>"><span class="sx-ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><b>All</b><em><?= (int)$total ?> items</em></a>
+  <a class="sx-cat <?= $c ? '' : 'on' ?>" data-c="0" title="All (<?= (int)$total ?>)" href="<?= e(catalog_url(['q' => $q])) ?>"><b>All</b></a>
   <?php foreach ($cats as $k): ?>
-  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '34px') ?></span><b><?= e($k['name']) ?></b><em><?= (int)$k['n'] ?> items</em></a>
+  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '30px') ?></span><b><?= e($k['name']) ?></b></a>
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
@@ -562,7 +562,19 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
 </div>
 <script>
 (function(){
-  var M=document.getElementById('buyM'); if(!M) return;
+  var M=document.getElementById('buyM');
+  // Registered first, in the capture phase (nothing else on the page can swallow the click). If the dialog cannot open for any
+  // reason, a plain confirm box is shown and the card's own form buys 1 item - so Buy Now never ends up dead.
+  document.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('[data-buy]'):null; if(!b||b.disabled) return;
+    e.preventDefault();
+    try{ if(!M) throw new Error('buy dialog missing'); open(b); }
+    catch(err){
+      if(window.console) console.error(err);
+      if(window.confirm('Buy 1 \u00D7 '+(b.dataset.name||'this product')+'?') && b.form){ b.disabled=true; b.form.submit(); }
+    }
+  },true);
+  if(!M) return;
   var BAL=<?= json_encode(round($balance, 2)) ?>, CAP=10000;
   var $=function(i){return document.getElementById(i)};
   var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null, hideT=null;
@@ -613,7 +625,7 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     document.documentElement.style.overflow='hidden';
     void M.offsetWidth;                       // force a reflow so the slide-up animation runs
     M.classList.add('show');
-    setTimeout(function(){ try{ Q.focus({preventScroll:true}); Q.select(); }catch(e){} }, 150);
+    if(!(window.matchMedia&&matchMedia('(pointer:coarse)').matches)) setTimeout(function(){ try{ Q.focus({preventScroll:true}); Q.select(); }catch(e){} }, 150);
   }
   function close(){
     M.classList.remove('show'); M.setAttribute('aria-hidden','true');
@@ -622,17 +634,6 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     hideT=setTimeout(function(){ M.classList.remove('open'); hideT=null; }, 230);
     if(last){ try{ last.focus({preventScroll:true}); }catch(e){} }
   }
-  // Delegated click on the document: also works for cards added later by the category switcher.
-  document.addEventListener('click',function(e){
-    var b=e.target.closest&&e.target.closest('[data-buy]'); if(!b||b.disabled) return;
-    e.preventDefault();
-    try{ open(b); }
-    catch(err){
-      if(window.console) console.error(err);
-      // last-resort fallback: plain confirm box, then post the order for quantity 1
-      if(window.confirm('Buy 1 \u00D7 '+(b.dataset.name||'this product')+'?')){ $('bmId').value=b.dataset.id; Q.value=1; F.submit(); }
-    }
-  });
   M.querySelectorAll('[data-x]').forEach(function(x){ x.addEventListener('click',close); });
   document.addEventListener('keydown',function(e){ if(e.key==='Escape' && M.classList.contains('open')) close(); });
   $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
