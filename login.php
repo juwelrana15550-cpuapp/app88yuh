@@ -15,7 +15,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 header_html('Login', null, 'auth'); ?>
 <div class="card">
-<div class="logo">🔐</div>
+<?= logo_html('🔐') ?>
 <h2>Welcome Back</h2>
 <p class="sub">Login to your account</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
