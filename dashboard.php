@@ -14,7 +14,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $st = $pdo->prepare('SELECT * FROM products WHERE id = ? AND active = 1 FOR UPDATE');
             $st->execute([(int)($_POST['product_id'] ?? 0)]); $p = $st->fetch();
             if (!$p) throw new RuntimeException('Product not found.');
-            if ($p['stock'] !== null) {
+            $auto  = !empty($p['auto_delivery']);
+            $items = [];
+            if ($auto) {
+                // Instant delivery: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
+                $it = $pdo->prepare('SELECT id, line FROM stock_items WHERE product_id = ? AND order_id IS NULL ORDER BY id LIMIT ' . (int)$qty . ' FOR UPDATE');
+                $it->execute([$p['id']]); $items = $it->fetchAll();
+                if (!$items) throw new RuntimeException('Sorry, this product is out of stock.');
+                if (count($items) < $qty) throw new RuntimeException('Only ' . number_format(count($items)) . ' available right now. Please lower the quantity.');
+            } elseif ($p['stock'] !== null) {
                 $have = (int)$p['stock'];
                 if ($have < 1) throw new RuntimeException('Sorry, this product is out of stock.');
                 if ($have < $qty) throw new RuntimeException('Only ' . number_format($have) . ' available right now. Please lower the quantity.');
@@ -23,14 +31,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((int)round($coins * 100) < $cents) throw new RuntimeException('Not enough balance. Please add funds first.');
             $total = number_format($cents / 100, 2, '.', '');
             $pdo->prepare('UPDATE users SET coins = coins - ? WHERE id = ?')->execute([$total, $u['id']]);
-            if ($p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
-            $pdo->prepare('INSERT INTO orders (user_id, product_id, product_name, price, qty) VALUES (?,?,?,?,?)')
-                ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
+            if ($auto) {
+                $pdo->prepare("INSERT INTO orders (user_id, product_id, product_name, price, qty, status, delivery) VALUES (?,?,?,?,?,'delivered',?)")
+                    ->execute([$u['id'], $p['id'], $p['name'], $total, $qty, implode("\n", array_column($items, 'line'))]);
+            } else {
+                if ($p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
+                $pdo->prepare('INSERT INTO orders (user_id, product_id, product_name, price, qty) VALUES (?,?,?,?,?)')
+                    ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
+            }
             $id = (int)$pdo->lastInsertId();   // read before add_tx inserts another row
+            if ($auto) {
+                $pdo->exec('UPDATE stock_items SET order_id = ' . (int)$id . ' WHERE id IN (' . implode(',', array_map('intval', array_column($items, 'id'))) . ')');
+                stock_sync($pdo, (int)$p['id']);
+                $GLOBALS['__instant'] = true;
+            }
             add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : ''));
             return $id;
         });
-        flash('ok', 'Purchase successful! Your order is below.');
+        flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
     } catch (RuntimeException $ex) {
         flash('err', $ex->getMessage());
     } catch (Throwable $ex) {

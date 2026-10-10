@@ -361,3 +361,30 @@ body.modal{overflow:hidden}
 /* category switcher: list dims while the next one loads */
 #cat-res{transition:opacity .15s;min-height:160px}
 #cat-res.busy{opacity:.45;pointer-events:none}
+
+/* ===== Many categories: on phones show one compact button + a searchable sheet instead of a wall of chips ===== */
+.catbtn{display:none}
+@media(max-width:699px){
+  .chips-row{display:none}
+  .catbtn{display:flex;align-items:center;gap:12px;width:100%;margin:12px 0 4px;padding:10px 14px;background:#fff;border:1px solid rgba(148,163,184,.32);border-radius:16px;font:inherit;color:var(--ink);cursor:pointer;text-align:left;box-shadow:0 1px 2px #0f172a0a,0 12px 28px -16px #1e1b4b55;-webkit-tap-highlight-color:transparent}
+  .catbtn:active{transform:scale(.99)}
+  .cb-ic{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,#eef2ff,#f5f3ff);border:1px solid #e0e7ff;display:flex;align-items:center;justify-content:center;flex:none;font-size:1.1rem;overflow:hidden}
+  .cb-ic svg.appi{width:100%;height:100%;vertical-align:0!important}
+  .cb-t{flex:1;min-width:0}.cb-t small{display:block;font-size:.72rem;line-height:1.1}
+  .cb-t b{display:block;font-size:1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .catbtn em{font-style:normal;font-size:.72rem;font-weight:700;background:#eef2ff;color:#4338ca;border-radius:99px;padding:2px 9px}
+  .cb-chev{width:9px;height:9px;border-right:2px solid #64748b;border-bottom:2px solid #64748b;transform:rotate(45deg);margin:0 4px 3px 2px;flex:none}
+}
+.cs-b{padding:12px 16px 18px}
+.cs-s{position:relative}
+.cs-s svg.i{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#94a3b8;width:18px;height:18px}
+.cs-s input[type=search]{width:100%;padding:12px 14px 12px 40px;border:1.5px solid rgba(148,163,184,.4);border-radius:12px;font:inherit;background:#fff}
+.cs-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;max-height:min(52vh,420px);overflow-y:auto;overscroll-behavior:contain;padding-bottom:4px}
+.cs-i{display:flex;align-items:center;gap:8px;min-width:0;padding:9px 10px;border:1px solid rgba(148,163,184,.32);border-radius:12px;background:#fff;color:#334155;font:inherit;font-size:.86rem;font-weight:600;text-align:left;cursor:pointer}
+.cs-i .ci{font-size:1rem;line-height:0;flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center}
+.cs-i .ci svg.appi{width:26px;height:26px;vertical-align:0!important}
+.cs-i span:not(.ci){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-i em{font-style:normal;font-size:.68rem;font-weight:700;background:#eef2ff;color:#4338ca;border-radius:99px;padding:1px 7px;flex:none}
+.cs-i.on{background:linear-gradient(135deg,var(--a),var(--b));color:#fff;border-color:transparent}
+.cs-i.on em{background:rgba(255,255,255,.26);color:#fff}
+.cs-none{text-align:center;color:var(--mut);padding:18px 0}

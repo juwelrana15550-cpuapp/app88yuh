@@ -193,3 +193,12 @@ dialog::backdrop{background:rgba(20,14,48,.55)}
   .rt td[colspan]{flex:1 1 100%}
 }
 @media (max-width:640px){.adm .rt td.hm{display:none}}
+
+/* ---------- instant-delivery stock ---------- */
+.tag.auto{background:var(--ok-bg);color:#0b7a53}
+.adm .stk-ta{min-height:170px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;overflow:auto}
+.sinfo{margin:6px 0 0;color:var(--mute)}.sinfo b{color:var(--text)}
+.sinfo2{display:block;margin-top:14px;line-height:1.5}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.dlg-f.sf{align-items:center}.dlg-f.sf .grow{flex:1}
+.btn.ghost.red-t{color:var(--red)}.btn.ghost.red-t:hover{background:var(--red-bg);border-color:var(--red)}

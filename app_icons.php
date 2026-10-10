@@ -105,11 +105,12 @@ function app_icon_sprite(): string { return ''; }
 
 /** One self-contained inline SVG icon (own gradients, unique ids) - works in every browser/WebView. */
 function app_icon_svg(string $k, string $size = '1.1em'): string {
-    static $n = 0;
+    static $n = 0, $pre = null;
+    $pre ??= 'ai' . dechex(random_int(0x1000, 0xffff)) . '_';   // unique per request: ids from an AJAX-swapped list must not clash with ids already on the page
     $set = app_icons();
     if (!isset($set[$k])) $k = 'shop';
     $d = $set[$k];
-    $u = 'ai' . (++$n);
+    $u = $pre . (++$n);
     $fill = $d[3] ? 'url(#' . $u . 'g)' : $d[2];
     $defs = '<defs>'
         . ($d[3] ? '<linearGradient id="' . $u . 'g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' . $d[2] . '"/><stop offset="1" stop-color="' . $d[3] . '"/></linearGradient>' : '')

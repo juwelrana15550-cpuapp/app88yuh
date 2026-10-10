@@ -1,4 +1,5 @@
 <?php require __DIR__ . '/lib.php';
+require __DIR__ . '/stock_import.php';
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
@@ -25,6 +26,7 @@ function product_fields(): array {
         'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
+        'auto'    => empty($_POST['auto_delivery']) ? 0 : 1,   // 1 = deliver uploaded stock instantly
     ];
 }
 function category_fields(): array {
@@ -42,6 +44,10 @@ function category_fields(): array {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!$_POST && !$_FILES && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0 && !empty($_SESSION['admin'])) {
+        flash('err', 'That upload is bigger than the server allows (limit ' . ini_get('post_max_size') . '). Please upload it in smaller parts.');
+        header('Location: /admin.php?p=products'); exit;
+    }
     csrf_check();
     if (isset($_POST['admin_logout'])) { unset($_SESSION['admin']); header('Location: /admin.php'); exit; }
 
@@ -96,15 +102,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'],
                 ]];
             } elseif ($isEdit) {
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], (int)$_POST['update_product']]);
+                $pid = (int)$_POST['update_product'];
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $pid]);
+                if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
                 go('products', 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular) VALUES (?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular']]);
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery) VALUES (?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto']]);
+                if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
                 go('products', 'Product added.');
             }
 
@@ -135,6 +144,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
             go('categories', 'Category deleted.');
 
+        } elseif (isset($_POST['upload_stock'])) {
+            $page = 'products';
+            try {
+                $got = stock_collect((string)($_POST['stock_text'] ?? ''), $_FILES['stock_file'] ?? null, !empty($_POST['skip_header']));
+                if (!$got['lines']) throw new RuntimeException('Nothing to add. Paste some items or choose a file.');
+                [$added, $dup] = stock_add($pdo, (int)$_POST['upload_stock'], $got['lines'], !empty($_POST['dedupe']));
+                $msg = number_format($added) . ' item' . ($added === 1 ? '' : 's') . ' added. This product now delivers instantly.';
+                if ($dup) $msg .= ' ' . number_format($dup) . ' duplicate' . ($dup === 1 ? '' : 's') . ' skipped.';
+                if ($got['long']) $msg .= ' ' . number_format($got['long']) . ' line(s) skipped (over ' . STOCK_MAX_LEN . ' characters).';
+                go('products', $msg);
+            } catch (RuntimeException $ex) { flash('err', $ex->getMessage()); go('products'); }
+
+        } elseif (isset($_POST['clear_stock'])) {
+            $pid = (int)$_POST['clear_stock'];
+            with_tx($pdo, function (PDO $pdo) use ($pid) {
+                $pdo->prepare('DELETE FROM stock_items WHERE product_id = ? AND order_id IS NULL')->execute([$pid]);
+                stock_sync_if_auto($pdo, $pid);
+            });
+            go('products', 'Unsold items removed.');
+
         } elseif (isset($_POST['toggle_product'])) {
             $pdo->prepare('UPDATE products SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_product']]);
             go('products', 'Product visibility updated.');
@@ -151,7 +180,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare("UPDATE orders SET status='cancelled' WHERE id=?")->execute([$oid]);
                         $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
                         add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
-                        $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL')->execute([max(1, (int)$o['qty']), $o['product_id']]);
+                        $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL AND auto_delivery = 0')->execute([max(1, (int)$o['qty']), $o['product_id']]);
                     }
                 }
             });
@@ -352,14 +381,16 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular']]; ?>
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery']];
+    $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?= money($p['price']) ?></td>
-    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) ?></td>
+    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : '') ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
+      <button type="button" class="btn sm ghost" data-stock="<?= e(json_encode($sj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('plus') ?>Stock</button>
       <button type="button" class="btn sm ghost" data-edit-p="<?= e(json_encode($pj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('pencil') ?>Edit</button>
       <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="toggle_product" value="<?= (int)$p['id'] ?>"><?= $p['active'] ? 'Hide' : 'Show' ?></button></form>
     </div></td>
@@ -378,7 +409,23 @@ $lg = media_url('logo');
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
+  <label class="chk" style="margin-top:12px"><input type="checkbox" name="auto_delivery" id="p_auto" value="1"> <span>Instant delivery from uploaded stock</span></label>
+  <small id="p_autoNote" style="display:block;margin-top:4px">Stock = number of unsold uploaded items. Use the “Stock” button on the product to upload them.</small>
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pSave" name="add_product" value="1">Save product</button></div>
+</form></dialog>
+
+<dialog id="sdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
+  <div class="dlg-h"><h3>Add stock</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
+  <p id="sInfo" class="sinfo"></p>
+  <label>Paste items <small>(one per line, e.g. <span class="mono">mail@gmail.com|password</span>)</small></label>
+  <textarea name="stock_text" id="s_text" class="stk-ta" spellcheck="false" placeholder="mail1@gmail.com|password1&#10;mail2@gmail.com|password2"></textarea>
+  <label>…or upload a file <small>(.txt, .csv or .xlsx — first sheet is used)</small></label>
+  <input type="file" name="stock_file" id="s_file" accept=".txt,.csv,.tsv,.xlsx,text/plain,text/csv">
+  <label class="chk" style="margin-top:14px"><input type="checkbox" name="dedupe" value="1" checked> <span>Skip items that are already in stock</span></label>
+  <label class="chk" style="margin-top:8px"><input type="checkbox" name="skip_header" value="1"> <span>First row is a header — skip it</span></label>
+  <small class="sinfo2">When a customer buys, the oldest unsold items are delivered to them <b>instantly</b> and removed from stock. For spreadsheets, each row becomes one item (columns joined with “|”).</small>
+  <div class="dlg-f sf"><button type="submit" class="btn ghost red-t" id="sClear" name="clear_stock" value="" formnovalidate>Clear unsold</button><span class="grow"></span>
+    <button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="sSave" name="upload_stock" value="">Add to stock</button></div>
 </form></dialog>
 
 <?php /* ============================ CATEGORIES ============================ */ elseif ($page === 'categories'): ?>
@@ -478,17 +525,32 @@ $lg = media_url('logo');
   /* ---------- products ---------- */
   var pd=$('#pdlg');
   if(pd){
+    var autoSync=function(){ var on=$('#p_auto').checked; $('#p_stock').disabled=on; $('#p_autoNote').style.display=on?'block':'none'; if(on) $('#p_stock').value=''; };
+    $('#p_auto').addEventListener('change',autoSync);
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
+      $('#p_auto').checked=!!+v.auto; autoSync();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
+
+    /* stock upload dialog */
+    var sd=$('#sdlg'), sClear=$('#sClear');
+    $$('[data-stock]').forEach(function(b){ b.addEventListener('click',function(){
+      var v=JSON.parse(b.dataset.stock);
+      $('#sInfo').innerHTML='<b></b> &middot; <span></span>'; $('#sInfo b').textContent=v.name; $('#sInfo span').textContent=v.left.toLocaleString('en-US')+' unsold item'+(v.left===1?'':'s')+' in stock';
+      $('#s_text').value=''; $('#s_file').value='';
+      $('#sSave').value=v.id; sClear.value=v.id; sClear.style.display=v.left>0?'':'none'; sClear.dataset.left=v.left;
+      sd.showModal();
+    }); });
+    sClear.addEventListener('click',function(e){ if(!confirm('Delete all '+Number(sClear.dataset.left).toLocaleString('en-US')+' unsold items of this product?')) e.preventDefault(); });
+    $('#sSave').addEventListener('click',function(e){ if(!$('#s_text').value.trim() && !$('#s_file').value){ e.preventDefault(); alert('Paste some items or choose a file first.'); } });
 
     var q=$('#pq'), c=$('#pcat'), none=$('#pnone');
     var filt=function(){
@@ -517,7 +579,7 @@ $lg = media_url('logo');
       var opt=null; $$('.ipk-o').forEach(function(o){ var on=o.dataset.v===v; o.classList.toggle('sel',on); if(on)opt=o; });
       if(v.indexOf('app:')===0){
         if(!opt){ opt=$('.ipk-o[data-v="app:shop"]'); hid.value='app:shop'; }
-        cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai\d+[gs]/g,function(m){return m+'p';});
+        cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai[0-9a-f]+_\d+[gs]/g,function(m){return m+'p';});
         var sv=cur.firstChild; sv.setAttribute('width','32'); sv.setAttribute('height','32');
         nm.textContent=opt.dataset.n; em.value='';
       } else { cur.textContent=v; nm.textContent='Emoji'; em.value=v; }

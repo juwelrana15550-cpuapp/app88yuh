@@ -7,7 +7,7 @@ session_start();
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 
 function db(): PDO {
     static $pdo = null;
@@ -119,12 +119,22 @@ function migrate(PDO $pdo): void {
         sort_order INT NOT NULL DEFAULT 0,
         active TINYINT(1) NOT NULL DEFAULT 1
     ) ENGINE=InnoDB");
+    // Uploaded stock for instant delivery: one row = one sellable item (a line such as mail|password). order_id NULL = still unsold.
+    $pdo->exec("CREATE TABLE IF NOT EXISTS stock_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        product_id INT NOT NULL,
+        line VARCHAR(1000) NOT NULL,
+        order_id INT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_prod_sold (product_id, order_id, id)
+    ) ENGINE=InnoDB");
     // New product columns (stock NULL = unlimited, so existing products keep working). Errors 1060/1061 = already there.
     foreach ([
         "ALTER TABLE products ADD COLUMN category_id INT NULL",
         "ALTER TABLE products ADD COLUMN stock INT NULL",
         "ALTER TABLE products ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT ''",
         "ALTER TABLE products ADD COLUMN popular TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD COLUMN auto_delivery TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD INDEX idx_category (category_id)",
         "ALTER TABLE orders ADD COLUMN qty INT NOT NULL DEFAULT 1",
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
@@ -133,6 +143,15 @@ function migrate(PDO $pdo): void {
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
     }
     $pdo->prepare("INSERT INTO settings (k, v) VALUES ('schema_v', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([SCHEMA_VERSION]);
+}
+
+/** For instant-delivery products the shown stock is simply the number of unsold uploaded items. */
+function stock_sync(PDO $pdo, int $pid): void {
+    $pdo->prepare('UPDATE products SET stock = (SELECT COUNT(*) FROM stock_items WHERE product_id = ? AND order_id IS NULL) WHERE id = ?')->execute([$pid, $pid]);
+}
+function stock_sync_if_auto(PDO $pdo, int $pid): void {
+    $st = $pdo->prepare('SELECT auto_delivery FROM products WHERE id = ?'); $st->execute([$pid]);
+    if ((int)$st->fetchColumn() === 1) stock_sync($pdo, $pid);
 }
 
 /** Run $fn inside a transaction; rolls back on any exception and re-throws. */
@@ -380,9 +399,10 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
+      <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <form method="post"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1">
         <input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button></form>
     </div>
 <?php }; ?>
 <?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e(catalog_url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
@@ -401,6 +421,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
   <?php if ($c): ?><input type="hidden" name="c" value="<?= $c ?>"><?php endif; ?>
   <button>Search</button>
 </form>
+<button type="button" class="catbtn" id="catBtn" aria-haspopup="dialog"><span class="cb-ic" id="cbIc"></span><span class="cb-t"><small>Category</small><b id="cbName">All</b></span><em id="cbN"></em><span class="cb-chev" aria-hidden="true"></span></button>
 <div class="chips-row" id="chipsRow">
   <a class="chip <?= $c ? '' : 'on' ?>" data-c="0" href="<?= e(catalog_url(['q' => $q])) ?>"><span>All</span><em><?= (int)$total ?></em></a>
   <?php foreach ($cats as $k): ?>
@@ -408,7 +429,24 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
-<?php ob_start(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it can sit above the tab bar ?>
+<?php ob_start(); cat_sheet_html(); buy_modal_html($balance, $c, $q); $GLOBALS['__modal'] = ob_get_clean(); // printed by user_end(), outside <main>, so it can sit above the tab bar ?>
+<?php }
+
+/** Category picker sheet for phones: lists every category (copied from the chips row by JS) with a search box. */
+function cat_sheet_html(): void { ?>
+<div class="mdl" id="catM" hidden>
+  <div class="mdl-bd" data-cx></div>
+  <div class="mdl-sh" role="dialog" aria-modal="true" aria-labelledby="csT">
+    <span class="mdl-grip" aria-hidden="true"></span>
+    <div class="mdl-h"><span class="mdl-ic"><?= icon('search') ?></span><div class="mdl-t"><b id="csT">Choose a category</b><small>Tap one to filter products</small></div>
+      <button type="button" class="mdl-x" data-cx aria-label="Close"><?= icon('x') ?></button></div>
+    <div class="cs-b">
+      <div class="cs-s"><?= icon('search') ?><input type="search" id="csQ" placeholder="Search categories" autocomplete="off"></div>
+      <div class="cs-list" id="csList"></div>
+      <div class="cs-none" id="csNone" hidden>No category found.</div>
+    </div>
+  </div>
+</div>
 <?php }
 
 /** "Buy Now" confirmation sheet: quantity stepper, live total, wallet check. Opened by buttons carrying data-buy. */
@@ -421,7 +459,7 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     <span class="mdl-grip" aria-hidden="true"></span>
     <div class="mdl-h">
       <span class="mdl-ic" id="bmIc"></span>
-      <div class="mdl-t"><b id="bmT">Product</b><small>Review your order</small></div>
+      <div class="mdl-t"><b id="bmT">Product</b><small id="bmSub">Review your order</small></div>
       <button type="button" class="mdl-x" data-x aria-label="Close"><?= icon('x') ?></button>
     </div>
     <div class="mdl-b">
@@ -451,7 +489,7 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
   var M=document.getElementById('buyM'); if(!M) return;
   var BAL=<?= json_encode(round($balance, 2)) ?>, CAP=10000;
   var $=function(i){return document.getElementById(i)};
-  var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null;
+  var F=$('buyF'), Q=$('bmQ'), go=$('bmGo'), msg=$('bmMsg'), cur=null, last=null, hideT=null;
   var fmt=function(n){return '\u09F3'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
   function maxQty(){ return cur.stock===null ? CAP : Math.max(0, Math.min(cur.stock, CAP)); }
   function showMsg(t,link){ msg.hidden=!t; msg.innerHTML=''; if(t){ msg.appendChild(document.createTextNode(t)); if(link){ var a=document.createElement('a'); a.href='/deposits.php'; a.textContent=' Add funds'; msg.appendChild(a);} } }
@@ -481,7 +519,10 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
   function open(btn){
     last=btn;
     cur={id:btn.dataset.id,name:btn.dataset.name,price:parseFloat(btn.dataset.price),unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
+    cur.auto=btn.dataset.auto==='1';
+    if(hideT){ clearTimeout(hideT); hideT=null; }   // a pending "hide" from a just-closed sheet must not hide this one
     $('bmId').value=cur.id; $('bmT').textContent=cur.name;
+    $('bmSub').textContent=cur.auto?'\u26A1 Instant delivery after purchase':'Review your order';
     $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'');
     $('bmA').textContent=cur.stock===null?'In stock':cur.stock.toLocaleString('en-US')+' pcs';
     var card=btn.closest('.pc'), ic=card&&card.querySelector('.pc-ic'); $('bmIc').innerHTML=ic?ic.innerHTML:'';
@@ -492,10 +533,16 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
   }
   function close(){
     M.classList.remove('show'); document.body.classList.remove('modal');
-    setTimeout(function(){ M.hidden=true; }, 200);
+    if(hideT) clearTimeout(hideT);
+    hideT=setTimeout(function(){ M.hidden=true; hideT=null; }, 200);
     if(last){ try{ last.focus(); }catch(e){} }
   }
-  document.addEventListener('click',function(e){ var b=e.target.closest&&e.target.closest('[data-buy]'); if(!b||b.disabled) return; e.preventDefault(); open(b); });   // delegated: still works after the list is swapped by the category switcher
+  // Delegated + capture phase: works for buttons added later by the category switcher and cannot be swallowed by another handler.
+  document.addEventListener('click',function(e){
+    var b=e.target.closest&&e.target.closest('[data-buy]'); if(!b||b.disabled) return;
+    e.preventDefault();
+    try{ open(b); }catch(err){ if(window.console) console.error(err); location.reload(); }   // never leave the button dead: reload a clean copy of the page
+  },true);
   M.querySelectorAll('[data-x]').forEach(function(x){ x.addEventListener('click',close); });
   document.addEventListener('keydown',function(e){ if(e.key==='Escape' && !M.hidden) close(); });
   $('bmMinus').addEventListener('click',function(){ Q.value=Math.max(1,(parseInt(Q.value,10)||1)-1); render(); });
@@ -513,11 +560,51 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
 (function(){
   var res=document.getElementById('cat-res'), row=document.getElementById('chipsRow'), form=document.getElementById('catF'), buy=document.getElementById('buyF');
   if(!res||!row||!form||!window.fetch) return;
-  var qIn=form.elements.q, state={c:0,q:''}, ctl=null;
+  var qIn=form.elements.q, state={c:0,q:''}, ctl=null, seq=0, tmo=null;
   var on=row.querySelector('.chip.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
   function qs(c,q){ var p=[]; if(c) p.push('c='+c); if(q) p.push('q='+encodeURIComponent(q)); return p.join('&'); }
+  /* compact category button + sheet (phones) */
+  var cb=document.getElementById('catBtn'), cm=document.getElementById('catM'), cl=document.getElementById('csList'), cq=document.getElementById('csQ'), cNone=document.getElementById('csNone'), cHide=null;
+  function uid(h,k){ return h.replace(/(ai[0-9a-f]+_\d+[gs])/g,'$1'+k); }   // chips row is hidden on phones: gradients must live in the copy itself, with their own ids
+  function labelBtn(){
+    var a=row.querySelector('.chip.on')||row.firstElementChild; if(!cb||!a) return;
+    var ci=a.querySelector('.ci'), nm=a.querySelector('span:not(.ci)'), n=a.querySelector('em');
+    document.getElementById('cbIc').innerHTML=ci?uid(ci.innerHTML,'b'):'\u25A6';
+    document.getElementById('cbName').textContent=nm?nm.textContent:'All';
+    document.getElementById('cbN').textContent=n?n.textContent:'';
+  }
+  function sheetOpen(){
+    if(!cm) return; if(cHide){ clearTimeout(cHide); cHide=null; }
+    cl.innerHTML='';
+    Array.prototype.forEach.call(row.children,function(a){
+      var b=document.createElement('button'); b.type='button'; b.className='cs-i'+(a.classList.contains('on')?' on':''); b.dataset.c=a.dataset.c; b.innerHTML=uid(a.innerHTML,'s');
+      var nm=a.querySelector('span:not(.ci)'); b.dataset.n=(nm?nm.textContent:'').toLowerCase(); cl.appendChild(b);
+    });
+    cq.value=''; cNone.hidden=true; cm.hidden=false; document.body.classList.add('modal');
+    requestAnimationFrame(function(){ cm.classList.add('show'); });
+  }
+  function sheetClose(){
+    if(!cm||cm.hidden) return; cm.classList.remove('show'); document.body.classList.remove('modal');
+    cHide=setTimeout(function(){ cm.hidden=true; cHide=null; },200);
+  }
+  if(cb&&cm){
+    cb.addEventListener('click',sheetOpen);
+    cm.querySelectorAll('[data-cx]').forEach(function(x){ x.addEventListener('click',sheetClose); });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape') sheetClose(); });
+    cq.addEventListener('input',function(){
+      var t=cq.value.trim().toLowerCase(), any=false;
+      Array.prototype.forEach.call(cl.children,function(b){ var ok=!t||b.dataset.n.indexOf(t)>-1; b.style.display=ok?'':'none'; if(ok) any=true; });
+      cNone.hidden=any;
+    });
+    cl.addEventListener('click',function(e){
+      var b=e.target.closest('.cs-i'); if(!b) return;
+      var a=row.querySelector('.chip[data-c="'+b.dataset.c+'"]'); sheetClose(); if(a) a.click();   // reuse the chip's own handler
+    });
+    labelBtn();
+  }
   function sync(){
     Array.prototype.forEach.call(row.children,function(a){ a.classList.toggle('on',(parseInt(a.dataset.c,10)||0)===state.c); });
+    labelBtn();
     var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
     buy.elements.c.value=state.c||''; buy.elements.q.value=state.q;
     var a=row.querySelector('.chip.on'); if(a&&a.scrollIntoView) a.scrollIntoView({inline:'center',block:'nearest',behavior:'smooth'});
@@ -526,12 +613,17 @@ function buy_modal_html(float $balance, int $c, string $q): void { ?>
     state.c=c; state.q=q; qIn.value=q; sync();
     var s=qs(c,q), url='/dashboard.php'+(s?'?'+s:'');
     if(push!==false) try{ history.pushState({c:c,q:q},'',url); }catch(e){}
+    var my=++seq, timedOut=false;
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
+    clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);   // slow / hung request: do a normal page load instead of leaving the list greyed out
     res.classList.add('busy'); res.setAttribute('aria-busy','true');
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
-      .then(function(h){ res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy'); })
-      .catch(function(e){ if(e&&e.name==='AbortError') return; location.href=url; });   // any problem: fall back to a normal page load
+      .then(function(h){
+        if(my!==seq) return;                       // a newer click already replaced this request
+        clearTimeout(tmo); res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy');
+      })
+      .catch(function(e){ if(my!==seq) return; if(e&&e.name==='AbortError'&&!timedOut) return; clearTimeout(tmo); location.href=url; });   // any problem: fall back to a normal page load
   }
   row.addEventListener('click',function(e){
     var a=e.target.closest('.chip'); if(!a||e.ctrlKey||e.metaKey||e.shiftKey||e.button) return;
