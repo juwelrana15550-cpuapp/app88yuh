@@ -23,23 +23,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['uid'] = (int)db()->lastInsertId();
             header('Location: /dashboard.php'); exit;
         } catch (PDOException $ex) {
+            error_log('REGISTER ERROR: ' . $ex->getMessage());
             $err = $ex->getCode() === '23000' ? 'This email is already registered.' : 'Something went wrong. Try again.';
         }
     }
 }
-header_html('Register'); ?>
+header_html('Register', null, 'auth'); ?>
 <div class="card">
+<div class="logo">✨</div>
 <h2>Create Account</h2>
+<p class="sub">Join in less than a minute</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
-<label>Email Address</label><input type="email" name="email" required value="<?= e($_POST['email'] ?? '') ?>">
-<label>Password</label><input type="password" name="password" required minlength="8"><small>Must be at least 8 characters</small>
-<label>Confirm Password</label><input type="password" name="confirm" required>
+<label>Email Address</label><input type="email" name="email" required placeholder="you@example.com" value="<?= e($_POST['email'] ?? '') ?>">
+<label>Password</label>
+<div class="pw"><input type="password" id="p1" name="password" required minlength="8"><button type="button" data-toggle="#p1">Show</button></div>
+<small>Must be at least 8 characters</small>
+<label>Confirm Password</label>
+<div class="pw"><input type="password" id="p2" name="confirm" required><button type="button" data-toggle="#p2">Show</button></div>
 <label>Referral Code (Optional)</label><input type="text" name="referral" value="<?= e($ref) ?>">
 <small>Get bonus coins when your referrer makes their first deposit!</small>
-<label style="font-weight:400"><input type="checkbox" name="terms" value="1"> I agree to the Terms of Service and Privacy Policy</label>
+<label class="chk"><input type="checkbox" name="terms" value="1"> <span>I agree to the Terms of Service and Privacy Policy</span></label>
 <button class="btn">Register</button>
 </form>
-<p>Already have an account? <a href="/login.php">Login</a></p>
+<p class="alt">Already have an account? <a href="/login.php">Login</a></p>
 </div>
 <?php footer_html();
