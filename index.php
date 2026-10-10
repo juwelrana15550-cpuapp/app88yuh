@@ -3,12 +3,10 @@ require __DIR__ . '/lib.php';
 $u = current_user();
 
 /* ====== Edit your details here ====== */
-$brand   = site_name();
-$tagline = setting('tagline', 'Premium Digital Tools, All in One Place');
-$sub     = setting('subtitle', 'Affordable software and digital tool subscriptions. Fast activation and reliable support.');
-$support = setting('support_url', '');
-$logoUrl = media_url('logo');
-$bannerUrl = media_url('banner');
+$brand   = 'MySite';
+$tagline = 'Premium Digital Tools, All in One Place';
+$sub     = 'Affordable software and digital tool subscriptions. Fast activation and reliable support.';
+$support = 'https://t.me/your_username';   // put your Telegram link here
 $plans = [
   ['name' => 'Starter',  'price' => '৳500',   'per' => '/ month', 'hot' => false,
    'items' => ['1 tool access', 'Email support', 'Monthly renewal']],
@@ -36,8 +34,7 @@ html{scroll-behavior:smooth}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1e293b;background:#f8fafc;overflow-x:hidden}
 a{text-decoration:none;color:inherit}
 nav{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:rgba(15,23,42,.55);backdrop-filter:blur(10px);color:#fff}
-nav .brand{font-weight:800;font-size:1.2rem;display:inline-flex;align-items:center;gap:8px}
-nav .brand img{height:30px;width:auto;border-radius:8px}
+nav .brand{font-weight:800;font-size:1.2rem}
 nav .links a{margin-left:14px;font-size:.92rem;opacity:.9}
 nav .links .pill{background:#fff;color:var(--a);padding:7px 16px;border-radius:99px;font-weight:600;opacity:1}
 nav button{background:none;border:0;color:#fff;font:inherit;cursor:pointer;margin-left:14px}
@@ -87,7 +84,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 @media(max-width:600px){nav .links a.hide{display:none}.plan.hot{transform:none}.plan.hot:hover{transform:translateY(-8px)}.plan.hot.rv.show{transform:none}}
 </style></head><body>
 
-<nav><a class="brand" href="/"><?php if ($logoUrl): ?><img src="<?= e($logoUrl) ?>" alt=""><?php endif; ?><?= e($brand) ?></a>
+<nav><a class="brand" href="/"><?= e($brand) ?></a>
 <div class="links">
 <a class="hide" href="#features">Features</a><a class="hide" href="#plans">Plans</a>
 <?php if ($u): ?>
@@ -97,7 +94,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 <?php endif; ?>
 </div></nav>
 
-<header class="hero"<?php if ($bannerUrl): ?> style="background:linear-gradient(rgba(15,23,42,.55),rgba(15,23,42,.55)),url('<?= e($bannerUrl) ?>') center/cover no-repeat;animation:none"<?php endif; ?>>
+<header class="hero">
   <span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span>
   <div class="in">
     <h1><?= e($tagline) ?></h1>
@@ -141,7 +138,7 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
   <a class="btn w rv" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Create Account</a>
 </section>
 
-<footer>© <?= date('Y') ?> <?= e($brand) ?><?php if ($support): ?> · <a href="<?= e($support) ?>" style="color:var(--a)">Support</a><?php endif; ?></footer>
+<footer>© <?= date('Y') ?> <?= e($brand) ?> · <a href="<?= e($support) ?>" style="color:var(--a)">Telegram Support</a></footer>
 
 <script>
 const io=new IntersectionObserver(es=>es.forEach(x=>{if(x.isIntersecting){x.target.classList.add('show');io.unobserve(x.target)}}),{threshold:.15});

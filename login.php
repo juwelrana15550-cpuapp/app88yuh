@@ -13,18 +13,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $err = 'Wrong email or password.';
 }
-header_html('Login', null, 'auth'); ?>
+header_html('Login'); ?>
 <div class="card">
-<?= logo_html('🔐') ?>
-<h2>Welcome Back</h2>
-<p class="sub">Login to your account</p>
+<h2>Login</h2>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
-<label>Email Address</label><input type="email" name="email" required placeholder="you@example.com">
-<label>Password</label>
-<div class="pw"><input type="password" id="p1" name="password" required><button type="button" data-toggle="#p1">Show</button></div>
+<label>Email Address</label><input type="email" name="email" required>
+<label>Password</label><input type="password" name="password" required>
 <button class="btn">Login</button>
 </form>
-<p class="alt">No account yet? <a href="/register.php">Register</a></p>
+<p>No account? <a href="/register.php">Register</a></p>
 </div>
 <?php footer_html();

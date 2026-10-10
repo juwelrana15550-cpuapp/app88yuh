@@ -30,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 header_html('Register', null, 'auth'); ?>
 <div class="card">
-<?= logo_html('✨') ?>
+<div class="logo">✨</div>
 <h2>Create Account</h2>
 <p class="sub">Join in less than a minute</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>

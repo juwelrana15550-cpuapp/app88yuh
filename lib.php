@@ -54,7 +54,43 @@ function db(): PDO {
         data MEDIUMBLOB NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS products (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(80) NOT NULL,
+        description VARCHAR(500) NULL,
+        price DECIMAL(12,2) NOT NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS orders (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        product_id INT NOT NULL,
+        product_name VARCHAR(80) NOT NULL,
+        price DECIMAL(12,2) NOT NULL,
+        status ENUM('pending','delivered','cancelled') NOT NULL DEFAULT 'pending',
+        delivery TEXT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX (user_id)
+    ) ENGINE=InnoDB");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS transactions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        note VARCHAR(255) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX (user_id)
+    ) ENGINE=InnoDB");
     return $pdo;
+}
+
+function add_tx(PDO $pdo, int $uid, string $type, float $amount, string $note = ''): void {
+    $pdo->prepare('INSERT INTO transactions (user_id, type, amount, note) VALUES (?,?,?,?)')->execute([$uid, $type, $amount, $note]);
+}
+function mask_email(string $m): string {
+    $p = explode('@', $m, 2);
+    return mb_substr($p[0], 0, 2) . '***@' . ($p[1] ?? '');
 }
 
 function setting(string $k, string $default = ''): string {
@@ -136,9 +172,59 @@ document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener(
   var t=document.querySelector(b.dataset.copy);t.select();
   try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand('copy')}
   var o=b.textContent;b.textContent='Copied!';setTimeout(function(){b.textContent=o},1500);});});
+var fb=document.getElementById('fab');if(fb){fb.querySelector('.fab-main').addEventListener('click',function(){fb.classList.toggle('open')});}
 document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
   var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
   b.textContent=i.type==='password'?'Show':'Hide';});});
 </script>
 </body></html>
 <?php }
+
+function user_start(string $title, array $u, string $active): void {
+    $items = [
+        'dashboard'    => ['/dashboard.php', 'Dashboard', '📊'],
+        'shop'         => ['/shop.php', 'Shop', '🛍️'],
+        'deposits'     => ['/deposits.php', 'Deposits', '💰'],
+        'orders'       => ['/orders.php', 'My Orders', '🛒'],
+        'referrals'    => ['/referrals.php', 'Referrals', '👥'],
+        'transactions' => ['/transactions.php', 'Transactions', '🔁'],
+        'profile'      => ['/profile.php', 'Profile', '⚙️'],
+    ];
+    $name = ucfirst(strstr($u['email'], '@', true) ?: $u['email']);
+    $lg = media_url('logo'); ?>
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title><?= e($title) ?> - <?= e(site_name()) ?></title>
+<link rel="stylesheet" href="/style.css">
+</head><body class="app">
+<div class="top"><button class="burger" type="button" onclick="document.body.classList.toggle('menu')">☰</button>
+<a class="brand" href="/"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><?= e(site_name()) ?></a></div>
+<div class="shade" onclick="document.body.classList.remove('menu')"></div>
+<aside class="side">
+  <div class="sh">
+    <div class="shr"><b>My Account</b><button type="button" class="x" onclick="document.body.classList.remove('menu')">✕</button></div>
+    <div class="who"><div class="av"><?= e(mb_strtoupper(mb_substr($name, 0, 1))) ?></div><div><b><?= e($name) ?></b><small><?= e($u['email']) ?></small></div></div>
+    <div class="bal"><span>Balance</span><b><?= number_format((float)$u['coins'], 2) ?></b></div>
+  </div>
+  <nav class="mn">
+  <?php foreach ($items as $k => $it): ?>
+    <a href="<?= $it[0] ?>" class="<?= $k === $active ? 'on' : '' ?>"><span><?= $it[2] ?></span><?= e($it[1]) ?></a>
+  <?php endforeach; ?>
+  </nav>
+  <form method="post" action="/logout.php" class="lo"><?= csrf_field() ?><button type="submit">⏻ Logout</button></form>
+</aside>
+<main class="wide with-side">
+<?php }
+
+function user_end(): void {
+    $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
+    if ($tg || $wa): ?>
+<div class="fab" id="fab">
+  <?php if ($tg): ?><a class="fab-i tg" href="<?= e($tg) ?>" target="_blank" rel="noopener"><span class="lbl">Telegram Support</span><b>✈</b></a><?php endif; ?>
+  <?php if ($wa): ?><a class="fab-i wa" href="<?= e($wa) ?>" target="_blank" rel="noopener"><span class="lbl">WhatsApp Support</span><b>✆</b></a><?php endif; ?>
+  <button type="button" class="fab-main" aria-label="Support">+</button>
+</div>
+<?php endif;
+    footer_html();
+}

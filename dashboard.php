@@ -1,45 +1,24 @@
 <?php require __DIR__ . '/lib.php';
 $u = require_login();
-$msg = $err = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    csrf_check();
-    $amt = round((float)($_POST['amount'] ?? 0), 2);
-    if ($amt < 1 || $amt > 100000) $err = 'Enter a valid amount.';
-    else {
-        db()->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')
-            ->execute([$u['id'], $amt, substr(trim($_POST['note'] ?? ''), 0, 255)]);
-        $msg = 'Deposit request submitted. It will be credited after admin approval.';
-    }
-}
-$s = db()->prepare('SELECT COUNT(*) FROM users WHERE referred_by = ?'); $s->execute([$u['id']]);
-$refCount = (int)$s->fetchColumn();
-$s = db()->prepare('SELECT * FROM deposits WHERE user_id = ? ORDER BY id DESC LIMIT 20'); $s->execute([$u['id']]);
-$deps = $s->fetchAll();
-$scheme = !empty($_SERVER['HTTP_X_FORWARDED_PROTO']) ? $_SERVER['HTTP_X_FORWARDED_PROTO'] : 'http';
-$link = $scheme . '://' . $_SERVER['HTTP_HOST'] . '/register.php?ref=' . $u['referral_code'];
-header_html('Dashboard', $u); ?>
+$pdo = db();
+$s = $pdo->prepare("SELECT COUNT(*) c, COALESCE(SUM(status='pending'),0) p FROM orders WHERE user_id = ?");
+$s->execute([$u['id']]); $o = $s->fetch();
+$s = $pdo->prepare('SELECT COUNT(*) FROM users WHERE referred_by = ?'); $s->execute([$u['id']]);
+$refs = (int)$s->fetchColumn();
+$s = $pdo->prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 5'); $s->execute([$u['id']]);
+$recent = $s->fetchAll();
+user_start('Dashboard', $u, 'dashboard'); ?>
 <div class="card wallet"><small><?= e($u['email']) ?></small><div class="big"><?= number_format((float)$u['coins'], 2) ?> coins</div><small>Wallet balance</small></div>
-
 <div class="stats">
-  <div class="stat"><span>Referral code</span><b><?= e($u['referral_code']) ?></b></div>
-  <div class="stat"><span>Referred users</span><b><?= $refCount ?></b></div>
+  <div class="stat"><span>Total orders</span><b><?= (int)$o['c'] ?></b></div>
+  <div class="stat"><span>Pending orders</span><b><?= (int)$o['p'] ?></b></div>
+  <div class="stat"><span>Referrals</span><b><?= $refs ?></b></div>
 </div>
-
-<div class="card"><h3>Invite &amp; earn</h3>
-<small>Share your link. You get bonus coins when your friend makes their first deposit.</small>
-<div class="row" style="margin-top:10px"><input type="text" id="reflink" readonly value="<?= e($link) ?>"><button type="button" class="btn sm" data-copy="#reflink">Copy</button></div></div>
-
-<div class="card"><h3>Add coins</h3>
-<?php if ($msg): ?><div class="ok"><?= e($msg) ?></div><?php endif; ?>
-<?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
-<form method="post"><?= csrf_field() ?>
-<label>Amount</label><input type="number" name="amount" step="0.01" min="1" required>
-<label>Payment reference / note</label><input type="text" name="note" maxlength="255" placeholder="Transaction ID or note">
-<button class="btn">Submit deposit request</button></form></div>
-
-<div class="card"><h3>Deposit history</h3>
-<div class="tw"><table><tr><th>#</th><th>Amount</th><th>Status</th><th>Date</th></tr>
-<?php foreach ($deps as $d): ?>
-<tr><td><?= (int)$d['id'] ?></td><td><?= e($d['amount']) ?></td><td><span class="badge <?= e($d['status']) ?>"><?= e($d['status']) ?></span></td><td><?= e($d['created_at']) ?></td></tr>
-<?php endforeach; if (!$deps): ?><tr><td colspan="4">No deposits yet.</td></tr><?php endif; ?></table></div></div>
-<?php footer_html();
+<div class="card"><h3>Quick actions</h3>
+  <div class="row"><a class="btn sm" href="/shop.php">Browse shop</a><a class="btn sm ghost" href="/deposits.php">Add coins</a></div></div>
+<div class="card"><h3>Recent orders</h3>
+<div class="tw"><table><tr><th>#</th><th>Product</th><th>Price</th><th>Status</th></tr>
+<?php foreach ($recent as $r): ?>
+<tr><td><?= (int)$r['id'] ?></td><td><?= e($r['product_name']) ?></td><td><?= e($r['price']) ?></td><td><span class="badge <?= e($r['status']) ?>"><?= e($r['status']) ?></span></td></tr>
+<?php endforeach; if (!$recent): ?><tr><td colspan="4">No orders yet.</td></tr><?php endif; ?></table></div></div>
+<?php user_end();
