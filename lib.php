@@ -7,7 +7,7 @@ session_start();
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '6';
+const SCHEMA_VERSION = '8';
 
 function db(): PDO {
     static $pdo = null;
@@ -136,12 +136,28 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD COLUMN popular TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD COLUMN auto_delivery TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD INDEX idx_category (category_id)",
+        "ALTER TABLE products ADD COLUMN icon VARCHAR(16) NOT NULL DEFAULT ''",   // optional per-product app icon ('' = automatic)
         "ALTER TABLE orders ADD COLUMN qty INT NOT NULL DEFAULT 1",
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
     }
+    // One-time default categories, added only if the shop has none yet. Rename / hide / delete them any time in Admin > Categories.
+    try {
+        if (!$pdo->query("SELECT COUNT(*) FROM settings WHERE k = 'cats_seeded'")->fetchColumn()) {
+            if ((int)$pdo->query('SELECT COUNT(*) FROM categories')->fetchColumn() === 0) {
+                $ins = $pdo->prepare('INSERT INTO categories (name, icon, sort_order) VALUES (?,?,?)');
+                foreach ([
+                    ['Gmail', 'app:gmail'], ['Facebook', 'app:facebook'], ['Instagram', 'app:instagram'],
+                    ['TikTok', 'app:tiktok'], ['Telegram', 'app:telegram'], ['WhatsApp', 'app:whatsapp'],
+                    ['YouTube', 'app:youtube'], ['Netflix', 'app:netflix'], ['Spotify', 'app:spotify'],
+                    ['VPN', 'app:shield'], ['Gift Card', 'app:gift'], ['Premium Tools', 'app:crown'],
+                ] as $i => [$n, $ic]) $ins->execute([$n, $ic, ($i + 1) * 10]);
+            }
+            $pdo->exec("INSERT INTO settings (k, v) VALUES ('cats_seeded', '1') ON DUPLICATE KEY UPDATE v = VALUES(v)");
+        }
+    } catch (Throwable $ex) { error_log('Default categories: ' . $ex->getMessage()); }
     $pdo->prepare("INSERT INTO settings (k, v) VALUES ('schema_v', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([SCHEMA_VERSION]);
 }
 
@@ -375,6 +391,23 @@ function user_end(): void {
     footer_html(false);
 }
 
+/**
+ * Icon to show for a product: 1) the icon the admin picked for it, 2) an automatic guess from the product name
+ * (e.g. a name containing "Gmail" or "Netflix"), 3) the category icon. Returns "app:key", an emoji, or ''.
+ */
+function product_icon_value(array $p, ?array $cat = null): string {
+    $own = trim((string)($p['icon'] ?? ''));
+    if ($own !== '') return $own;
+    $n = mb_strtolower((string)($p['name'] ?? ''));
+    $alias = ['twitter' => 'x', 'vpn' => 'shield', 'hotmail' => 'outlook', 'office' => 'microsoft', 'prime video' => 'amazon', 'gift card' => 'gift'];
+    foreach ($alias as $w => $key) if ($n !== '' && mb_strpos($n, $w) !== false && isset(app_icons()[$key])) return 'app:' . $key;
+    if ($n !== '') foreach (app_icons() as $key => $d) {
+        if ($key === 'shop') continue;
+        foreach ([$key, mb_strtolower($d[0])] as $w) if (mb_strlen($w) >= 3 && mb_strpos($n, $w) !== false) return 'app:' . $key;
+    }
+    return (string)($cat['icon'] ?? '');
+}
+
 function catalog_url(array $x): string {
     $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
     return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
@@ -386,7 +419,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
     $card = function (array $p) use ($byId) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
-        $icon = $k['icon'] ?? '';
+        $icon = product_icon_value($p, $k);
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
         if ($stock === null) { $sl = 'In Stock'; $sc = ''; }
         elseif ($stock <= 0) { $sl = 'Out of stock'; $sc = 'out'; }
@@ -398,7 +431,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
       <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
-      <div class="pc-meta"><span class="pid">ID: <?= (int)$p['id'] ?></span><span class="stk <?= $sc ?>"><?= e($sl) ?></span></div>
+      <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <div class="pc-buy">
         <button type="button" class="btn buy" <?= $out ? 'disabled' : '' ?> data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
@@ -430,6 +463,15 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .sx-cat.on b{color:#3730a3}
 #cat-res{scroll-margin-top:72px}
 #cat-res.busy{opacity:.55;transition:opacity .15s}
+/* Product card: stock badge + ID */
+.sx-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
+.sx-stk{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;line-height:1.3;background:#dcfce7;color:#15803d;border:1px solid #86efac}
+.sx-stk:before{content:"";flex:none;width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.2)}
+.sx-stk.low{background:#fef3c7;color:#b45309;border-color:#fcd34d}
+.sx-stk.low:before{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.22)}
+.sx-stk.out{background:#fee2e2;color:#b91c1c;border-color:#fca5a5}
+.sx-stk.out:before{background:#dc2626;box-shadow:0 0 0 3px rgba(220,38,38,.2)}
+.sx-pid{flex:none;font-size:12px;font-weight:600;color:#64748b;background:#f1f5f9;border-radius:6px;padding:3px 8px}
 /* Buy Now dialog - self-contained, compact, centered */
 .bx{position:fixed;left:0;right:0;top:0;bottom:0;z-index:3000;display:none;align-items:center;justify-content:center;padding:16px}
 .bx.open{display:flex}

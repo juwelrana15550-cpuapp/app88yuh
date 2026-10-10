@@ -27,6 +27,12 @@ function product_fields(): array {
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
         'auto'    => empty($_POST['auto_delivery']) ? 0 : 1,   // 1 = deliver uploaded stock instantly
+        'icon'    => (function () {   // '' = automatic (guessed from the name, else the category icon)
+            $ic = trim($_POST['picon'] ?? '');
+            if ($ic === '') return '';
+            if (strncmp($ic, 'app:', 4) === 0) return isset(app_icons()[substr($ic, 4)]) ? $ic : '';
+            return mb_substr($ic, 0, 8);
+        })(),
     ];
 }
 function category_fields(): array {
@@ -102,17 +108,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'],
                 ]];
             } elseif ($isEdit) {
                 $pid = (int)$_POST['update_product'];
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $pid]);
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
                 go('products', 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery) VALUES (?,?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto']]);
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon) VALUES (?,?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon']]);
                 if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
                 go('products', 'Product added.');
             }
@@ -253,6 +259,29 @@ $rows = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = 
 $users = $pdo->query('SELECT u.id, u.email, u.coins, u.created_at, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs FROM users u ORDER BY u.id DESC LIMIT 100')->fetchAll();
 $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status <> 'pending' ORDER BY d.id DESC LIMIT 30")->fetchAll();
 
+/** Icon picker (searchable app icons + emoji). $auto adds an "Automatic" choice (stored as an empty value). */
+function icon_picker_html(string $pre, string $field, string $initial, bool $auto): string {
+    ob_start(); ?>
+<div class="ipk" id="<?= e($pre) ?>">
+  <button type="button" class="ipk-btn" id="<?= e($pre) ?>Btn" aria-expanded="false" aria-controls="<?= e($pre) ?>Pop"><span class="ipk-cur" id="<?= e($pre) ?>Cur"></span><span class="ipk-name" id="<?= e($pre) ?>Name">Select icon</span><?= ai('chev') ?></button>
+  <div class="ipk-pop" id="<?= e($pre) ?>Pop" hidden>
+    <div class="srch"><?= ai('search') ?><input type="search" id="<?= e($pre) ?>Q" placeholder="Search icons (gmail, facebook, netflix…)" autocomplete="off"></div>
+    <?php if ($auto): ?><button type="button" class="btn sm ghost" id="<?= e($pre) ?>Auto" style="margin-top:10px">&#10024; Automatic (from product name / category)</button><?php endif; ?>
+    <div class="ipk-scroll" id="<?= e($pre) ?>List">
+    <?php $lastG = null; $open = false;
+    foreach (app_icons() as $key => $d):
+      if ($d[1] !== $lastG) { if ($open) echo '</div>'; echo '<div class="ipk-g" data-g>' . e($d[1]) . '</div><div class="ipk-grid">'; $lastG = $d[1]; $open = true; } ?>
+      <button type="button" class="ipk-o" data-v="app:<?= e($key) ?>" data-n="<?= e($d[0]) ?>" title="<?= e($d[0]) ?>"><?= app_icon_svg($key, '40px') ?><span><?= e($d[0]) ?></span></button>
+    <?php endforeach; if ($open) echo '</div>'; ?>
+      <div class="ipk-none" id="<?= e($pre) ?>None">No icon found. Use an emoji below.</div>
+    </div>
+    <div class="ipk-em"><label for="<?= e($pre) ?>Emoji">Or type an emoji <small>(optional)</small></label><input type="text" id="<?= e($pre) ?>Emoji" maxlength="8" placeholder="📧"></div>
+  </div>
+  <input type="hidden" name="<?= e($field) ?>" id="<?= e($pre) ?>Val" value="<?= e($initial) ?>">
+</div>
+<?php return ob_get_clean();
+}
+
 /** Admin-only icons (everything else comes from icon() in lib.php). */
 function ai(string $n): string {
     static $x = [
@@ -381,10 +410,10 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery']];
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? '')];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?= money($p['price']) ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : '') ?></td>
@@ -408,6 +437,16 @@ $lg = media_url('logo');
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
+  <label>App icon <small>(pick one, or leave Automatic - it follows the product name)</small></label>
+  <style>
+    .ipk-q{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+    .ipk-qb{width:46px;height:46px;padding:0;border:1.5px solid #e5e2f3;border-radius:12px;background:#fff;cursor:pointer;display:grid;place-items:center}
+    .ipk-qb:hover{border-color:#cfc6f7}
+    .ipk-qb.sel{border-color:var(--brand);background:var(--brand-soft)}
+    .ipk-qb svg{width:30px;height:30px;display:block}
+  </style>
+  <div class="ipk-q" id="pikQuick" role="group" aria-label="Quick icons"><?php foreach (['gmail','facebook','instagram','tiktok','telegram','whatsapp','youtube','netflix','spotify','shield','gift','crown'] as $qk): if (!isset(app_icons()[$qk])) continue; ?><button type="button" class="ipk-qb" data-v="app:<?= e($qk) ?>" title="<?= e(app_icons()[$qk][0]) ?>" aria-label="<?= e(app_icons()[$qk][0]) ?>"><?= app_icon_svg($qk, '30px') ?></button><?php endforeach; ?></div>
+  <?= icon_picker_html('pik', 'picon', '', true) ?>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <label class="chk" style="margin-top:12px"><input type="checkbox" name="auto_delivery" id="p_auto" value="1"> <span>Instant delivery from uploaded stock</span></label>
   <small id="p_autoNote" style="display:block;margin-top:4px">Stock = number of unsold uploaded items. Use the “Stock” button on the product to upload them.</small>
@@ -451,22 +490,7 @@ $lg = media_url('logo');
   <?php if ($catErr): ?><div class="err" style="margin-top:12px"><?= e($catErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="cname" id="c_name" maxlength="40" required placeholder="e.g. Gmail Account">
   <label>Icon</label>
-  <div class="ipk" id="ipk">
-    <button type="button" class="ipk-btn" id="ipkBtn" aria-expanded="false" aria-controls="ipkPop"><span class="ipk-cur" id="ipkCur"></span><span class="ipk-name" id="ipkName">Select icon</span><?= ai('chev') ?></button>
-    <div class="ipk-pop" id="ipkPop" hidden>
-      <div class="srch"><?= ai('search') ?><input type="search" id="ipkQ" placeholder="Search icons (gmail, facebook, netflix…)" autocomplete="off"></div>
-      <div class="ipk-scroll" id="ipkList">
-      <?php $lastG = null; $open = false;
-      foreach (app_icons() as $key => $d):
-        if ($d[1] !== $lastG) { if ($open) echo '</div>'; echo '<div class="ipk-g" data-g>' . e($d[1]) . '</div><div class="ipk-grid">'; $lastG = $d[1]; $open = true; } ?>
-        <button type="button" class="ipk-o" data-v="app:<?= e($key) ?>" data-n="<?= e($d[0]) ?>" title="<?= e($d[0]) ?>"><?= app_icon_svg($key, '40px') ?><span><?= e($d[0]) ?></span></button>
-      <?php endforeach; if ($open) echo '</div>'; ?>
-        <div class="ipk-none" id="ipkNone">No icon found. Use an emoji below.</div>
-      </div>
-      <div class="ipk-em"><label for="ipkEmoji">Or type an emoji <small>(optional)</small></label><input type="text" id="ipkEmoji" maxlength="8" placeholder="📧"></div>
-    </div>
-    <input type="hidden" name="cicon" id="c_icon" value="app:shop">
-  </div>
+  <?= icon_picker_html('ipk', 'cicon', 'app:shop', false) ?>
   <label>Sort order <small>(smaller shows first)</small></label><input type="number" name="csort" id="c_sort" value="0">
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="cSave" name="add_category" value="1">Save category</button></div>
 </form></dialog>
@@ -522,9 +546,63 @@ $lg = media_url('logo');
     d.addEventListener('click',function(e){ if(e.target===d) d.close(); });
   });
 
+
+  /* icon picker: prefix = element id prefix, defVal = value used when nothing is chosen ('' = automatic) */
+  function picker(pre,defVal,guess){
+    var hid=$('#'+pre+'Val'), cur=$('#'+pre+'Cur'), nm=$('#'+pre+'Name'), pop=$('#'+pre+'Pop'), btn=$('#'+pre+'Btn'), em=$('#'+pre+'Emoji'),
+        q=$('#'+pre+'Q'), list=$('#'+pre+'List'), none=$('#'+pre+'None'), auto=$('#'+pre+'Auto'), opts=$$('.ipk-o',list);
+    function setIcon(v){
+      v=(v===undefined||v===null)?defVal:String(v); hid.value=v;
+      opts.forEach(function(o){ o.classList.toggle('sel',o.dataset.v===v); });
+      function show(opt){
+        cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai[0-9a-f]+_\d+[gs]/g,function(m){return m+pre;});
+        var sv=cur.firstChild; sv.setAttribute('width','32'); sv.setAttribute('height','32');
+      }
+      if(v===''){
+        em.value='';
+        var g=guess?guess():'', go=g?opts.filter(function(o){return o.dataset.v==='app:'+g;})[0]:null;
+        if(go){ show(go); nm.textContent='Automatic \u00B7 '+go.dataset.n; } else { cur.textContent='\u2728'; nm.textContent='Automatic'; }
+        return;
+      }
+      if(v.indexOf('app:')===0){
+        var opt=opts.filter(function(o){return o.dataset.v===v;})[0];
+        if(!opt){ if(v===defVal) return; return setIcon(defVal); }
+        show(opt); nm.textContent=opt.dataset.n; em.value='';
+      } else { cur.textContent=v; nm.textContent='Emoji'; em.value=v; }
+    }
+    function srch(t){
+      t=t.trim().toLowerCase(); var any=false;
+      opts.forEach(function(o){ var ok=!t||o.dataset.n.toLowerCase().indexOf(t)>-1||o.dataset.v.indexOf(t)>-1; o.style.display=ok?'':'none'; if(ok)any=true; });
+      $$('.ipk-grid',list).forEach(function(g){ var vis=$$('.ipk-o',g).some(function(o){return o.style.display!=='none';}); g.style.display=vis?'':'none'; g.previousElementSibling.style.display=vis?'':'none'; });
+      none.style.display=any?'none':'block';
+    }
+    function toggle(open){ pop.hidden=!open; btn.setAttribute('aria-expanded',open?'true':'false'); if(open){ q.value=''; srch(''); } }
+    btn.addEventListener('click',function(){ toggle(pop.hidden); });
+    q.addEventListener('input',function(){ srch(q.value); });
+    opts.forEach(function(o){ o.addEventListener('click',function(){ setIcon(o.dataset.v); toggle(false); }); });
+    if(auto) auto.addEventListener('click',function(){ setIcon(''); toggle(false); });
+    em.addEventListener('input',function(){ var v=em.value.trim(); setIcon(v?v:defVal); });
+    setIcon(hid.value===''?defVal:hid.value);
+    return {set:setIcon, close:function(){ toggle(false); }, refresh:function(){ if(hid.value==='') setIcon(''); }};
+  }
+
   /* ---------- products ---------- */
   var pd=$('#pdlg');
   if(pd){
+    var ICONS=<?= json_encode(array_map(fn($d) => $d[0], app_icons()), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+    var ALIAS={twitter:'x',vpn:'shield',hotmail:'outlook',office:'microsoft','prime video':'amazon','gift card':'gift'};
+    var guessIcon=function(){   // same rule the shop uses when no icon is chosen
+      var n=($('#p_name').value||'').toLowerCase(); if(!n) return '';
+      for(var w in ALIAS){ if(n.indexOf(w)>-1 && ICONS[ALIAS[w]]) return ALIAS[w]; }
+      for(var k in ICONS){ if(k==='shop') continue; var ws=[k,ICONS[k].toLowerCase()]; for(var i=0;i<2;i++){ if(ws[i].length>=3 && n.indexOf(ws[i])>-1) return k; } }
+      return '';
+    };
+    var pp=picker('pik','',guessIcon);
+    var quickSync=function(){ var cv=$('#pikVal').value; $$('#pikQuick .ipk-qb').forEach(function(b){ b.classList.toggle('sel',b.dataset.v===cv); }); };
+    $$('#pikQuick .ipk-qb').forEach(function(b){ b.addEventListener('click',function(){ pp.set(b.dataset.v); pp.close(); quickSync(); }); });
+    $('#pik').addEventListener('click',function(){ setTimeout(quickSync,0); });
+    $('#p_name').addEventListener('input',function(){ pp.refresh(); });
+    pd.addEventListener('close',function(){ pp.close(); });
     var autoSync=function(){ var on=$('#p_auto').checked; $('#p_stock').disabled=on; $('#p_autoNote').style.display=on?'block':'none'; if(on) $('#p_stock').value=''; };
     $('#p_auto').addEventListener('change',autoSync);
     var fill=function(v,id){
@@ -532,12 +610,12 @@ $lg = media_url('logo');
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
-      $('#p_auto').checked=!!+v.auto; autoSync();
+      $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     /* stock upload dialog */
@@ -569,38 +647,15 @@ $lg = media_url('logo');
     $('#unone').style.display = (rows.length && !n) ? '' : 'none';
   }); }
 
-  /* ---------- categories + premium icon picker ---------- */
+  /* ---------- categories ---------- */
   var cd=$('#cdlg');
   if(cd){
-    var hid=$('#c_icon'), cur=$('#ipkCur'), nm=$('#ipkName'), pop=$('#ipkPop'), btn=$('#ipkBtn'), em=$('#ipkEmoji');
-    var esc=function(s){ return String(s).replace(/[&<>"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];}); };
-    var setIcon=function(v){
-      v=v||'app:shop'; hid.value=v;
-      var opt=null; $$('.ipk-o').forEach(function(o){ var on=o.dataset.v===v; o.classList.toggle('sel',on); if(on)opt=o; });
-      if(v.indexOf('app:')===0){
-        if(!opt){ opt=$('.ipk-o[data-v="app:shop"]'); hid.value='app:shop'; }
-        cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai[0-9a-f]+_\d+[gs]/g,function(m){return m+'p';});
-        var sv=cur.firstChild; sv.setAttribute('width','32'); sv.setAttribute('height','32');
-        nm.textContent=opt.dataset.n; em.value='';
-      } else { cur.textContent=v; nm.textContent='Emoji'; em.value=v; }
-    };
-    var toggle=function(open){ pop.hidden=!open; btn.setAttribute('aria-expanded',open?'true':'false'); if(open){ $('#ipkQ').value=''; srch(''); } };
-    var srch=function(t){
-      t=t.trim().toLowerCase(); var any=false;
-      $$('.ipk-o').forEach(function(o){ var ok=!t||o.dataset.n.toLowerCase().indexOf(t)>-1||o.dataset.v.indexOf(t)>-1; o.style.display=ok?'':'none'; if(ok)any=true; });
-      $$('#ipkList .ipk-grid').forEach(function(g){ var vis=$$('.ipk-o',g).some(function(o){return o.style.display!=='none';}); g.style.display=vis?'':'none'; g.previousElementSibling.style.display=vis?'':'none'; });
-      $('#ipkNone').style.display=any?'none':'block';
-    };
-    btn.addEventListener('click',function(){ toggle(pop.hidden); });
-    $('#ipkQ').addEventListener('input',function(e){ srch(e.target.value); });
-    $$('.ipk-o').forEach(function(o){ o.addEventListener('click',function(){ setIcon(o.dataset.v); toggle(false); }); });
-    em.addEventListener('input',function(){ var v=em.value.trim(); if(v){ setIcon(v); } else { setIcon('app:shop'); } });
-    cd.addEventListener('close',function(){ toggle(false); });
-
+    var cp=picker('ipk','app:shop');
+    cd.addEventListener('close',function(){ cp.close(); });
     var fillC=function(v,id){
       $('#cTitle').textContent = id ? 'Edit category' : 'Add category';
       $('#c_name').value=v.name||''; $('#c_sort').value=(v.sort===undefined||v.sort===null)?0:v.sort;
-      setIcon(v.icon||'app:shop'); toggle(false);
+      cp.set(v.icon||'app:shop'); cp.close();
       var s=$('#cSave'); s.name = id ? 'update_category' : 'add_category'; s.value = id ? id : '1';
       cd.showModal();
     };
