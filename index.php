@@ -1,4 +1,4 @@
-<?php require __DIR__ . '/../src/lib.php';
+<?php require __DIR__ . '/lib.php';
 $u = current_user();
 header_html('Home', $u); ?>
 <div class="card">
