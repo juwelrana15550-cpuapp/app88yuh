@@ -1,4 +1,4 @@
-<?php require __DIR__ . '/../src/lib.php';
+<?php require __DIR__ . '/lib.php';
 if (current_user()) { header('Location: /dashboard.php'); exit; }
 $err = ''; $ref = trim($_GET['ref'] ?? '');
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

@@ -1,4 +1,4 @@
-<?php require __DIR__ . '/../src/lib.php';
+<?php require __DIR__ . '/lib.php';
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);

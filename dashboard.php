@@ -1,4 +1,4 @@
-<?php require __DIR__ . '/../src/lib.php';
+<?php require __DIR__ . '/lib.php';
 $u = require_login();
 $msg = $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
