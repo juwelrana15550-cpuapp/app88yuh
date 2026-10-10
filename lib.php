@@ -457,14 +457,17 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
     echo app_icon_sprite(); ?>
 <style>
 /* Category tiles - self-contained, does not depend on style.css */
-.sx-cats{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 14px}
+.sx-cats{display:flex;flex-wrap:nowrap;gap:8px;margin:10px -16px 12px;padding:4px 16px 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity;scroll-padding-left:16px;overscroll-behavior-x:contain}
+.sx-cats::-webkit-scrollbar{display:none}
+.sx-cat{flex:none;scroll-snap-align:start}
+@media(min-width:700px){.sx-cats{flex-wrap:wrap;overflow:visible;margin:12px 0 14px;padding:0}}
 .sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s,border-color .15s,color .15s,box-shadow .15s,transform .1s}
 .sx-cat:hover{border-color:#c7d2fe;color:#3730a3}
 .sx-cat:active{transform:scale(.97)}
 .sx-cat.sx-all{padding:0 15px}
 .sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#f1f5f9;font-size:14px;line-height:1;overflow:hidden}
 .sx-cat .sx-ci svg{width:16px;height:16px;display:block}
-.sx-cat b{min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sx-cat b{min-width:0;max-width:200px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 6px 14px -6px rgba(79,70,229,.75)}
 .sx-cat.on b{color:#fff}
 .sx-cat.on .sx-ci{background:#fff}
@@ -657,9 +660,11 @@ function buy_modal_html(float $balance, int $c, string $q): void {
   if(!res||!row||!form||!window.fetch) return;   // without fetch the tiles are normal links and still work
   var qIn=form.elements.q, state={c:0,q:''}, ctl=null, seq=0, tmo=null;
   var on=row.querySelector('.sx-cat.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
+  if(on) row.scrollLeft+=on.getBoundingClientRect().left-row.getBoundingClientRect().left-16;
   function qs(c,q){ var p=[]; if(c) p.push('c='+c); if(q) p.push('q='+encodeURIComponent(q)); return p.join('&'); }
   function sync(){
     Array.prototype.forEach.call(row.children,function(a){ a.classList.toggle('on',(parseInt(a.dataset.c,10)||0)===state.c); });
+    var on2=row.querySelector('.sx-cat.on'); if(on2) row.scrollLeft+=on2.getBoundingClientRect().left-row.getBoundingClientRect().left-16;
     var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
     if(window.SX){ SX.c=state.c||''; SX.q=state.q; }
   }
