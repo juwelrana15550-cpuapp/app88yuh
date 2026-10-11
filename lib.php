@@ -871,3 +871,28 @@ function mailgen_extract_code(string $text): ?string {
     if (preg_match('/\b([A-Z0-9]{6})\b/', $text, $m)) return $m[1];
     return null;
 }
+/** Base32 (RFC 4648) decode. Ignores spaces, dashes and '=' padding; returns null on invalid characters. */
+function base32_decode_str(string $s): ?string {
+    $s = strtoupper(preg_replace('/[\s\-=]+/', '', $s));
+    if ($s === '' || preg_match('/[^A-Z2-7]/', $s)) return null;
+    $map = array_flip(str_split('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'));
+    $bits = '';
+    foreach (str_split($s) as $ch) $bits .= str_pad(decbin($map[$ch]), 5, '0', STR_PAD_LEFT);
+    $out = '';
+    foreach (str_split($bits, 8) as $byte) if (strlen($byte) === 8) $out .= chr(bindec($byte));
+    return $out === '' ? null : $out;
+}
+
+/** TOTP (RFC 6238, HMAC-SHA1, 30s step) from a Base32 key such as JBSWY3DPEHPK3PXP. Returns null for an invalid key. */
+function totp_code(string $secret, ?int $time = null, int $digits = 6, int $step = 30): ?string {
+    $key = base32_decode_str($secret);
+    if ($key === null) return null;
+    $counter = intdiv($time ?? time(), $step);
+    $hash = hash_hmac('sha1', pack('N2', $counter >> 32, $counter & 0xFFFFFFFF), $key, true);
+    $o = ord($hash[19]) & 0x0F;
+    $n = ((ord($hash[$o]) & 0x7F) << 24) | (ord($hash[$o + 1]) << 16) | (ord($hash[$o + 2]) << 8) | ord($hash[$o + 3]);
+    return str_pad((string)($n % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
+}
+
+/** Seconds left before the current TOTP code changes. */
+function totp_remaining(int $step = 30): int { return $step - (time() % $step); }
