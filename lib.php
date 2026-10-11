@@ -432,17 +432,28 @@ body .tabbar a.dep .tl{color:#047857;font-weight:700}
 body .tabbar a.dep.on{background:transparent;box-shadow:none}
 @keyframes depPulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,.5)}70%,100%{box-shadow:0 0 0 12px rgba(16,185,129,0)}}
 @media(prefers-reduced-motion:reduce){body .tabbar a.dep .ico:after{animation:none}}
+/* Tap feedback: no white square flash on touch; a soft rounded press effect instead */
+body a,body button,body .tabbar a,body .fab *{-webkit-tap-highlight-color:rgba(0,0,0,0);-webkit-touch-callout:none}
+body .tabbar a,body .fab .fab-main,body .fab .fab-i,body .fab .fab-i b{outline:0;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+body .tabbar a{border-radius:18px;transition:color .2s,background .2s,transform .12s}
+body .tabbar a:focus,body .tabbar a:active,body .tabbar a:focus:not(.on){background-color:transparent}
+body .tabbar a:active{transform:scale(.92);background:rgba(79,70,229,.12)}
+body .tabbar a.on:active{background:rgba(79,70,229,.16)}
+body .tabbar a.dep:active{background:transparent}
+body .tabbar a.dep:active .ico{transform:scale(.9)}
+body .tabbar a.dep .ico{transition:transform .12s}
+body .tabbar a:focus-visible,body .fab .fab-main:focus-visible,body .fab .fab-i:focus-visible b{box-shadow:0 0 0 3px rgba(99,102,241,.45)}
+body .fab .fab-main,body .fab .fab-i b{transition:transform .12s}
+body .fab .fab-main:active,body .fab .fab-i:active b{transform:scale(.9)}
 /* Support button: bigger icon, translucent, no text labels */
 body .fab .fab-i .lbl{display:none}
-body .fab .fab-main{animation:fabGlow 2s ease-in-out infinite}
-body .fab.open .fab-main{animation:none;box-shadow:0 0 0 3px rgba(129,140,248,.55),0 8px 20px -6px rgba(79,70,229,.7)}
+body .fab .fab-main{animation:fabGlow 3s ease-in-out infinite}
+body .fab.open .fab-main{animation:none;box-shadow:0 0 0 3px rgba(129,140,248,.3),0 6px 16px -6px rgba(79,70,229,.5)}
 @keyframes fabGlow{
-  0%,100%{box-shadow:0 0 0 2px rgba(99,102,241,.25),0 0 4px 0 rgba(99,102,241,.2)}
-  33%{box-shadow:0 0 0 5px rgba(99,102,241,.5),0 0 22px 6px rgba(99,102,241,.75)}
-  66%{box-shadow:0 0 0 5px rgba(236,72,153,.5),0 0 22px 6px rgba(236,72,153,.7)}
+  0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,0),0 4px 12px -4px rgba(79,70,229,.35)}
+  50%{box-shadow:0 0 0 5px rgba(99,102,241,.16),0 4px 16px -2px rgba(99,102,241,.4)}
 }
 @media(prefers-reduced-motion:reduce){body .fab .fab-main{animation:none}}
-
 body .fab .fab-main{width:54px;height:54px;background:rgba(79,70,229,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.35)}
 body .fab .fab-main svg.i{width:26px;height:26px}
 body .fab .fab-i b{width:46px;height:46px;background:rgba(255,255,255,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(148,163,184,.3);box-shadow:0 8px 18px -8px rgba(15,23,42,.45)}
@@ -536,18 +547,22 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 /* Category tiles - self-contained, does not depend on style.css */
 .sx-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:8px;margin:12px 0 14px;padding:0}
 @media(min-width:700px){.sx-cats{display:flex;flex-wrap:wrap}}
-.sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s,border-color .15s,color .15s,box-shadow .15s,transform .1s}
+.sx-cat,.sx-cat:hover,.sx-cat:focus,.sx-cat:active{text-decoration:none}
+.sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);outline:0;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background-color .25s ease,border-color .25s ease,color .25s ease,box-shadow .25s ease}
 .sx-cat:hover{border-color:#c7d2fe;color:#3730a3}
-.sx-cat:active{transform:scale(.97)}
+.sx-cat:not(.on):active{background-color:#eef2ff;border-color:#c7d2fe}
+.sx-cat:focus{outline:0}
+.sx-cat:focus-visible{box-shadow:0 0 0 3px rgba(99,102,241,.35)}
 .sx-cat.sx-all{padding:0 15px;justify-content:center}
 .sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#f1f5f9;font-size:14px;line-height:1;overflow:hidden}
 .sx-cat .sx-ci svg{width:16px;height:16px;display:block}
 .sx-cat b{min-width:0;max-width:200px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 6px 14px -6px rgba(79,70,229,.75)}
+.sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 2px 8px -3px rgba(79,70,229,.4)}
 .sx-cat.on b{color:#fff}
 .sx-cat.on .sx-ci{background:#fff}
 #cat-res{scroll-margin-top:72px}
-#cat-res.busy{opacity:.55;transition:opacity .15s}
+#cat-res{transition:opacity .2s ease}
+#cat-res.busy{opacity:.8;pointer-events:none}
 /* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
 .btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
