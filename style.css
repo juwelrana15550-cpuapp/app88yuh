@@ -522,3 +522,18 @@ main.with-side{padding-top:14px}
 .olist-t b{font-size:.92rem}
 .olist-t small{font-size:.76rem}
 .olist .badge{font-size:.7rem;padding:2px 9px}
+
+/* ===== v5: smaller, professional support button + fix: it no longer blocks taps on Buy Now beside it ===== */
+/* The .fab wrapper used to be an invisible 250x190px box that swallowed taps. Now only the real buttons are clickable. */
+.fab{right:14px;bottom:92px;gap:9px;pointer-events:none}
+.fab-main,.fab.open .fab-i{pointer-events:auto}
+.fab-i{gap:8px;visibility:hidden;transform:translateY(14px) scale(.9);transition:opacity .22s,transform .22s,visibility 0s linear .22s}
+.fab.open .fab-i{visibility:visible;transition:opacity .22s,transform .22s,visibility 0s}
+.fab-i .lbl{padding:6px 12px;font-size:.78rem;font-weight:600;border-radius:99px}
+.fab-i b{width:42px;height:42px;border-radius:14px;border-width:1.5px}
+.fab-i b svg.i{width:19px;height:19px}
+.fab-main{width:46px;height:46px;border-radius:15px;border:1.5px solid rgba(255,255,255,.55);box-shadow:0 10px 22px -8px rgba(67,56,202,.7),inset 0 1px 0 rgba(255,255,255,.3)}
+.fab-main svg.i{width:22px;height:22px;stroke-width:1.9}
+.fab.open .fab-main{width:46px;height:46px;margin:0;border-radius:15px;background:#1e293b;transform:none}
+.fab.open .fab-main .c-plus{display:flex;transform:rotate(45deg)}
+@media(min-width:900px){.fab{bottom:22px}}
