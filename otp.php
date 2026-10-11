@@ -52,6 +52,19 @@ function otp_run(string $tab, string $raw): array {
     return $r;
 }
 
+/** Full body of one message for the "Full mail" view: [text, isHtml]. Tries the usual field names. */
+function otp_mail_body(array $m): array {
+    foreach (['html', 'htmlBody', 'html_body', 'body', 'textBody', 'text_body', 'text', 'content', 'message', 'preview', 'snippet'] as $k) {
+        $v = $m[$k] ?? null;
+        if (is_array($v)) $v = $v['content'] ?? ($v['html'] ?? ($v['text'] ?? null));
+        if (is_string($v) && trim($v) !== '') {
+            $v = mb_substr($v, 0, 400000);
+            return [$v, (bool)preg_match('/<\/?(html|body|div|p|table|br|span|a|img|td|h[1-6])\b/i', $v)];
+        }
+    }
+    return ['', false];
+}
+
 /** HTML for a result (errors, code, inbox list). Used for the AJAX response. */
 function otp_out_html(array $r): string {
     ob_start();
@@ -68,34 +81,24 @@ function otp_out_html(array $r): string {
         </div>
     <?php endif;
 
-    if ($r['found']): ?>
-        <div class="otp-result">
-          <div class="lb"><?= icon('shield') ?> Verification code</div>
-          <div class="code"><?= e($r['found']['code']) ?></div>
-          <button type="button" class="cp" data-code="<?= e($r['found']['code']) ?>"><?= icon('copy') ?><span>Copy code</span></button>
-        </div>
-    <?php endif;
-
-    if ($r['messages']): ?>
-        <div class="otp-box">
-          <div class="otp-bh"><span class="ic"><?= icon('mail') ?></span>Inbox messages<em><?= count($r['messages']) ?></em></div>
-          <?php foreach (array_slice($r['messages'], 0, 15) as $m):
-              $from = (string)($m['from'] ?? 'Unknown');
-              $ini = strtoupper(mb_substr(preg_replace('/[^A-Za-z]/', '', $from), 0, 1)) ?: '?';
-              $code = $m['code'] ?? null;
-              if (!$code) $code = mailgen_extract_code(($m['preview'] ?? '') . ' ' . ($m['message'] ?? '') . ' ' . ($m['subject'] ?? '')); ?>
-            <div class="otp-msg">
-              <div class="av"><?= e($ini) ?></div>
-              <div class="body">
-                <b><?= e($m['subject'] ?? '(no subject)') ?></b>
-                <div class="meta"><?= e($from) ?><?php if (!empty($m['date'])): ?> · <?= e($m['date']) ?><?php endif; ?></div>
-                <?php if (!empty($m['preview'])): ?><div class="prev"><?= e($m['preview']) ?></div>
-                <?php elseif (!empty($m['message'])): ?><div class="prev"><?= e($m['message']) ?></div><?php endif; ?>
-              </div>
-              <?php if ($code): ?><div class="badge-c"><?= e($code) ?></div><?php endif; ?>
+    if ($r['messages']):
+        $list = array_slice($r['messages'], 0, 15); ?>
+        <div class="otp-found"><?= count($list) ?> email(s) found</div>
+        <?php foreach ($list as $i => $m):
+            $code = $m['code'] ?? null;
+            if (!$code) $code = mailgen_extract_code(($m['preview'] ?? '') . ' ' . ($m['message'] ?? '') . ' ' . ($m['subject'] ?? '')); ?>
+          <div class="mc">
+            <?php if ($code): ?>
+            <div class="mc-top">
+              <div class="mc-code"><?= e($code) ?></div>
+              <button type="button" class="mc-cp" data-code="<?= e($code) ?>" aria-label="Copy code" title="Copy code"><?= icon('copy') ?></button>
             </div>
-          <?php endforeach; ?>
-        </div>
+            <?php endif; ?>
+            <div class="mc-sub"><?= e($m['subject'] ?? '(no subject)') ?></div>
+            <div class="mc-meta"><?= e((string)($m['from'] ?? 'Unknown')) ?><?php if (!empty($m['date'])): ?> &bull; <?= e($m['date']) ?><?php endif; ?></div>
+            <button type="button" class="mc-full" data-i="<?= $i ?>">Full mail</button>
+          </div>
+        <?php endforeach; ?>
     <?php elseif ($r['empty']): ?>
         <div class="otp-box otp-none"><div class="em">📭</div><b>No messages found</b><p>The inbox is empty or no verification code was received.</p></div>
     <?php endif;
@@ -110,7 +113,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['ajax'])) {
     $r = otp_run($t, (string)($_POST['data'] ?? ''));
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
-    echo json_encode(['html' => otp_out_html($r)], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    $mails = [];
+    foreach (array_slice($r['messages'], 0, 15) as $m) {
+        [$body, $isHtml] = otp_mail_body($m);
+        $mails[] = ['subject' => (string)($m['subject'] ?? '(no subject)'), 'from' => (string)($m['from'] ?? ''), 'date' => (string)($m['date'] ?? ''), 'body' => $body, 'html' => $isHtml];
+    }
+    echo json_encode(['html' => otp_out_html($r), 'mails' => $mails], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
 
@@ -229,6 +237,36 @@ textarea.otp-input{min-height:68px;resize:vertical}
 .otp-none .em{font-size:1.7rem;margin-bottom:4px}
 .otp-none b{font-size:.9rem}
 .otp-none p{color:#64748b;font-size:.8rem;margin:5px 0 0}
+
+/* message cards */
+.otp-found{text-align:center;color:#16a34a;font-weight:600;font-size:.82rem;margin:2px 0 10px}
+.mc{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:12px;margin-bottom:10px;box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 22px -16px rgba(30,27,75,.25)}
+.mc-top{display:flex;gap:8px;margin-bottom:10px}
+.mc-code{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;padding:9px 8px;border:1.5px dashed #6366f1;border-radius:12px;background:#eef2ff;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1.55rem;font-weight:800;letter-spacing:.2em;color:#4338ca;word-break:break-all;text-indent:.2em}
+.mc-cp{flex:none;width:46px;border:1px solid #e2e8f0;border-radius:12px;background:#fff;color:#4f46e5;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,color .15s,transform .1s}
+.mc-cp svg.i{width:18px;height:18px}
+.mc-cp:active{transform:scale(.95)}
+.mc-cp.done{background:#16a34a;border-color:#16a34a;color:#fff}
+.mc-sub{font-weight:700;font-size:.88rem;line-height:1.35;color:#1e293b;overflow-wrap:anywhere}
+.mc-meta{margin:3px 0 10px;color:#7b8798;font-size:.74rem;line-height:1.45;overflow-wrap:anywhere}
+.mc-full{display:block;width:100%;padding:9px;border:0;border-radius:10px;background:linear-gradient(135deg,#4f46e5,#6d28d9);color:#fff;font:inherit;font-weight:600;font-size:.84rem;cursor:pointer;transition:filter .15s,transform .1s}
+.mc-full:hover{filter:brightness(1.07)}
+.mc-full:active{transform:scale(.985)}
+
+/* full mail dialog */
+.fm{position:fixed;inset:0;z-index:3500;display:none;align-items:center;justify-content:center;padding:14px}
+.fm.open{display:flex}
+.fm-bd{position:absolute;inset:0;background:rgba(15,23,42,.55)}
+.fm-sh{position:relative;display:flex;flex-direction:column;width:100%;max-width:560px;height:min(86vh,720px);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 24px 60px rgba(15,23,42,.35)}
+.fm-h{display:flex;gap:10px;align-items:flex-start;padding:13px 14px;border-bottom:1px solid #eef1f6}
+.fm-t{flex:1;min-width:0}
+.fm-t b{display:block;font-size:.92rem;line-height:1.35;color:#1e293b;overflow-wrap:anywhere}
+.fm-t small{display:block;margin-top:2px;color:#7b8798;font-size:.74rem;line-height:1.4;overflow-wrap:anywhere}
+.fm-x{flex:none;width:30px;height:30px;border:0;border-radius:50%;background:#f1f5f9;color:#475569;font-size:20px;line-height:1;cursor:pointer}
+.fm-b{flex:1;min-height:0;overflow:auto;background:#fff}
+.fm-b iframe{display:block;width:100%;height:100%;border:0;background:#fff}
+.fm-b pre{margin:0;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:.84rem;line-height:1.6;color:#334155}
 </style>
 
 <div class="otp-wrap" id="otpWrap" data-csrf="<?= e($_SESSION['csrf'] ?? '') ?>">
@@ -272,7 +310,7 @@ textarea.otp-input{min-height:68px;resize:vertical}
 <script>
 (function(){
   var wrap=document.getElementById('otpWrap'); if(!wrap) return;
-  var csrf=wrap.dataset.csrf, timers={}, busy={};
+  var csrf=wrap.dataset.csrf, timers={}, busy={}, mails={};
   function $(s,r){return (r||document).querySelector(s)}
   function $$(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))}
 
@@ -307,7 +345,10 @@ textarea.otp-input{min-height:68px;resize:vertical}
     fetch('/otp.php',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'fetch','Accept':'application/json'},
       body:new URLSearchParams({ajax:'1',csrf:csrf,tab:tab,data:inp.value})})
       .then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
-      .then(function(j){out.innerHTML=j.html;startTotp(tab,out);})
+      .then(function(j){
+        out.innerHTML=j.html; mails[tab]=j.mails||[]; startTotp(tab,out);
+        if(!silent){ var t=$('.mc-top,.otp-result,.otp-err',out)||out; setTimeout(function(){try{t.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){}},60); }   // bring the code / copy button into view
+      })
       .catch(function(){if(!silent)out.innerHTML='<div class="otp-err">Request failed. Check your connection or reload the page and try again.</div>';})
       .then(function(){busy[tab]=false;btn.disabled=false;btn.classList.remove('load');lab.textContent=btn.dataset.label;});
   }
@@ -316,13 +357,42 @@ textarea.otp-input{min-height:68px;resize:vertical}
     if(f.elements.data.tagName==='TEXTAREA') f.elements.data.addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();run(f.dataset.tab,false);}});
   });
 
-  /* Copy button */
+  /* Copy buttons (big "Copy code" and the small icon next to each code) */
   wrap.addEventListener('click',function(e){
-    var b=e.target.closest('.cp'); if(!b) return;
-    var t=b.dataset.code||'', s=$('span',b), o='Copy code';
-    function done(){s.textContent='Copied!';b.classList.add('done');setTimeout(function(){s.textContent=o;b.classList.remove('done');},1600);}
+    var b=e.target.closest('.cp,.mc-cp'); if(!b) return;
+    var t=b.dataset.code||'', s=$('span',b), o=s?s.textContent:'';
+    function done(){if(s)s.textContent='Copied!';b.classList.add('done');setTimeout(function(){if(s)s.textContent=o;b.classList.remove('done');},1600);}
     function fb(){var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(x){}document.body.removeChild(a);done();}
     if(navigator.clipboard&&window.isSecureContext) navigator.clipboard.writeText(t).then(done,fb); else fb();
+  });
+
+  /* Full mail dialog (HTML mails render in a sandboxed frame: no scripts, no access to this site) */
+  var FM=null;
+  function buildFM(){
+    FM=document.createElement('div'); FM.className='fm'; FM.setAttribute('aria-hidden','true');
+    FM.innerHTML='<div class="fm-bd" data-x></div><div class="fm-sh" role="dialog" aria-modal="true"><div class="fm-h"><div class="fm-t"><b></b><small></small></div><button type="button" class="fm-x" data-x aria-label="Close">&times;</button></div><div class="fm-b"></div></div>';
+    document.body.appendChild(FM);
+    FM.addEventListener('click',function(e){ if(e.target.closest('[data-x]')) closeFM(); });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&FM.classList.contains('open')) closeFM(); });
+  }
+  function closeFM(){ FM.classList.remove('open'); FM.setAttribute('aria-hidden','true'); $('.fm-b',FM).innerHTML=''; document.documentElement.style.overflow=''; }
+  function openFM(m){
+    if(!FM) buildFM();
+    $('.fm-t b',FM).textContent=m.subject||'(no subject)';
+    $('.fm-t small',FM).textContent=[m.from,m.date].filter(Boolean).join(' \u2022 ');
+    var box=$('.fm-b',FM); box.innerHTML='';
+    if(!m.body){ var p=document.createElement('pre'); p.textContent='The full message is not available for this email.'; box.appendChild(p); }
+    else if(m.html){
+      var f=document.createElement('iframe'); f.setAttribute('sandbox','allow-popups allow-popups-to-escape-sandbox'); f.setAttribute('referrerpolicy','no-referrer');
+      f.srcdoc='<base target="_blank"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:12px;font-family:system-ui,sans-serif;font-size:14px;line-height:1.55;color:#1e293b;word-break:break-word}img{max-width:100%;height:auto}</style>'+m.body;
+      box.appendChild(f);
+    } else { var pr=document.createElement('pre'); pr.textContent=m.body; box.appendChild(pr); }
+    FM.classList.add('open'); FM.setAttribute('aria-hidden','false'); document.documentElement.style.overflow='hidden';
+  }
+  wrap.addEventListener('click',function(e){
+    var b=e.target.closest('.mc-full'); if(!b) return;
+    var pane=b.closest('.otp-pane'), m=(mails[pane.dataset.pane]||[])[parseInt(b.dataset.i,10)];
+    if(m) openFM(m);
   });
 })();
 </script>
