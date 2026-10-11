@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '12';
+const SCHEMA_VERSION = '13';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -165,6 +165,7 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD INDEX idx_supplier (supplier_id)",
         "ALTER TABLE products ADD COLUMN supplier_domain VARCHAR(120) NULL",   // 'possible domain' copied from the supplier
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
+        "ALTER TABLE products ADD COLUMN sort_order INT NOT NULL DEFAULT 0",   // serial: 1 = first, 0 = automatic (after the numbered ones)
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
@@ -596,6 +597,14 @@ function product_icon_value(array $p, ?array $cat = null): string {
     return (string)($cat['icon'] ?? '');
 }
 
+/** Product icon HTML: an uploaded image ("img:<version>") or the normal app icon / emoji. */
+function prod_icon_html(array $p, string $icon, string $size = '1em'): string {
+    if (strncmp($icon, 'img:', 4) === 0 && !empty($p['id'])) {
+        return '<img class="pimg" src="/pimg.php?id=' . (int)$p['id'] . '&amp;v=' . e(substr($icon, 4)) . '" alt="" loading="lazy">';
+    }
+    return cat_icon($icon, $size);
+}
+
 function catalog_url(array $x): string {
     $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
     return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
@@ -619,7 +628,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
         $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied ?>
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
-      <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
+      <div class="pc-h"><span class="pc-ic"><?= prod_icon_html($p, $icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
       <?php if ($p['description']):
           // One line = one bullet. 2+ non-empty lines render as a checklist (matches the plans section on the homepage); a single line stays plain text.
           $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $p['description'])), function ($l) { return $l !== ''; }));
@@ -667,13 +676,15 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 2px 8px -3px rgba(79,70,229,.4)}
 .sx-cat.on b{color:#fff}
 .sx-cat.on .sx-ci{background:#fff}
+.pc-ic img.pimg,.bx-ic img.pimg{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+.bx-ic img.pimg{border-radius:10px}
 #cat-res{scroll-margin-top:72px}
 #cat-res{transition:opacity .2s ease}
 #cat-res.busy{opacity:.8;pointer-events:none}
 /* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
 .btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
-.sx-dom{margin:-2px 0 10px;font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:#b45309;overflow-wrap:anywhere}
+.sx-dom{margin:-2px 0 10px;font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:#0e7490;overflow-wrap:anywhere}
 .sx-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
 .sx-stk{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;line-height:1.3;background:#dcfce7;color:#15803d;border:1px solid #86efac}
 .sx-stk:before{content:"";flex:none;width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.2)}

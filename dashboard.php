@@ -91,7 +91,7 @@ if ($q !== '') {
 }
 $s = $pdo->prepare('SELECT p.* FROM products p LEFT JOIN categories c ON c.id = p.category_id
                     WHERE ' . implode(' AND ', $where) . '
-                    ORDER BY (p.category_id IS NULL), c.sort_order, c.id, p.popular DESC, p.id DESC LIMIT 300');
+                    ORDER BY (p.category_id IS NULL), c.sort_order, c.id, (p.sort_order = 0), p.sort_order, p.popular DESC, p.id DESC LIMIT 300');
 $s->execute($args);
 $rows = $s->fetchAll();
 

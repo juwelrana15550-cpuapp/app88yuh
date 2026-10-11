@@ -110,7 +110,7 @@ function bm_clean(string $t): string {
 /** One supplier product, normalised: ['id','name','description','price','stock'] or ['error' => text]. Needs no API key. */
 function bm_product(int $id): array {
     if ($id <= 0) return ['error' => 'Enter a valid product ID.'];
-    $r = bm_call('GET', '/products/' . $id, null, null, 12);
+    $r = bm_call('GET', '/products/' . $id, null, null, 8);
     if (empty($r['success']) || empty($r['data']) || !is_array($r['data'])) {
         if ((int)$r['_http'] === 404) return ['error' => 'No product with ID ' . $id . ' at bulkmail.shop.'];
         return ['error' => 'Could not read the product: ' . bm_err($r)];
