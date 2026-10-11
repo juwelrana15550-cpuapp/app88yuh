@@ -4,7 +4,7 @@ $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = ''; $bmTest = '';
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
@@ -145,13 +145,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=? WHERE id=?')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
-                if ($f['sup']) bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                if ($f['sup']) bm_sync_stock($pdo, true, true);   // stock = live stock at bulkmail.shop
                 go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
             } else {
                 $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup']]);
                 if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
-                if ($f['sup']) bm_sync_stock($pdo, true);
+                if ($f['sup']) bm_sync_stock($pdo, true, true);
                 go('products', $f['sup'] ? 'Product added and linked to bulkmail.shop.' : 'Product added.');
             }
 
@@ -169,8 +169,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go('api', 'Disconnected. The API key was removed and linked products show as out of stock until you connect again.');
 
         } elseif (isset($_POST['bm_refresh'])) {
-            bm_sync_stock($pdo, true);
+            bm_sync_stock($pdo, true, true);
             go('api', 'Stock refreshed from bulkmail.shop.');
+
+        } elseif (isset($_POST['bm_test'])) {
+            $page = 'api';
+            $tid = (int)($_POST['bm_test_id'] ?? 0);
+            $bmTest = ($tid > 0 && bm_connected()) ? bm_debug($tid) : 'Connect the API first and enter a product ID.';
 
         } elseif (isset($_POST['bm_clear_err'])) {
             save_setting('bm_last_error', '');
@@ -630,7 +635,7 @@ $lg = media_url('logo');
            'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id']];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php if (!empty($p['supplier_domain'])): ?><span class="tag"><?= e($p['supplier_domain']) ?></span><?php endif; ?><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : ($p['supplier_id'] !== null ? ' <small>live</small>' : '')) ?></td>
@@ -922,6 +927,13 @@ $lg = media_url('logo');
   </form>
 <?php endif; ?>
 </div>
+<?php if ($bmOn): $syncAt = (int)setting('bm_sync_ts', '0'); ?>
+<div class="card"><h3>Check a product ID</h3>
+  <small class="hint" style="margin:0 0 10px">Live stock refreshes by itself about every 15 seconds and the possible domain about every 3 minutes (whenever someone opens the shop)<?= $syncAt ? ' · last stock refresh ' . e(date('H:i:s', $syncAt)) : '' ?>. Use this to see exactly what the supplier sends for one product.</small>
+  <form method="post" class="acts"><?= csrf_field() ?><input type="number" name="bm_test_id" min="1" placeholder="Product ID, e.g. 578" style="max-width:220px" required value="<?= (int)($_POST['bm_test_id'] ?? 0) ?: '' ?>"><button class="btn ghost" name="bm_test" value="1">Check</button></form>
+  <?php if ($bmTest !== ''): ?><pre class="mono" style="white-space:pre-wrap;word-break:break-all;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;max-height:380px;overflow:auto;margin-top:12px"><?= e($bmTest) ?></pre><?php endif; ?>
+</div>
+<?php endif; ?>
 <?php if ($bmErr !== ''): ?><div class="card"><div class="card-h"><h3>Last problem</h3>
   <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="bm_clear_err" value="1">Dismiss</button></form></div>
   <div class="err" style="margin:0"><?= e($bmErr) ?></div></div><?php endif; ?>

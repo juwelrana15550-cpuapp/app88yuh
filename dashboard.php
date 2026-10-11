@@ -100,4 +100,18 @@ if (isset($_GET['ajax'])) { header('Content-Type: text/html; charset=utf-8'); he
 user_start('Home', $u, 'dashboard'); ?>
 <div class="card wallet bbar"><div><small>Available balance</small><b><?= money($u['coins']) ?></b></div><a class="btn sm" href="/deposits.php">+ Add Funds</a></div>
 <?php catalog_html($cats, $rows, $c, $q, $total, (float)$u['coins']); ?>
+<script>
+/* Live refresh: stock numbers and "possible domain" follow the supplier without reloading the page (every 20 s, only while the tab is open and no Buy window is showing). */
+(function(){
+  var res=document.getElementById('cat-res'); if(!res) return;
+  setInterval(function(){
+    if(document.hidden||document.querySelector('.bx.open,.mdl.show,body.modal')||res.classList.contains('busy')) return;
+    var s=location.search.replace(/^\?/,'').split('&').filter(function(x){return x&&x.indexOf('ajax=')!==0&&x.indexOf('cur=')!==0;});
+    fetch('/dashboard.php?'+s.concat('ajax=1').join('&'),{credentials:'same-origin',headers:{'X-Requested-With':'fetch'}})
+      .then(function(r){return r.ok?r.text():null;}).then(function(h){
+        if(h&&h.trim()!==res.innerHTML.trim()&&!document.querySelector('.bx.open')){ var y=window.pageYOffset; res.innerHTML=h; window.scrollTo(0,y); }
+      }).catch(function(){});
+  },20000);
+})();
+</script>
 <?php user_end();

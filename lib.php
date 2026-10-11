@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '11';
+const SCHEMA_VERSION = '12';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -163,6 +163,7 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
         "ALTER TABLE products ADD COLUMN supplier_id INT NULL",          // bulkmail.shop product ID (NULL = normal product)
         "ALTER TABLE products ADD INDEX idx_supplier (supplier_id)",
+        "ALTER TABLE products ADD COLUMN supplier_domain VARCHAR(120) NULL",   // 'possible domain' copied from the supplier
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
     ] as $sql) {
         try { $pdo->exec($sql); }
@@ -631,6 +632,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <?php endif; ?>
       <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
+      <?php if (!empty($p['supplier_domain'])): ?><div class="sx-dom">Possible Domain (<?= e($p['supplier_domain']) ?>)</div><?php endif; ?>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
         <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format($fin, 2, '.', '')) ?>" data-old="<?= $pct > 0 ? e(number_format((float)$p['price'], 2, '.', '')) : '' ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
@@ -671,6 +673,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 /* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
 .btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
+.sx-dom{margin:-2px 0 10px;font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:#b45309;overflow-wrap:anywhere}
 .sx-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
 .sx-stk{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;line-height:1.3;background:#dcfce7;color:#15803d;border:1px solid #86efac}
 .sx-stk:before{content:"";flex:none;width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.2)}
