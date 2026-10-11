@@ -444,7 +444,19 @@ $lg = media_url('logo');
   <div class="dlg-h"><h3 id="pTitle">Add product</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($prodErr): ?><div class="err" style="margin-top:12px"><?= e($prodErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="pname" id="p_name" maxlength="80" required>
-  <label>Description <small>(optional)</small></label><input type="text" name="pdesc" id="p_desc" maxlength="500">
+  <label>Description <small>(optional)</small></label>
+  <textarea name="pdesc" id="p_desc" maxlength="500" rows="3" placeholder="Fast activation&#10;24/7 support&#10;Instant delivery"></textarea>
+  <small style="display:block;margin-top:4px">One line = one feature. Add 2+ lines to show a checklist (like the plans on the homepage); a single line shows as plain text.</small>
+  <div class="pc-prev" id="p_descPrevWrap" hidden><small style="display:block;margin:10px 0 6px">Preview on the shop</small><div id="p_descPrev"></div></div>
+  <style>
+    /* Mirrors .pc-d / .pc-dl from the shop's style.css, scoped here so the admin preview matches the real product card. */
+    .pc-prev{background:#f8fafc;border:1px solid #eef0f4;border-radius:12px;padding:12px 14px}
+    .pc-prev .pc-d{color:#64748b;font-size:.82rem;line-height:1.45;overflow-wrap:anywhere;margin:0}
+    .pc-prev .pc-dl{list-style:none;padding:0;margin:0;font-size:.82rem;color:#1e293b}
+    .pc-prev .pc-dl li{position:relative;padding:5px 0 5px 20px;border-bottom:1px solid #eef0f4;line-height:1.4}
+    .pc-prev .pc-dl li:last-child{border-bottom:0}
+    .pc-prev .pc-dl li:before{content:"✓";position:absolute;left:0;top:5px;color:#16a34a;font-weight:800}
+  </style>
   <div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" id="p_price" step="0.01" min="0.01" required></div>
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
@@ -622,12 +634,21 @@ $lg = media_url('logo');
     pd.addEventListener('close',function(){ pp.close(); });
     var autoSync=function(){ var on=$('#p_auto').checked; $('#p_stock').disabled=on; $('#p_autoNote').style.display=on?'block':'none'; if(on) $('#p_stock').value=''; };
     $('#p_auto').addEventListener('change',autoSync);
+    var descTa=$('#p_desc'), descPrev=$('#p_descPrev'), descWrap=$('#p_descPrevWrap');
+    var descEsc=function(s){ return s.replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); };
+    var renderDescPrev=function(){
+      var lines=descTa.value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+      descWrap.hidden = lines.length===0;
+      if(lines.length>1) descPrev.innerHTML='<ul class="pc-dl">'+lines.slice(0,6).map(function(l){ return '<li>'+descEsc(l)+'</li>'; }).join('')+'</ul>';
+      else descPrev.innerHTML='<p class="pc-d">'+descEsc(lines[0]||'')+'</p>';
+    };
+    descTa.addEventListener('input',renderDescPrev);
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
-      $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync();
+      $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync(); renderDescPrev();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };

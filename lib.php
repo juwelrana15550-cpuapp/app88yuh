@@ -275,7 +275,6 @@ function icon(string $n): string {
         'send'    => '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
         'phone'   => '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>',
         'chat'    => '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/>',
-        'headset' => '<path d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M21 16v2a4 4 0 0 1-4 4h-5"/>',
         'plus'    => '<path d="M5 12h14"/><path d="M12 5v14"/>',
         'search'  => '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
         'home'    => '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -346,11 +345,11 @@ document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener(
   var t=document.querySelector(b.dataset.copy);t.select();
   try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand('copy')}
   var o=b.textContent;b.textContent='Copied!';setTimeout(function(){b.textContent=o},1500);});});
-var fb=document.getElementById('sp');if(fb){var sm=fb.querySelector('.sp-main');sm.addEventListener('click',function(e){e.stopPropagation();sm.setAttribute('aria-expanded',fb.classList.toggle('open')?'true':'false')});document.addEventListener('click',function(e){if(!fb.contains(e.target)){fb.classList.remove('open');sm.setAttribute('aria-expanded','false')}});}
+var fb=document.getElementById('fab');if(fb){fb.querySelector('.fab-main').addEventListener('click',function(){fb.classList.toggle('open')});}
 document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
   var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
   b.textContent=i.type==='password'?'Show':'Hide';});});
-document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){document.body.classList.remove('menu');if(fb){fb.classList.remove('open');var m=fb.querySelector('.sp-main');if(m)m.setAttribute('aria-expanded','false');}}});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){document.body.classList.remove('menu');if(fb)fb.classList.remove('open');}});
 document.querySelectorAll('.cur a').forEach(function(a){a.addEventListener('click',function(e){
   e.preventDefault();if(a.classList.contains('on'))return;
   var u=new URL(location.href);u.searchParams.set('cur',a.dataset.cur);location.href=u.toString();});});
@@ -421,36 +420,10 @@ function user_end(): void {
 <?php endforeach; ?>
 </nav>
 <?php if ($tg || $wa): ?>
-<style>
-/* Support button - the wrapper never catches taps itself, so nothing next to it (Buy Now etc.) gets blocked */
-.sp{position:fixed;right:14px;bottom:calc(92px + env(safe-area-inset-bottom,0px));z-index:900;display:flex;flex-direction:column;align-items:flex-end;gap:10px;width:auto;height:auto;pointer-events:none}
-@media(min-width:900px){.sp{right:22px;bottom:22px}}
-body.menu .sp{opacity:0;pointer-events:none}.sp{-webkit-user-select:none;user-select:none;transition:opacity .2s}
-.sp-main{pointer-events:auto;position:relative;width:44px;height:44px;padding:0;border:0;border-radius:50%;cursor:pointer;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,#4f46e5,#7c3aed);box-shadow:0 8px 18px -6px rgba(79,70,229,.65);transition:transform .2s ease,box-shadow .2s ease;-webkit-tap-highlight-color:transparent}
-.sp-main:hover{transform:translateY(-2px);box-shadow:0 12px 22px -8px rgba(79,70,229,.7)}
-.sp-main:active{transform:scale(.9)}
-.sp-main:focus-visible{outline:3px solid rgba(124,58,237,.35);outline-offset:3px}
-.sp-main .i{position:absolute;width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .35s cubic-bezier(.4,0,.2,1),opacity .2s ease}
-.sp-main .s-x{opacity:0;transform:rotate(-90deg) scale(.5)}
-.sp.open .sp-main .s-hs{opacity:0;transform:rotate(90deg) scale(.5)}
-.sp.open .sp-main .s-x{opacity:1;transform:none}
-.sp-main:after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid rgba(124,58,237,.55);animation:spPulse 2.8s ease-out infinite;pointer-events:none}
-.sp.open .sp-main:after{animation:none;opacity:0}
-@keyframes spPulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(1.65);opacity:0}}
-.sp-i{display:flex;align-items:center;gap:8px;visibility:hidden;pointer-events:none;opacity:0;transform:translateY(10px) scale(.96);transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s}
-.sp.open .sp-i{visibility:visible;pointer-events:auto;opacity:1;transform:none;transition:opacity .25s ease var(--d,0s),transform .25s cubic-bezier(.34,1.4,.64,1) var(--d,0s),visibility 0s}
-.sp-i .lbl{background:#fff;color:#1e293b;font-size:12.5px;font-weight:600;line-height:1;padding:8px 12px;border-radius:99px;white-space:nowrap;box-shadow:0 6px 16px -6px rgba(15,23,42,.35)}
-.sp-i b{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;color:#fff;box-shadow:0 6px 14px -6px rgba(15,23,42,.45);transition:transform .15s ease}
-.sp-i:active b{transform:scale(.9)}
-.sp-i .i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.sp-i.tg b{background:#229ed9}.sp-i.wa b{background:#25d366}
-body:has(.bx.open) .sp{visibility:hidden}
-@media(prefers-reduced-motion:reduce){.sp-main:after{animation:none}.sp *{transition-duration:.01s!important}}
-</style>
-<div class="sp" id="sp">
-  <?php if ($wa): ?><a class="sp-i wa" style="--d:.06s" href="<?= e($wa) ?>" target="_blank" rel="noopener"><span class="lbl">WhatsApp Support</span><b><?= icon('phone') ?></b></a><?php endif; ?>
-  <?php if ($tg): ?><a class="sp-i tg" style="--d:<?= $wa ? '.12s' : '.06s' ?>" href="<?= e($tg) ?>" target="_blank" rel="noopener"><span class="lbl">Telegram Support</span><b><?= icon('send') ?></b></a><?php endif; ?>
-  <button type="button" class="sp-main" aria-label="Support" aria-expanded="false"><?= str_replace('class="i"', 'class="i s-hs"', icon('headset')) ?><?= str_replace('class="i"', 'class="i s-x"', icon('x')) ?></button>
+<div class="fab" id="fab">
+  <?php if ($tg): ?><a class="fab-i tg" href="<?= e($tg) ?>" target="_blank" rel="noopener"><span class="lbl">Telegram Support</span><b><?= icon('send') ?></b></a><?php endif; ?>
+  <?php if ($wa): ?><a class="fab-i wa" href="<?= e($wa) ?>" target="_blank" rel="noopener"><span class="lbl">WhatsApp Support</span><b><?= icon('phone') ?></b></a><?php endif; ?>
+  <button type="button" class="fab-main" aria-label="Support"><span class="c-chat"><?= icon('chat') ?></span><span class="c-plus"><?= icon('plus') ?></span></button>
 </div>
 <?php endif;
     footer_html(false);
@@ -494,7 +467,16 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
       <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
-      <?php if ($p['description']): ?><p class="pc-d"><?= e($p['description']) ?></p><?php endif; ?>
+      <?php if ($p['description']):
+          // One line = one bullet. 2+ non-empty lines render as a checklist (matches the plans section on the homepage); a single line stays plain text.
+          $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $p['description'])), function ($l) { return $l !== ''; }));
+      ?>
+        <?php if (count($descLines) > 1): ?>
+          <ul class="pc-dl"><?php foreach (array_slice($descLines, 0, 6) as $dl): ?><li><?= e($dl) ?></li><?php endforeach; ?></ul>
+        <?php else: ?>
+          <p class="pc-d"><?= e($descLines[0] ?? $p['description']) ?></p>
+        <?php endif; ?>
+      <?php endif; ?>
       <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
