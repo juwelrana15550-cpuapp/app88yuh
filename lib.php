@@ -14,10 +14,10 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
     exit;
 }
 require_once __DIR__ . '/app_icons.php';
-require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 
 const SITE_NAME = 'MySite';
 const SCHEMA_VERSION = '11';
+require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
 function db(): PDO {
