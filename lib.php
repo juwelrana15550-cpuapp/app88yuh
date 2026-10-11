@@ -14,9 +14,10 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
     exit;
 }
 require_once __DIR__ . '/app_icons.php';
+require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '10';
+const SCHEMA_VERSION = '11';
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
 function db(): PDO {
@@ -160,6 +161,9 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE users ADD COLUMN banned TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD COLUMN discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0",   // product-wide discount for everyone   // 1 = account suspended by admin
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
+        "ALTER TABLE products ADD COLUMN supplier_id INT NULL",          // bulkmail.shop product ID (NULL = normal product)
+        "ALTER TABLE products ADD INDEX idx_supplier (supplier_id)",
+        "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }

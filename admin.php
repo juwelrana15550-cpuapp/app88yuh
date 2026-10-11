@@ -4,11 +4,11 @@ $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = '';
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'announce', 'settings'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'api', 'announce', 'settings'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null, string $extra = ''): void {
@@ -24,15 +24,17 @@ function go_user(int $id, ?string $ok = null): void {
 
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
+    $sup = (int)($_POST['supplier_id'] ?? 0); $sup = $sup > 0 ? $sup : null;   // bulkmail.shop product ID
     return [
         'name'    => trim($_POST['pname'] ?? ''),
         'desc'    => mb_substr(trim($_POST['pdesc'] ?? ''), 0, 500),
         'price'   => round((float)($_POST['pprice'] ?? 0), 2),
         'cat'     => ((int)($_POST['category_id'] ?? 0)) ?: null,
-        'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
+        'sup'     => $sup,
+        'stock'   => $sup ? 0 : ($st === '' ? null : max(0, (int)$st)),   // linked product: real stock is copied from bulkmail.shop right after saving; blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
-        'auto'    => empty($_POST['auto_delivery']) ? 0 : 1,   // 1 = deliver uploaded stock instantly
+        'auto'    => ($sup || empty($_POST['auto_delivery'])) ? 0 : 1,   // 1 = deliver uploaded stock instantly (never for linked products)
         'disc'    => min(99, max(0, round((float)($_POST['pdisc'] ?? 0), 2))),   // % off for everyone, 0 = none
         'icon'    => (function () {   // '' = automatic (guessed from the name, else the category icon)
             $ic = trim($_POST['picon'] ?? '');
@@ -121,24 +123,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'products';
             $isEdit = isset($_POST['update_product']);
             $f = product_fields();
+            $bad = '';
             if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
-                $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
+                $bad = 'Enter a product name (max 80 chars) and a price above 0.';
+            } elseif ($f['sup']) {   // linked to bulkmail.shop: the product must exist there (skipped when editing a product whose link did not change)
+                $oldSup = 0;
+                if ($isEdit) { $q = $pdo->prepare('SELECT supplier_id FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldSup = (int)$q->fetchColumn(); }
+                if ($oldSup !== (int)$f['sup']) {
+                    if (!bm_connected()) $bad = 'Connect your bulkmail.shop API key first (Admin > API Management), then link the product.';
+                    else { $sp = bm_product((int)$f['sup']); if (isset($sp['error'])) $bad = 'Supplier product ID: ' . $sp['error']; }
+                }
+            }
+            if ($bad !== '') {
+                $prodErr = $bad;
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'], 'sup' => $f['sup'] ?? '',
                 ]];
             } elseif ($isEdit) {
                 $pid = (int)$_POST['update_product'];
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $pid]);
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
-                go('products', 'Product saved.');
+                if ($f['sup']) bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct) VALUES (?,?,?,?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc']]);
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup']]);
                 if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
-                go('products', 'Product added.');
+                if ($f['sup']) bm_sync_stock($pdo, true);
+                go('products', $f['sup'] ? 'Product added and linked to bulkmail.shop.' : 'Product added.');
             }
+
+        } elseif (isset($_POST['bm_connect'])) {
+            $page = 'api';
+            [$okc, $msgc] = bm_connect($pdo, (string)($_POST['bm_key'] ?? ''));
+            if ($okc) {
+                $bal = bm_balance(); if ($bal) save_setting('bm_currency', $bal['currency']);
+                go('api', $msgc . ' Linked products now use live stock and are bought from bulkmail.shop.');
+            }
+            $apiErr = $msgc;
+
+        } elseif (isset($_POST['bm_disconnect'])) {
+            bm_disconnect($pdo);
+            go('api', 'Disconnected. The API key was removed and linked products show as out of stock until you connect again.');
+
+        } elseif (isset($_POST['bm_refresh'])) {
+            bm_sync_stock($pdo, true);
+            go('api', 'Stock refreshed from bulkmail.shop.');
+
+        } elseif (isset($_POST['bm_clear_err'])) {
+            save_setting('bm_last_error', '');
+            go('api');
 
         } elseif (isset($_POST['add_category']) || isset($_POST['update_category'])) {
             $page = 'categories';
@@ -203,7 +239,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare("UPDATE orders SET status='cancelled' WHERE id=?")->execute([$oid]);
                         $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
                         add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
-                        $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL AND auto_delivery = 0')->execute([max(1, (int)$o['qty']), $o['product_id']]);
+                        $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL AND auto_delivery = 0 AND supplier_id IS NULL')->execute([max(1, (int)$o['qty']), $o['product_id']]);
                     }
                 }
             });
@@ -353,6 +389,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+/* AJAX: product details from bulkmail.shop for the "Fetch" button in the product dialog (admin only). */
+if (isset($_GET['bm_lookup'])) {
+    header('Content-Type: application/json; charset=utf-8'); header('Cache-Control: no-store');
+    if (empty($_SESSION['admin'])) { http_response_code(401); echo json_encode(['ok' => false, 'error' => 'Please log in again.']); exit; }
+    $sp = bm_product((int)$_GET['bm_lookup']);
+    echo json_encode(isset($sp['error']) ? ['ok' => false, 'error' => $sp['error']] : ['ok' => true, 'p' => $sp, 'cur' => setting('bm_currency', 'USD'), 'rate' => usd_rate()], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /* ============================== Login screen ============================== */
 if (empty($_SESSION['admin'])) {
     header_html('Admin Login', null, 'auth'); ?>
@@ -463,7 +508,7 @@ $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
     'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
-    'Manage'  => [['users', 'Users', 'users', 0], ['announce', 'Notice & Maintenance', 'bell', 0], ['settings', 'Site settings', 'sliders', 0]],
+    'Manage'  => [['users', 'Users', 'users', 0], ['api', 'API Management', 'key', 0], ['announce', 'Notice & Maintenance', 'bell', 0], ['settings', 'Site settings', 'sliders', 0]],
 ];
 $titles = [
     'overview'   => ['Overview', 'Store activity at a glance'],
@@ -472,6 +517,7 @@ $titles = [
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Search, top up, ban and manage accounts'],
+    'api'        => ['API Management', 'Connect bulkmail.shop with an API key so linked products sell from its live stock'],
     'announce'   => ['Notice & Maintenance', 'Show a notice to users and switch the site into maintenance mode'],
     'settings'   => ['Site settings', 'Name, headline, dollar rate, support links, logo and banner'],
 ];
@@ -548,6 +594,7 @@ $lg = media_url('logo');
 <?php foreach ($pendOrders as $o): ?>
 <div class="ord">
   <div class="ord-h"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></b><p><?= e($o['email']) ?> · <?= e($o['created_at']) ?></p></div><span class="money"><?= money($o['price']) ?></span></div>
+  <?php if (!empty($o['supplier_order_id'])): ?><div class="err" style="margin:10px 0">⚠️ bulkmail.shop order <?= $o['supplier_order_id'] === 'sending' ? 'was sent but no clear answer came back' : '#' . e($o['supplier_order_id']) . ' was placed but no items came back' ?>. Open your orders at bulkmail.shop first: if it was charged, paste the items below and mark delivered; if not, cancel &amp; refund.</div><?php endif; ?>
   <form method="post"><?= csrf_field() ?><input type="hidden" name="order_id" value="<?= (int)$o['id'] ?>">
   <textarea name="delivery" placeholder="Delivery data for the customer: one item per line, e.g. email|password (they can download it as TXT / CSV / XLSX)"></textarea>
   <div class="acts" style="margin-top:10px"><button class="btn sm ok-b" name="deliver" value="1">Mark delivered</button>
@@ -580,13 +627,13 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct']];
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id']];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
-    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : '') ?></td>
+    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : ($p['supplier_id'] !== null ? ' <small>live</small>' : '')) ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
       <button type="button" class="btn sm ghost" data-stock="<?= e(json_encode($sj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('plus') ?>Stock</button>
@@ -630,6 +677,9 @@ $lg = media_url('logo');
   </style>
   <div class="ipk-q" id="pikQuick" role="group" aria-label="Quick icons"><?php foreach (['gmail','facebook','instagram','tiktok','telegram','whatsapp','youtube','netflix','spotify','shield','gift','crown'] as $qk): if (!isset(app_icons()[$qk])) continue; ?><button type="button" class="ipk-qb" data-v="app:<?= e($qk) ?>" title="<?= e(app_icons()[$qk][0]) ?>" aria-label="<?= e(app_icons()[$qk][0]) ?>"><?= app_icon_svg($qk, '30px') ?></button><?php endforeach; ?></div>
   <?= icon_picker_html('pik', 'picon', '', true) ?>
+  <label>bulkmail.shop product ID <small>(optional · links this product to the supplier)</small></label>
+  <div style="display:flex;gap:8px"><input type="number" name="supplier_id" id="p_sup" min="1" step="1" inputmode="numeric" placeholder="e.g. 123"<?= bm_connected() ? '' : ' title="Connect the API first"' ?>><button type="button" class="btn ghost" id="p_supGo" style="flex:none">Fetch</button></div>
+  <small id="p_supNote" style="display:block;margin-top:6px"><?= bm_connected() ? 'Stock is copied live from bulkmail.shop. When a customer buys, the order is placed there automatically and the items are delivered instantly.' : 'Not connected yet: open <a href="/admin.php?p=api">API Management</a> and connect your API key first.' ?></small>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <label class="chk" style="margin-top:12px"><input type="checkbox" name="auto_delivery" id="p_auto" value="1"> <span>Instant delivery from uploaded stock</span></label>
   <small id="p_autoNote" style="display:block;margin-top:4px">Stock = number of unsold uploaded items. Use the “Stock” button on the product to upload them.</small>
@@ -845,6 +895,50 @@ $lg = media_url('logo');
   <div class="savebar"><button class="btn" name="save_settings" value="1">Save settings</button></div>
 </div>
 </form>
+<?php /* ============================ API MANAGEMENT ============================ */ elseif ($page === 'api'):
+  $bmOn = bm_connected(); $bmBal = $bmOn ? bm_balance() : null;
+  if ($bmBal) save_setting('bm_currency', $bmBal['currency']);
+  $linked = $pdo->query('SELECT id, name, supplier_id, stock, active FROM products WHERE supplier_id IS NOT NULL ORDER BY id DESC')->fetchAll();
+  $bmErr = trim(setting('bm_last_error', '')); ?>
+<?php if ($apiErr): ?><div class="err"><?= e($apiErr) ?></div><?php endif; ?>
+<div class="card"><div class="card-h"><h3>bulkmail.shop connection</h3><span class="badge <?= $bmOn ? 'on' : 'off' ?>"><?= $bmOn ? 'Connected' : 'Disconnected' ?></span></div>
+<?php if ($bmOn): ?>
+  <div class="kv">
+    <div><span>API key</span><b class="mono"><?= e(bm_mask(bm_key())) ?></b></div>
+    <div><span>Supplier wallet balance</span><b class="money"><?= $bmBal ? e(number_format($bmBal['balance'], 2) . ' ' . $bmBal['currency']) : '<span style="color:var(--red)">could not read (check the key)</span>' ?></b></div>
+    <div><span>Linked products</span><b><?= count($linked) ?></b></div>
+  </div>
+  <small class="hint">Every sale of a linked product is bought at bulkmail.shop from this wallet balance, so keep it topped up. If it runs out, customers are refunded automatically and the product shows an error until you add funds.</small>
+  <div class="acts" style="margin-top:16px">
+    <form method="post" class="inl"><?= csrf_field() ?><button class="btn ghost" name="bm_refresh" value="1">Refresh stock now</button></form>
+    <form method="post" class="inl"><?= csrf_field() ?><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect from bulkmail.shop? The API key is removed and linked products show as out of stock until you connect again.')">Disconnect</button></form>
+  </div>
+<?php else: ?>
+  <form method="post" autocomplete="off"><?= csrf_field() ?>
+    <label style="margin-top:0">API key <small>(from your bulkmail.shop dashboard)</small></label>
+    <div class="pw" style="position:relative"><input type="password" id="bmk" name="bm_key" required autocomplete="off" spellcheck="false" placeholder="Paste your API key" style="padding-right:64px"><button type="button" data-toggle="#bmk" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--brand);font-weight:600;cursor:pointer">Show</button></div>
+    <small class="hint">The key is checked with bulkmail.shop first and saved only if it works. You can disconnect at any time.</small>
+    <div class="acts" style="margin-top:16px"><button class="btn" name="bm_connect" value="1">Connect</button></div>
+  </form>
+<?php endif; ?>
+</div>
+<?php if ($bmErr !== ''): ?><div class="card"><div class="card-h"><h3>Last problem</h3>
+  <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="bm_clear_err" value="1">Dismiss</button></form></div>
+  <div class="err" style="margin:0"><?= e($bmErr) ?></div></div><?php endif; ?>
+<div class="card"><div class="card-h"><h3>How to link a product</h3><a href="/admin.php?p=products">Open products</a></div>
+  <div class="kv">
+    <div><span>1</span><b style="font-weight:500">Connect the API key above</b></div>
+    <div><span>2</span><b style="font-weight:500">Products → Add product → type the <u>bulkmail.shop product ID</u> and press Fetch</b></div>
+    <div><span>3</span><b style="font-weight:500">Set your selling price and save</b></div>
+  </div>
+  <small class="hint">Linked products copy their stock live from bulkmail.shop and are delivered instantly after the customer pays. To unlink, clear the ID in the product and save.</small>
+</div>
+<div class="card"><h3>Linked products</h3>
+  <div class="tw"><table class="rt"><thead><tr><th>Product</th><th>bulkmail ID</th><th>Stock</th><th>Status</th></tr></thead><tbody>
+  <?php foreach ($linked as $x): ?>
+  <tr><td><b><?= e($x['name']) ?></b><small style="display:block">Shop ID <?= (int)$x['id'] ?></small></td><td>#<?= (int)$x['supplier_id'] ?></td><td><?= number_format((int)$x['stock']) ?></td><td><span class="badge <?= $x['active'] ? 'on' : 'off' ?>"><?= $x['active'] ? 'Visible' : 'Hidden' ?></span></td></tr>
+  <?php endforeach; if (!$linked): ?><tr><td colspan="4">No linked products yet.</td></tr><?php endif; ?></tbody></table></div>
+</div>
 <?php /* ============================ NOTICE & MAINTENANCE ============================ */ elseif ($page === 'announce'):
   $posted = isset($_POST['save_notice']);
   $nOn   = $posted ? !empty($_POST['notice_on']) : setting('notice_on', '0') === '1';
@@ -956,8 +1050,28 @@ $lg = media_url('logo');
     $('#pik').addEventListener('click',function(){ setTimeout(quickSync,0); });
     $('#p_name').addEventListener('input',function(){ pp.refresh(); });
     pd.addEventListener('close',function(){ pp.close(); });
-    var autoSync=function(){ var on=$('#p_auto').checked; $('#p_stock').disabled=on; $('#p_autoNote').style.display=on?'block':'none'; if(on) $('#p_stock').value=''; };
+    var autoSync=function(){
+      var sup=$('#p_sup').value.trim()!=='', on=$('#p_auto').checked && !sup;
+      $('#p_auto').disabled=sup; if(sup) $('#p_auto').checked=false;
+      $('#p_stock').disabled=on||sup; $('#p_autoNote').style.display=on?'block':'none'; if(on||sup) $('#p_stock').value='';
+    };
     $('#p_auto').addEventListener('change',autoSync);
+    $('#p_sup').addEventListener('input',autoSync);
+    var supGo=$('#p_supGo'), supNote=$('#p_supNote'), supNote0=supNote.innerHTML;
+    supGo.addEventListener('click',function(){
+      var id=$('#p_sup').value.trim();
+      if(!id){ supNote.textContent='Type the bulkmail.shop product ID first.'; return; }
+      supGo.disabled=true; supNote.textContent='Checking bulkmail.shop\u2026';
+      fetch('/admin.php?bm_lookup='+encodeURIComponent(id),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(j){
+        supGo.disabled=false;
+        if(!j.ok){ supNote.textContent=j.error||'Not found.'; return; }
+        var p=j.p; if(!$('#p_name').value.trim()) $('#p_name').value=p.name.slice(0,80);
+        if(!$('#p_desc').value.trim() && p.description){ $('#p_desc').value=p.description.slice(0,500); renderDescPrev(); }
+        if(!$('#p_price').value && j.cur==='USD' && +j.rate>0) $('#p_price').value=(Math.ceil(p.price*j.rate*100)/100).toFixed(2);
+        pp.refresh();
+        supNote.textContent='Found: '+p.name+' \u00B7 supplier price '+p.price+' '+j.cur+' \u00B7 '+p.stock.toLocaleString('en-US')+' in stock. Set your own selling price (add your profit).';
+      }).catch(function(){ supGo.disabled=false; supNote.textContent='Could not reach the server. Try again.'; });
+    });
     var descTa=$('#p_desc'), descPrev=$('#p_descPrev'), descWrap=$('#p_descPrevWrap');
     var descEsc=function(s){ return s.replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); };
     var renderDescPrev=function(){
@@ -972,12 +1086,13 @@ $lg = media_url('logo');
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_disc').value=+v.disc>0?v.disc:'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
+      $('#p_sup').value=v.sup||''; supNote.innerHTML=supNote0;
       $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync(); renderDescPrev();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     /* stock upload dialog */

@@ -14,7 +14,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $st = $pdo->prepare('SELECT * FROM products WHERE id = ? AND active = 1 FOR UPDATE');
             $st->execute([(int)($_POST['product_id'] ?? 0)]); $p = $st->fetch();
             if (!$p) throw new RuntimeException('Product not found.');
-            $auto  = !empty($p['auto_delivery']);
+            $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: bought there after payment
+            if ($sup && !bm_connected()) throw new RuntimeException('This product is temporarily unavailable.');
+            $auto  = !$sup && !empty($p['auto_delivery']);
             $items = [];
             if ($auto) {
                 // Instant delivery: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
@@ -36,7 +38,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare("INSERT INTO orders (user_id, product_id, product_name, price, qty, status, delivery) VALUES (?,?,?,?,?,'delivered',?)")
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty, implode("\n", array_column($items, 'line'))]);
             } else {
-                if ($p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
+                // Supplier products keep their stock number from bulkmail.shop (refreshed after the purchase), so nothing is subtracted here.
+                if (!$sup && $p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
                 $pdo->prepare('INSERT INTO orders (user_id, product_id, product_name, price, qty) VALUES (?,?,?,?,?)')
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
             }
@@ -47,9 +50,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $GLOBALS['__instant'] = true;
             }
             add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : '') . ($pct > 0 ? ' (' . pct_fmt($pct) . '% off)' : ''));
+            if ($sup) $GLOBALS['__sup'] = true;
             return $id;
         });
-        flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
+        if (!empty($GLOBALS['__sup'])) {
+            // The payment is saved. Now buy the items at bulkmail.shop (outside the database transaction, so no locks are held while waiting for the network).
+            $res = bm_fulfil($pdo, $oid);
+            if ($res['status'] === 'refunded') { flash('err', $res['msg']); $oid = 0; }
+            else flash('ok', $res['msg']);
+        } else {
+            flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
+        }
     } catch (RuntimeException $ex) {
         flash('err', $ex->getMessage());
     } catch (Throwable $ex) {
@@ -60,6 +71,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $back = array_filter(['c' => (int)($_POST['c'] ?? 0), 'q' => mb_substr(trim($_POST['q'] ?? ''), 0, 80)], fn($v) => $v !== 0 && $v !== '');
     header('Location: /dashboard.php' . ($back ? '?' . http_build_query($back) : '')); exit; // redirect: refresh must not buy again
 }
+
+bm_sync_stock($pdo);   // linked bulkmail.shop products: refresh live stock (at most once a minute)
 
 $c = (int)($_GET['c'] ?? 0);
 $q = mb_substr(trim($_GET['q'] ?? ''), 0, 80);
