@@ -38,8 +38,7 @@ function otp_run(string $tab, string $raw): array {
     if (!empty($res['messages']) && is_array($res['messages'])) {
         $r['messages'] = $res['messages'];
         foreach ($res['messages'] as $m) {
-            $c = $m['code'] ?? null;
-            if (!$c) $c = mailgen_extract_code(($m['preview'] ?? '') . ' ' . ($m['message'] ?? '') . ' ' . ($m['subject'] ?? ''));
+            $c = otp_pick_code($m);
             if ($c) { $r['found'] = ['code' => $c]; break; }
         }
     } elseif (!empty($res['error'])) {
@@ -65,6 +64,27 @@ function otp_mail_body(array $m): array {
     return ['', false];
 }
 
+/**
+ * Picks the verification code of one message. The API's own "code" field is not reliable (it can return things like a year),
+ * so the subject and the text are searched first, preferring numbers written next to words like "code" / "OTP".
+ */
+function otp_pick_code(array $m): ?string {
+    [$body, $isHtml] = otp_mail_body($m);
+    if ($isHtml) { $body = preg_replace('#<(script|style)\b.*?</\1>#is', ' ', $body); $body = html_entity_decode(strip_tags(preg_replace('#<br\s*/?>|</(p|div|tr|li|h[1-6])>#i', "\n", $body)), ENT_QUOTES, 'UTF-8'); }
+    $texts = [(string)($m['subject'] ?? ''), trim(($m['preview'] ?? '') . "\n" . ($m['message'] ?? '')), $body];
+    foreach ($texts as $t) {
+        if (trim($t) === '') continue;
+        if (preg_match('/\b(?:code|otp|pin|passcode|token)\b[^0-9\n]{0,30}?\b(\d{4,8})\b/i', $t, $x)) return $x[1];
+        if (preg_match('/\b(\d{4,8})\b(?=\s+(?:is|as)\s+your)/i', $t, $x)) return $x[1];
+        if (preg_match('/\b(\d{3})[-\s](\d{3})\b/', $t, $x)) return $x[1] . $x[2];
+        if (preg_match('/\b(\d{6})\b/', $t, $x)) return $x[1];
+        if (preg_match_all('/\b(\d{4,8})\b/', $t, $all)) {
+            foreach ($all[1] as $n) if (!(strlen($n) === 4 && (int)$n >= 1900 && (int)$n <= 2100)) return $n;   // skip years
+        }
+    }
+    return null;
+}
+
 /** HTML for a result (errors, code, inbox list). Used for the AJAX response. */
 function otp_out_html(array $r): string {
     ob_start();
@@ -85,8 +105,7 @@ function otp_out_html(array $r): string {
         $list = array_slice($r['messages'], 0, 15); ?>
         <div class="otp-found"><?= count($list) ?> email(s) found</div>
         <?php foreach ($list as $i => $m):
-            $code = $m['code'] ?? null;
-            if (!$code) $code = mailgen_extract_code(($m['preview'] ?? '') . ' ' . ($m['message'] ?? '') . ' ' . ($m['subject'] ?? '')); ?>
+            $code = otp_pick_code($m); ?>
           <div class="mc">
             <?php if ($code): ?>
             <div class="mc-top">
