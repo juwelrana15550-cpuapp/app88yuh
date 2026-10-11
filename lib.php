@@ -746,3 +746,72 @@ function buy_modal_html(float $balance, int $c, string $q): void {
 })();
 </script>
 <?php }
+/** MailGen API base URL (admin setting ,   default) */
+function mailgen_base(): string {
+    return rtrim(setting('mailgen_url', 'https://www.mailgen.shop'), '/');
+}
+
+/** MailGen API  POST request  */
+function mailgen_call(string $endpoint, array $body, int $timeout = 25): array {
+    $url = mailgen_base() . $endpoint;
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($body, JSON_UNESCAPED_SLASHES),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Accept: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+    ]);
+    $raw  = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($raw === false) {
+        return ['success' => false, 'error' => 'Connection failed: ' . $err, '_http' => 0];
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        return ['success' => false, 'error' => 'Invalid JSON response', '_http' => $code, '_raw' => substr($raw, 0, 200)];
+    }
+    $data['_http'] = $code;
+    if ($code === 429) {
+        $data['success'] = false;
+        $data['error']   = $data['error'] ?? 'Rate limit exceeded. Try again shortly.';
+    }
+    return $data;
+}
+
+/**
+ * Order delivery text  email|password|refresh_token|client_id   
+ *  MailGen inbox-read / live-check   
+ */
+function mailgen_parse_account(string $email): ?array {
+    $u = require_login();
+    $s = db()->prepare("SELECT delivery FROM orders WHERE user_id = ? AND status = 'delivered' AND delivery IS NOT NULL ORDER BY id DESC LIMIT 200");
+    $s->execute([$u['id']]);
+    $want = strtolower($email);
+    foreach ($s->fetchAll() as $r) {
+        foreach (preg_split('/\r\n|\r|\n/', (string)$r['delivery']) as $line) {
+            $line = trim($line);
+            if ($line === '' || stripos($line, $want) === false) continue;
+            //  email|...    ( | )
+            if (substr_count($line, '|') < 1) continue;
+            $parts = array_map('trim', explode('|', $line));
+            if (strtolower($parts[0]) !== $want) continue;
+            return [
+                'email'         => $parts[0],
+                'password'      => $parts[1] ?? '',
+                'refresh_token' => $parts[2] ?? '',
+                'client_id'     => $parts[3] ?? '',
+                'full'          => $line,
+                'has_oauth'     => !empty($parts[2]) && !empty($parts[3]),
+                'is_edu'        => str_contains(strtolower($parts[0]), 'emailfake'),
+            ];
+        }
+    }
+    return null;
+}
