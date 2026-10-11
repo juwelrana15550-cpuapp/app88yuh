@@ -815,39 +815,6 @@ function mailgen_parse_account(string $email): ?array {
     }
     return null;
 }
-/** MailGen API base URL */
-function mailgen_base(): string {
-    return rtrim(setting('mailgen_url', 'https://www.mailgen.shop'), '/');
-}
-
-/** MailGen API  POST */
-function mailgen_call(string $endpoint, array $body, int $timeout = 30): array {
-    $ch = curl_init(mailgen_base() . $endpoint);
-    curl_setopt_array($ch, [
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => json_encode($body, JSON_UNESCAPED_SLASHES),
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Accept: application/json'],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => $timeout,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-    ]);
-    $raw  = curl_exec($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err  = curl_error($ch);
-    curl_close($ch);
-
-    if ($raw === false) return ['success' => false, 'error' => 'Connection failed: ' . $err, '_http' => 0];
-    $data = json_decode($raw, true);
-    if (!is_array($data)) return ['success' => false, 'error' => 'Invalid JSON', '_http' => $code];
-    $data['_http'] = $code;
-    if ($code === 429) {
-        $data['success'] = false;
-        $data['error']   = $data['error'] ?? 'Rate limit exceeded. Please wait a moment.';
-    }
-    return $data;
-}
 
 /**
  * Input line   3 format :
