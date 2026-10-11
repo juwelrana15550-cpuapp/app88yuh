@@ -17,7 +17,10 @@ function go(string $p, ?string $ok = null, string $extra = ''): void {
     exit;
 }
 /** Back to one user's page (after an action). Optionally with a success message. */
-function go_user(int $id, ?string $ok = null): void { go('users', $ok, '&u=' . $id); }
+function go_user(int $id, ?string $ok = null): void {
+    $t = (string)($GLOBALS['__utab'] ?? '');   // tab to return to (set by each handler)
+    go('users', $ok, '&u=' . $id . ($t !== '' ? '&t=' . $t : ''));
+}
 
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
@@ -238,6 +241,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go($back, $on ? 'Maintenance mode is ON. Visitors now see the maintenance page.' : 'Maintenance mode is OFF. The site is live again.');
 
         } elseif (isset($_POST['user_adjust'])) {
+            $GLOBALS['__utab'] = 'balance';
             $uid  = (int)$_POST['user_adjust'];
             $amt  = round((float)str_replace(',', '', (string)($_POST['amount'] ?? '0')), 2);
             $dir  = ($_POST['dir'] ?? '') === 'deduct' ? 'deduct' : 'add';
@@ -261,12 +265,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go_user($uid, ($dir === 'deduct' ? 'Deducted ' : 'Added ') . money($amt) . '.');
 
         } elseif (isset($_POST['user_password'])) {
+            $GLOBALS['__utab'] = 'info';
             $uid = (int)$_POST['user_password']; $pw = (string)($_POST['new_password'] ?? '');
             if (strlen($pw) < 8 || strlen($pw) > 72) { flash('err', 'Password must be 8 to 72 characters.'); go_user($uid); }
             $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([password_hash($pw, PASSWORD_DEFAULT), $uid]);
             go_user($uid, 'Password changed. Send the new password to the user.');
 
         } elseif (isset($_POST['user_email'])) {
+            $GLOBALS['__utab'] = 'info';
             $uid = (int)$_POST['user_email']; $mail = trim((string)($_POST['new_email'] ?? ''));
             if (!filter_var($mail, FILTER_VALIDATE_EMAIL) || mb_strlen($mail) > 190) { flash('err', 'Enter a valid email address.'); go_user($uid); }
             try { $pdo->prepare('UPDATE users SET email = ? WHERE id = ?')->execute([$mail, $uid]); }
@@ -277,11 +283,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go_user($uid, 'Email updated.');
 
         } elseif (isset($_POST['user_ban'])) {
+            $GLOBALS['__utab'] = 'ban';
             $uid = (int)$_POST['user_ban']; $to = empty($_POST['to']) ? 0 : 1;
             $pdo->prepare('UPDATE users SET banned = ? WHERE id = ?')->execute([$to, $uid]);
-            go_user($uid, $to ? 'User banned. They are signed out and cannot use the account.' : 'User unbanned.');
+            $msg = $to ? 'User banned. They are signed out and cannot use the account.' : 'User unbanned.';
+            if (isset($_POST['ret'])) {   // quick Ban/Unban from the users list: go back to the same list
+                $ret = (string)$_POST['ret'];
+                if (!preg_match('/^(&(?:q|f|pg)=[A-Za-z0-9%._~+\-]*)*$/', $ret)) $ret = '';
+                go('users', $msg, $ret);
+            }
+            go_user($uid, $msg);
 
         } elseif (isset($_POST['user_disc_set'])) {
+            $GLOBALS['__utab'] = 'discount';
             $uid = (int)$_POST['user_disc_set']; $pid = max(0, (int)($_POST['disc_product'] ?? 0)); $pct = round((float)($_POST['disc_pct'] ?? 0), 2);
             if ($pct < 0.01 || $pct > 99) { flash('err', 'Discount must be between 0.01% and 99%.'); go_user($uid); }
             if ($pid > 0) {
@@ -292,11 +306,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go_user($uid, 'Discount saved: ' . pct_fmt($pct) . '% off ' . ($pid ? 'this product.' : 'all products.'));
 
         } elseif (isset($_POST['user_disc_del'])) {
+            $GLOBALS['__utab'] = 'discount';
             $uid = (int)($_POST['uid'] ?? 0);
             $pdo->prepare('DELETE FROM user_discounts WHERE id = ? AND user_id = ?')->execute([(int)$_POST['user_disc_del'], $uid]);
             go_user($uid, 'Discount removed.');
 
         } elseif (isset($_POST['user_delete'])) {
+            $GLOBALS['__utab'] = 'ban';
             $uid = (int)$_POST['user_delete'];
             $n = (int)$pdo->query('SELECT (SELECT COUNT(*) FROM orders WHERE user_id = ' . $uid . ') + (SELECT COUNT(*) FROM deposits WHERE user_id = ' . $uid . ')')->fetchColumn();
             if ($n > 0) { flash('err', 'This user has orders or deposits, so the account cannot be deleted (your records would break). Ban the user instead.'); go_user($uid); }
@@ -374,10 +390,11 @@ $catOpts = function ($sel) use ($cats) {
 };
 $rows = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status='pending' ORDER BY d.id")->fetchAll();
 $maint = setting('maintenance_on', '0') === '1';
-$userView = null; $users = []; $uq = ''; $uPg = 1; $uPages = 1; $uMatch = 0;
+$userView = null; $users = []; $uq = ''; $uf = ''; $uPg = 1; $uPages = 1; $uMatch = 0;
 $uStats = ['banned' => 0, 'week' => 0];
 if ($page === 'users') {
     $vid = (int)($_GET['u'] ?? 0);
+    $uTab = in_array($_GET['t'] ?? '', ['info', 'balance', 'discount', 'ban', 'orders'], true) ? $_GET['t'] : 'info';
     if ($vid > 0) {   // one user's page
         $st = $pdo->prepare('SELECT u.*, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs, (SELECT r.email FROM users r WHERE r.id = u.referred_by) AS ref_email FROM users u WHERE u.id = ?');
         $st->execute([$vid]); $userView = $st->fetch() ?: null;
@@ -389,11 +406,15 @@ if ($page === 'users') {
         $st = $pdo->prepare('SELECT d.*, p.name AS pname FROM user_discounts d LEFT JOIN products p ON p.id = d.product_id WHERE d.user_id = ? ORDER BY d.product_id'); $st->execute([$vid]); $uDisc = $st->fetchAll();
     } else {          // searchable, paged list
         $uq = mb_substr(trim((string)($_GET['q'] ?? '')), 0, 80);
-        $w = ''; $args = [];
-        if ($uq !== '') { $w = ' WHERE (u.email LIKE ? OR u.id = ?)'; $args = ['%' . addcslashes($uq, '%_\\') . '%', (int)$uq]; }
+        $uf = in_array($_GET['f'] ?? '', ['banned', 'disc'], true) ? $_GET['f'] : '';
+        $conds = []; $args = [];
+        if ($uq !== '') { $conds[] = '(u.email LIKE ? OR u.id = ?)'; $args = ['%' . addcslashes($uq, '%_\\') . '%', (int)$uq]; }
+        if ($uf === 'banned') $conds[] = 'u.banned = 1';
+        if ($uf === 'disc') $conds[] = 'EXISTS (SELECT 1 FROM user_discounts d WHERE d.user_id = u.id)';
+        $w = $conds ? ' WHERE ' . implode(' AND ', $conds) : '';
         $st = $pdo->prepare('SELECT COUNT(*) FROM users u' . $w); $st->execute($args); $uMatch = (int)$st->fetchColumn();
         $per = 50; $uPages = max(1, (int)ceil($uMatch / $per)); $uPg = min(max(1, (int)($_GET['pg'] ?? 1)), $uPages);
-        $st = $pdo->prepare('SELECT u.id, u.email, u.coins, u.created_at, u.banned, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS ords FROM users u' . $w . ' ORDER BY u.id DESC LIMIT ' . $per . ' OFFSET ' . (($uPg - 1) * $per));
+        $st = $pdo->prepare('SELECT u.id, u.email, u.coins, u.created_at, u.banned, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS ords, (SELECT COUNT(*) FROM user_discounts d WHERE d.user_id = u.id) AS discs FROM users u' . $w . ' ORDER BY u.id DESC LIMIT ' . $per . ' OFFSET ' . (($uPg - 1) * $per));
         $st->execute($args); $users = $st->fetchAll();
         $uStats['banned'] = (int)$pdo->query('SELECT COUNT(*) FROM users WHERE banned = 1')->fetchColumn();
         $uStats['week'] = (int)$pdo->query('SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL 7 DAY')->fetchColumn();
@@ -658,24 +679,40 @@ $lg = media_url('logo');
 </form></dialog>
 
 <?php /* ============================ USERS ============================ */ elseif ($page === 'users'): ?>
-<?php if (!$userView): ?>
+<?php if (!$userView):
+  $qBase = $uq !== '' ? '&q=' . urlencode($uq) : '';
+  $qs = $qBase . ($uf !== '' ? '&f=' . $uf : '');
+  $ret = $qs . ($uPg > 1 ? '&pg=' . $uPg : '');
+  $uLink = fn(int $id, string $t = '') => '/admin.php?p=users&amp;u=' . $id . ($t !== '' ? '&amp;t=' . $t : ''); ?>
 <div class="stats s3">
   <div class="stat"><span>Total users</span><b><?= $totalUsers ?></b></div>
   <div class="stat <?= $uStats['banned'] ? 'alert' : '' ?>"><span>Banned</span><b><?= $uStats['banned'] ?></b></div>
   <div class="stat"><span>New in 7 days</span><b><?= $uStats['week'] ?></b></div>
 </div>
 <div class="card">
-  <form method="get" class="tb"><input type="hidden" name="p" value="users">
+  <form method="get" class="tb"><input type="hidden" name="p" value="users"><?php if ($uf !== ''): ?><input type="hidden" name="f" value="<?= e($uf) ?>"><?php endif; ?>
     <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($uq) ?>" placeholder="Search by email or ID" autocomplete="off"></div>
-    <button class="btn">Search</button><?php if ($uq !== ''): ?><a class="btn ghost" href="/admin.php?p=users">Clear</a><?php endif; ?>
+    <button class="btn">Search</button><?php if ($uq !== '' || $uf !== ''): ?><a class="btn ghost" href="/admin.php?p=users">Clear</a><?php endif; ?>
   </form>
-  <div class="tw"><table><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Orders</th><th class="hm">Referrals</th><th class="hm">Joined</th><th>Status</th><th></th></tr></thead><tbody>
+  <div class="fchips">
+    <?php foreach (['' => 'All', 'banned' => 'Banned', 'disc' => 'With discount'] as $k => $l): ?>
+    <a class="<?= $uf === $k ? 'on' : '' ?>" href="/admin.php?p=users<?= $qBase ?><?= $k !== '' ? '&amp;f=' . $k : '' ?>"><?= e($l) ?></a>
+    <?php endforeach; ?>
+  </div>
+  <div class="tw"><table><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Orders</th><th class="hm">Joined</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($users as $x): ?>
-  <tr><td><?= (int)$x['id'] ?></td><td><a href="/admin.php?p=users&amp;u=<?= (int)$x['id'] ?>"><?= e($x['email']) ?></a></td><td class="money"><?= money($x['coins']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td><td class="hm"><?= (int)$x['refs'] ?></td><td class="hm"><?= e($x['created_at']) ?></td>
+  <tr><td><?= (int)$x['id'] ?></td>
+    <td><a href="<?= $uLink((int)$x['id']) ?>"><?= e($x['email']) ?></a><?php if ((int)$x['discs'] > 0): ?><span class="tag">Discount</span><?php endif; ?></td>
+    <td class="money"><?= money($x['coins']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td><td class="hm"><?= e($x['created_at']) ?></td>
     <td><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span></td>
-    <td class="ra"><a class="btn sm ghost" href="/admin.php?p=users&amp;u=<?= (int)$x['id'] ?>"><?= ai('pencil') ?>Manage</a></td></tr>
-  <?php endforeach; if (!$users): ?><tr><td colspan="8"><?= $uq !== '' ? 'No matching users.' : 'No users yet.' ?></td></tr><?php endif; ?></tbody></table></div>
-  <?php if ($uPages > 1): $qs = $uq !== '' ? '&q=' . urlencode($uq) : ''; ?>
+    <td class="ra"><div class="acts">
+      <a class="btn sm ghost" href="<?= $uLink((int)$x['id'], 'balance') ?>"><?= ai('coins') ?>Balance</a>
+      <a class="btn sm ghost" href="<?= $uLink((int)$x['id'], 'discount') ?>"><?= ai('sliders') ?>Discount</a>
+      <form method="post" class="inl"><?= csrf_field() ?><input type="hidden" name="to" value="<?= $x['banned'] ? 0 : 1 ?>"><input type="hidden" name="ret" value="<?= e($ret) ?>">
+        <button class="btn sm <?= $x['banned'] ? 'ok-b' : 'red' ?>" name="user_ban" value="<?= (int)$x['id'] ?>"<?= $x['banned'] ? '' : ' onclick="return confirm(\'Ban this user?\')"' ?>><?= $x['banned'] ? 'Unban' : 'Ban' ?></button></form>
+    </div></td></tr>
+  <?php endforeach; if (!$users): ?><tr><td colspan="7"><?= ($uq !== '' || $uf !== '') ? 'No matching users.' : 'No users yet.' ?></td></tr><?php endif; ?></tbody></table></div>
+  <?php if ($uPages > 1): ?>
   <div class="pager">
     <?php if ($uPg > 1): ?><a class="btn sm ghost" href="/admin.php?p=users<?= $qs ?>&amp;pg=<?= $uPg - 1 ?>">&larr; Previous</a><?php endif; ?>
     <span>Page <?= $uPg ?> of <?= $uPages ?> · <?= number_format($uMatch) ?> users</span>
@@ -683,9 +720,22 @@ $lg = media_url('logo');
   </div>
   <?php endif; ?>
 </div>
-<?php else: $x = $userView; $xid = (int)$x['id']; ?>
+<?php else: $x = $userView; $xid = (int)$x['id'];
+  $tabs = ['info' => ['Info', 'user'], 'balance' => ['Balance', 'coins'], 'discount' => ['Discount', 'sliders'], 'ban' => ['Ban', 'shield'], 'orders' => ['Orders', 'cart']]; ?>
+<div class="card ucard">
+  <div class="uav"><?= e(mb_strtoupper(mb_substr((string)$x['email'], 0, 1))) ?></div>
+  <div class="ui"><b><?= e($x['email']) ?></b><small>ID <?= $xid ?> · Joined <?= e(substr((string)$x['created_at'], 0, 10)) ?></small></div>
+  <div class="ur"><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span><div class="money"><?= money($x['coins']) ?></div></div>
+</div>
+<nav class="utabs" aria-label="User sections">
+  <?php foreach ($tabs as $k => [$l, $ic]): ?>
+  <a href="/admin.php?p=users&amp;u=<?= $xid ?>&amp;t=<?= $k ?>" class="<?= $uTab === $k ? 'on' : '' ?><?= ($k === 'ban' && $x['banned']) ? ' dot' : '' ?>"<?= $uTab === $k ? ' aria-current="page"' : '' ?>><?= ai($ic) ?><span><?= e($l) ?></span><?php if ($k === 'discount' && $uDisc): ?><em><?= count($uDisc) ?></em><?php endif; ?></a>
+  <?php endforeach; ?>
+</nav>
+
+<?php if ($uTab === 'info'): ?>
 <div class="cols">
-  <div class="card"><div class="card-h"><h3>Account</h3><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span></div>
+  <div class="card"><h3>User info</h3>
     <div class="kv">
       <div><span>Email</span><b><?= e($x['email']) ?></b></div>
       <div><span>Balance</span><b class="money"><?= money($x['coins']) ?></b></div>
@@ -697,63 +747,74 @@ $lg = media_url('logo');
       <div><span>Total deposited</span><b><?= money($uDep) ?></b></div>
     </div>
   </div>
-  <div class="card"><h3>Add or deduct balance</h3>
-    <form method="post"><?= csrf_field() ?>
-      <label style="margin-top:0">Amount <small>(BDT)</small></label><input type="number" name="amount" step="0.01" min="0.01" inputmode="decimal" required placeholder="e.g. 100">
-      <label>Action</label><select name="dir"><option value="add">Add to balance</option><option value="deduct">Deduct from balance</option></select>
-      <label>Note <small>(optional, the user sees it in Transactions)</small></label><input type="text" name="note" maxlength="120" placeholder="e.g. Bonus / correction">
-      <div class="acts" style="margin-top:14px"><button class="btn" name="user_adjust" value="<?= $xid ?>">Apply</button></div>
-    </form>
-  </div>
-</div>
-<div class="cols" style="margin-top:18px">
-  <div class="card"><h3>Change password</h3>
-    <form method="post"><?= csrf_field() ?>
-      <label style="margin-top:0">New password <small>(8 to 72 characters)</small></label><input type="text" name="new_password" minlength="8" maxlength="72" autocomplete="off" required>
-      <div class="acts" style="margin-top:14px"><button class="btn" name="user_password" value="<?= $xid ?>">Set password</button></div>
-    </form>
-    <h3>Change email</h3>
+  <div class="card"><h3>Change email</h3>
     <form method="post"><?= csrf_field() ?>
       <input type="text" name="new_email" maxlength="190" value="<?= e($x['email']) ?>" required>
       <div class="acts" style="margin-top:14px"><button class="btn" name="user_email" value="<?= $xid ?>">Save email</button></div>
     </form>
-  </div>
-  <div class="card"><h3>Access</h3>
-    <form method="post"><?= csrf_field() ?><input type="hidden" name="to" value="<?= $x['banned'] ? 0 : 1 ?>">
-      <small class="hint" style="margin:0 0 12px"><?= $x['banned'] ? 'This user is banned: they are signed out and cannot log in or use the account.' : 'Banning signs the user out at once and blocks the account. Balance and history are kept.' ?></small>
-      <button class="btn <?= $x['banned'] ? 'ok-b' : 'red' ?>" name="user_ban" value="<?= $xid ?>"<?= $x['banned'] ? '' : ' onclick="return confirm(\'Ban this user?\')"' ?>><?= $x['banned'] ? 'Unban user' : 'Ban user' ?></button>
-    </form>
-    <h3>Delete account</h3>
+    <h3>Change password</h3>
     <form method="post"><?= csrf_field() ?>
-      <small class="hint" style="margin:0 0 12px">Only possible for users with no orders and no deposits. Otherwise ban the user instead.</small>
-      <button class="btn ghost red-t" name="user_delete" value="<?= $xid ?>" onclick="return confirm('Delete this account permanently? This cannot be undone.')"><?= ai('trash') ?>Delete user</button>
+      <label style="margin-top:0">New password <small>(8 to 72 characters)</small></label><input type="text" name="new_password" minlength="8" maxlength="72" autocomplete="off" required>
+      <div class="acts" style="margin-top:14px"><button class="btn" name="user_password" value="<?= $xid ?>">Set password</button></div>
     </form>
   </div>
 </div>
-<div class="card" style="margin-top:18px"><h3>Discounts for this user</h3>
-  <?php foreach ($uDisc as $d): ?>
-  <div class="mini"><div><b><?= (int)$d['product_id'] ? e($d['pname'] ?? ('Product #' . (int)$d['product_id'])) : 'All products' ?></b><small>Applies to every purchase</small></div>
-    <form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= $xid ?>"><span class="tag" style="margin:0">-<?= pct_fmt((float)$d['percent']) ?>%</span>
-      <button class="btn sm red" name="user_disc_del" value="<?= (int)$d['id'] ?>" aria-label="Remove discount"><?= ai('trash') ?></button></form></div>
-  <?php endforeach; if (!$uDisc): ?><div class="empty">No special discounts for this user yet.</div><?php endif; ?>
+
+<?php elseif ($uTab === 'balance'): ?>
+<div class="card"><div class="card-h"><h3>Add or deduct balance</h3><span class="money" style="font-size:20px"><?= money($x['coins']) ?></span></div>
   <form method="post"><?= csrf_field() ?>
-    <div class="grid2"><div><label>Applies to</label><select name="disc_product"><option value="0">All products</option>
-      <?php foreach ($products as $pr): ?><option value="<?= (int)$pr['id'] ?>"><?= e($pr['name']) ?> (ID <?= (int)$pr['id'] ?>)</option><?php endforeach; ?></select></div>
-    <div><label>Discount %</label><input type="number" name="disc_pct" min="0.01" max="99" step="0.01" inputmode="decimal" required placeholder="e.g. 10"></div></div>
-    <div class="acts" style="margin-top:14px"><button class="btn" name="user_disc_set" value="<?= $xid ?>">Save discount</button></div>
-    <small class="hint">Saving again for the same product replaces the old percent. If a product also has its own discount, the bigger one is used (they are not added together).</small>
+    <label style="margin-top:0">Amount <small>(BDT)</small></label><input type="number" name="amount" id="amt" step="0.01" min="0.01" inputmode="decimal" required placeholder="e.g. 100">
+    <div class="chips"><?php foreach ([50, 100, 200, 500, 1000] as $v): ?><button type="button" class="btn sm ghost" data-amt="<?= $v ?>"><?= $v ?></button><?php endforeach; ?></div>
+    <label>Action</label><select name="dir"><option value="add">Add to balance</option><option value="deduct">Deduct from balance</option></select>
+    <label>Note <small>(optional, the user sees it in Transactions)</small></label><input type="text" name="note" maxlength="120" placeholder="e.g. Bonus / correction">
+    <div class="acts" style="margin-top:14px"><button class="btn" name="user_adjust" value="<?= $xid ?>">Apply</button></div>
   </form>
 </div>
-<div class="card"><h3>Recent orders</h3>
-  <div class="tw"><table><thead><tr><th>#</th><th>Product</th><th>Price</th><th>Status</th><th class="hm">Date</th></tr></thead><tbody>
-  <?php foreach ($uOrders as $o): ?>
-  <tr><td><?= (int)$o['id'] ?></td><td><?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></td><td class="money"><?= money($o['price']) ?></td><td><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></td><td class="hm"><?= e($o['created_at']) ?></td></tr>
-  <?php endforeach; if (!$uOrders): ?><tr><td colspan="5">No orders yet.</td></tr><?php endif; ?></tbody></table></div></div>
 <div class="card"><h3>Recent transactions</h3>
   <div class="tw"><table><thead><tr><th>Type</th><th>Amount</th><th class="hm">Note</th><th class="hm">Date</th></tr></thead><tbody>
   <?php foreach ($uTx as $t): ?>
   <tr><td><?= e($t['type']) ?></td><td class="money"><?= money($t['amount']) ?></td><td class="hm"><?= e($t['note']) ?></td><td class="hm"><?= e($t['created_at']) ?></td></tr>
   <?php endforeach; if (!$uTx): ?><tr><td colspan="4">No transactions yet.</td></tr><?php endif; ?></tbody></table></div></div>
+
+<?php elseif ($uTab === 'discount'): ?>
+<div class="card"><h3>Discounts for this user</h3>
+  <?php foreach ($uDisc as $d): ?>
+  <div class="mini"><div><b><?= (int)$d['product_id'] ? e($d['pname'] ?? ('Product #' . (int)$d['product_id'])) : 'All products' ?></b><small>Applies to every purchase</small></div>
+    <form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= $xid ?>"><span class="tag" style="margin:0">-<?= pct_fmt((float)$d['percent']) ?>%</span>
+      <button class="btn sm red" name="user_disc_del" value="<?= (int)$d['id'] ?>" aria-label="Remove discount"><?= ai('trash') ?></button></form></div>
+  <?php endforeach; if (!$uDisc): ?><div class="empty">No special discounts for this user yet.</div><?php endif; ?>
+</div>
+<div class="card"><h3>Add a discount</h3>
+  <form method="post"><?= csrf_field() ?>
+    <div class="grid2"><div><label style="margin-top:0">Applies to</label><select name="disc_product"><option value="0">All products</option>
+      <?php foreach ($products as $pr): ?><option value="<?= (int)$pr['id'] ?>"><?= e($pr['name']) ?> (ID <?= (int)$pr['id'] ?>)</option><?php endforeach; ?></select></div>
+    <div><label style="margin-top:0">Discount %</label><input type="number" name="disc_pct" min="0.01" max="99" step="0.01" inputmode="decimal" required placeholder="e.g. 10"></div></div>
+    <div class="acts" style="margin-top:14px"><button class="btn" name="user_disc_set" value="<?= $xid ?>">Save discount</button></div>
+    <small class="hint">Saving again for the same product replaces the old percent. If a product also has its own discount, the bigger one is used (they are not added together).</small>
+  </form>
+</div>
+
+<?php elseif ($uTab === 'ban'): ?>
+<div class="card"><div class="card-h"><h3>Ban or unban</h3><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span></div>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="to" value="<?= $x['banned'] ? 0 : 1 ?>">
+    <small class="hint" style="margin:0 0 14px"><?= $x['banned'] ? 'This user is banned: they are signed out and cannot log in or use the account.' : 'Banning signs the user out at once and blocks the account. Balance and history are kept.' ?></small>
+    <button class="btn <?= $x['banned'] ? 'ok-b' : 'red' ?>" name="user_ban" value="<?= $xid ?>"<?= $x['banned'] ? '' : ' onclick="return confirm(\'Ban this user?\')"' ?>><?= $x['banned'] ? 'Unban user' : 'Ban user' ?></button>
+  </form>
+</div>
+<div class="card"><h3>Delete account</h3>
+  <form method="post"><?= csrf_field() ?>
+    <small class="hint" style="margin:0 0 14px">Only possible for users with no orders and no deposits. Otherwise ban the user instead.</small>
+    <button class="btn ghost red-t" name="user_delete" value="<?= $xid ?>" onclick="return confirm('Delete this account permanently? This cannot be undone.')"><?= ai('trash') ?>Delete user</button>
+  </form>
+</div>
+
+<?php else: ?>
+<div class="card"><h3>Recent orders</h3>
+  <div class="tw"><table><thead><tr><th>#</th><th>Product</th><th>Price</th><th>Status</th><th class="hm">Date</th></tr></thead><tbody>
+  <?php foreach ($uOrders as $o): ?>
+  <tr><td><?= (int)$o['id'] ?></td><td><?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></td><td class="money"><?= money($o['price']) ?></td><td><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></td><td class="hm"><?= e($o['created_at']) ?></td></tr>
+  <?php endforeach; if (!$uOrders): ?><tr><td colspan="5">No orders yet.</td></tr><?php endif; ?></tbody></table></div></div>
+<?php endif; ?>
 <?php endif; ?>
 
 <?php /* ============================ SETTINGS ============================ */ elseif ($page === 'settings'): ?>
@@ -947,6 +1008,9 @@ $lg = media_url('logo');
     var upd=function(){ var t=nt.value.trim(); np.className='nt nt-'+ntype.value; $('.nt-t',np).textContent=t||'Your notice will look like this.'; $('.nt-i',np).textContent=ICO[ntype.value]; };
     nt.addEventListener('input',upd); ntype.addEventListener('change',upd);
   }
+
+  /* ---------- quick amounts ---------- */
+  $$('[data-amt]').forEach(function(b){ b.addEventListener('click',function(){ var i=$('#amt'); i.value=b.dataset.amt; i.focus(); }); });
 
   /* ---------- categories ---------- */
   var cd=$('#cdlg');

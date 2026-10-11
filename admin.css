@@ -202,3 +202,50 @@ dialog::backdrop{background:rgba(20,14,48,.55)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .dlg-f.sf{align-items:center}.dlg-f.sf .grow{flex:1}
 .btn.ghost.red-t{color:var(--red)}.btn.ghost.red-t:hover{background:var(--red-bg);border-color:var(--red)}
+
+/* ---------- notice / maintenance / user management ---------- */
+.adm label.sw{display:flex;align-items:center;gap:12px;margin:0 0 14px;cursor:pointer;font-weight:600;position:relative}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .tg{flex:none;width:46px;height:26px;border-radius:99px;background:#cfcbe3;position:relative;transition:background .18s}
+.sw .tg:after{content:"";position:absolute;left:3px;top:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .18s}
+.sw input:checked+.tg{background:var(--ok)}
+.sw.warn input:checked+.tg{background:var(--red)}
+.sw input:checked+.tg:after{transform:translateX(20px)}
+.sw input:focus-visible+.tg{outline:2px solid var(--brand);outline-offset:2px}
+.mbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;margin-bottom:16px;border-radius:var(--r-s);background:var(--red-bg);border:1px solid #fca5a5;color:#991b1b;font-weight:600}
+.mbar form{margin:0}
+.kv>div{display:flex;justify-content:space-between;gap:14px;padding:9px 0;border-bottom:1px solid var(--line)}
+.kv>div:last-child{border-bottom:0}
+.kv span{color:var(--mute)}
+.kv b{text-align:right;word-break:break-all}
+.stats.s3{grid-template-columns:repeat(3,1fr)}
+@media (max-width:860px){.stats.s3{grid-template-columns:1fr 1fr}}
+.pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;color:var(--mute);font-size:14px}
+.badge.banned{background:var(--red-bg);color:#b91c1c}
+.hint{display:block;margin-top:6px}
+.cols .card form+h3{margin-top:24px}
+.adm .nt{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:12px;border:1px solid;font-size:14px;line-height:1.5;margin-top:14px}
+.adm .nt-i{flex:none;font-size:17px}.adm .nt-t{flex:1;min-width:0;word-break:break-word;white-space:pre-line}
+.nt-info{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
+.nt-success{background:#dcfce7;border-color:#86efac;color:#166534}
+.nt-warning{background:#fef3c7;border-color:#fcd34d;color:#92400e}
+.nt-danger{background:#fee2e2;border-color:#fca5a5;color:#991b1b}
+
+/* ---------- user page tabs ---------- */
+.ucard{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 20px}
+.uav{flex:none;width:48px;height:48px;border-radius:50%;background:var(--brand-soft);color:var(--brand);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:19px}
+.ucard .ui{flex:1;min-width:0}.ucard .ui b{display:block;word-break:break-all}
+.ucard .ur{text-align:right}.ucard .ur .money{font-size:21px;margin-top:4px}
+.utabs{display:flex;gap:6px;overflow-x:auto;padding:5px;margin:0 0 18px;background:#fff;border:1px solid var(--line);border-radius:13px;scrollbar-width:none}
+.utabs::-webkit-scrollbar{display:none}
+.utabs a{flex:1 0 auto;display:flex;align-items:center;justify-content:center;gap:7px;padding:10px 14px;border-radius:9px;color:var(--mute);text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap}
+.utabs a:hover{background:var(--brand-soft);color:var(--brand)}
+.utabs a.on{background:var(--brand);color:#fff}
+.utabs a.dot:after{content:"";width:8px;height:8px;border-radius:50%;background:#ff5d6c}
+.utabs a em{font-style:normal;min-width:20px;padding:0 6px;border-radius:99px;background:var(--brand-soft);color:var(--brand);font-size:12px;font-weight:700;text-align:center}
+.utabs a.on em{background:#fff}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.fchips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+.fchips a{padding:6px 14px;border-radius:99px;border:1px solid #d9d6ea;background:#fff;color:var(--text);text-decoration:none;font-size:13.5px;font-weight:600}
+.fchips a:hover{border-color:var(--brand)}
+.fchips a.on{background:var(--brand);border-color:var(--brand);color:#fff}
