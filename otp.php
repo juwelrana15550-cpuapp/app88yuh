@@ -6,6 +6,9 @@ csrf_field();   // makes sure the session has a CSRF token
 $TABS = ['hotmail', 'email', 'totp'];
 $tab = in_array($_GET['tab'] ?? '', $TABS, true) ? $_GET['tab'] : 'hotmail';
 
+/** Small inline icon (same look as icon()). */
+function otp_svg(string $paths): string { return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . $paths . '</svg>'; }
+
 /** Runs one lookup and returns the data needed to render the result. */
 function otp_run(string $tab, string $raw): array {
     $r = ['err' => '', 'apiErr' => '', 'messages' => [], 'found' => null, 'totp' => null, 'empty' => false];
@@ -143,21 +146,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['ajax'])) {
 
 $panes = [
     'hotmail' => [
-        'icon' => 'mail', 'title' => 'Hotmail & Outlook', 'tab' => 'Hotmail & Outlook', 'btn' => 'Get Verification Code', 'multi' => true,
+        'icon' => 'mail', 'title' => 'Hotmail & Outlook', 'tab' => 'Hotmail & Outlook', 'btn' => 'Get Verification Code', 'busy' => 'Inbox checking…', 'mailbox' => true, 'multi' => true,
         'hint' => 'Paste your account details to read the latest verification code.',
         'ph' => 'user@outlook.com|refresh_token|client_id|client_secret',
         'fmt' => '<code>email|refresh_token|client_id|client_secret</code>',
         'tips' => ['Supported: <code>@hotmail</code>, <code>@outlook</code>, <code>@live</code>', 'Uses OAuth2 mode for the fastest response.', 'Your credentials are never stored on our server.'],
     ],
     'email' => [
-        'icon' => 'send', 'title' => 'Email Code', 'tab' => 'Email', 'btn' => 'Get Email Code', 'multi' => false,
+        'icon' => 'send', 'title' => 'Email Code', 'tab' => 'Email', 'btn' => 'Get Email Code', 'busy' => 'Inbox checking…', 'mailbox' => false, 'multi' => false,
         'hint' => 'Enter your Gmail Edu address to read the verification code.',
         'ph' => 'user@emailfake.com',
         'fmt' => '<code>email</code> (Gmail Edu only)',
         'tips' => ['Example: <code>user@emailfake.com</code>', 'No password required for this service.', 'Only works with Gmail Edu accounts.'],
     ],
     'totp' => [
-        'icon' => 'shield', 'title' => '2FA Key', 'tab' => '2FA Key', 'btn' => 'Get 2FA Code', 'multi' => false,
+        'icon' => 'shield', 'title' => '2FA Key', 'tab' => '2FA Key', 'btn' => 'Get 2FA Code', 'busy' => 'Generating…', 'mailbox' => false, 'multi' => false,
         'hint' => 'Paste your 2FA secret key to generate the 6-digit code.',
         'ph' => 'JBSWY3DPEHPK3PXP',
         'fmt' => '<code>JBSWY3DPEHPK3PXP</code> (Base32 key, spaces are fine)',
@@ -286,6 +289,25 @@ textarea.otp-input{min-height:68px;resize:vertical}
 .fm-b{flex:1;min-height:0;overflow:auto;background:#fff}
 .fm-b iframe{display:block;width:100%;height:100%;border:0;background:#fff}
 .fm-b pre{margin:0;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:.84rem;line-height:1.6;color:#334155}
+
+/* paste / clean toolbar + email chip */
+.otp-tools{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 6px}
+.otp-tools .tl{font-size:.74rem;font-weight:600;color:#556275}
+.otp-tools .tb{display:flex;gap:6px}
+.tbtn{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid #dfe5f7;background:#f5f6ff;color:#4338ca;border-radius:8px;font:inherit;font-size:.74rem;font-weight:600;line-height:1.2;cursor:pointer;transition:background .15s,transform .1s}
+.tbtn svg.i{width:13px;height:13px}
+.tbtn:hover{background:#eceffd}
+.tbtn:active{transform:scale(.96)}
+.tbtn[data-act=clean]{color:#b45309;background:#fff7ed;border-color:#fde3c4}
+.tbtn[data-act=clean]:hover{background:#ffedd5}
+.otp-format[hidden],.otp-mail[hidden]{display:none}
+.otp-mail{display:flex;align-items:center;gap:8px;margin-top:8px;padding:6px 6px 6px 11px;background:#f0fdf4;border:1px solid #bbf0cc;border-radius:10px;font-size:.78rem}
+.otp-mail .lbl{flex:none;font-size:.66rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#15803d}
+.otp-mail .mv{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:#14532d;overflow-wrap:anywhere}
+.mcp{flex:none;width:32px;height:32px;border:1px solid #bbf0cc;border-radius:9px;background:#fff;color:#15803d;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,color .15s,transform .1s}
+.mcp svg.i{width:16px;height:16px}
+.mcp:active{transform:scale(.94)}
+.mcp.done{background:#16a34a;border-color:#16a34a;color:#fff}
 </style>
 
 <div class="otp-wrap" id="otpWrap" data-csrf="<?= e($_SESSION['csrf'] ?? '') ?>">
@@ -307,13 +329,23 @@ textarea.otp-input{min-height:68px;resize:vertical}
       <h3><span class="ic"><?= icon($p['icon']) ?></span><?= e($p['title']) ?></h3>
       <p class="hint"><?= e($p['hint']) ?></p>
       <form class="otp-form" data-tab="<?= $k ?>" autocomplete="off" novalidate>
+        <div class="otp-tools">
+          <span class="tl"><?= $p['multi'] ? 'Account data' : ($k === 'totp' ? '2FA secret key' : 'Email address') ?></span>
+          <span class="tb">
+            <button type="button" class="tbtn" data-act="paste" title="Paste from clipboard"><?= otp_svg('<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>') ?><span>Paste</span></button>
+            <button type="button" class="tbtn" data-act="clean" title="Clear the box and the result"><?= otp_svg('<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>') ?><span>Clean</span></button>
+          </span>
+        </div>
         <?php if ($p['multi']): ?>
           <textarea class="otp-input" name="data" rows="3" spellcheck="false" placeholder="<?= e($p['ph']) ?>"></textarea>
         <?php else: ?>
           <input class="otp-input" type="text" name="data" spellcheck="false" autocapitalize="off" placeholder="<?= e($p['ph']) ?>">
         <?php endif; ?>
         <div class="otp-format"><?= icon('shield') ?><span>Format: <?= $p['fmt'] ?></span></div>
-        <button type="submit" class="otp-go" data-label="<?= e($p['btn']) ?>"><?= icon('send') ?><span><?= e($p['btn']) ?></span></button>
+        <?php if ($p['mailbox']): ?>
+        <div class="otp-mail" hidden><span class="lbl">Email</span><b class="mv"></b><button type="button" class="mcp" data-code="" aria-label="Copy email" title="Copy email"><?= icon('copy') ?></button></div>
+        <?php endif; ?>
+        <button type="submit" class="otp-go" data-label="<?= e($p['btn']) ?>" data-busy="<?= e($p['busy']) ?>"><?= icon('send') ?><span><?= e($p['btn']) ?></span></button>
       </form>
       <div class="otp-info">
         <h4><?= icon('shield') ?> Instructions</h4>
@@ -355,12 +387,42 @@ textarea.otp-input{min-height:68px;resize:vertical}
     tick(); timers[tab]=setInterval(tick,250);
   }
 
+  /* Input helpers: tidy pasted text, show the e-mail found in the data, Paste / Clean buttons */
+  var EM=/[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}/;
+  function clean(v){
+    return String(v).replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\r/g,'').split('\n')
+      .map(function(l){return l.split('|').map(function(x){return x.trim();}).join('|').trim();}).filter(Boolean).join('\n');
+  }
+  function syncMail(f){
+    var box=$('.otp-mail',f); if(!box) return;
+    var m=(f.elements.data.value.split(/\r?\n/)[0]||'').split('|')[0].match(EM);
+    box.hidden=!m; $('.otp-format',f).hidden=!!m;
+    if(m){ $('.mv',box).textContent=m[0]; $('.mcp',box).dataset.code=m[0]; }
+  }
+  $$('.otp-form').forEach(function(f){
+    var inp=f.elements.data;
+    inp.addEventListener('input',function(){syncMail(f);});
+    inp.addEventListener('paste',function(){setTimeout(function(){inp.value=clean(inp.value);syncMail(f);},0);});
+    f.addEventListener('click',function(e){
+      var b=e.target.closest('.tbtn'); if(!b) return;
+      var tab=f.dataset.tab, s=$('span',b), o=s.textContent;
+      if(b.dataset.act==='clean'){
+        inp.value=''; syncMail(f); clearInterval(timers[tab]); delete mails[tab];
+        $('.otp-out',f.closest('.otp-pane')).innerHTML=''; inp.focus(); return;
+      }
+      function got(t){inp.value=clean(t);syncMail(f);inp.focus();s.textContent='Pasted!';setTimeout(function(){s.textContent=o;},1200);}
+      function hint(){inp.focus();s.textContent='Long-press to paste';setTimeout(function(){s.textContent=o;},2200);}
+      if(navigator.clipboard&&navigator.clipboard.readText&&window.isSecureContext) navigator.clipboard.readText().then(function(t){t?got(t):hint();},hint); else hint();
+    });
+  });
+
   /* Get code: fetch in the background, update only the result area */
   function run(tab,silent){
     var pane=$('.otp-pane[data-pane="'+tab+'"]'), f=$('form',pane), inp=f.elements.data, btn=$('.otp-go',f), lab=$('span',btn), out=$('.otp-out',pane);
+    if(!silent) inp.value=clean(inp.value);
     if(!inp.value.trim()){inp.focus();return;}
     if(busy[tab]) return; busy[tab]=true;
-    if(!silent){btn.disabled=true;btn.classList.add('load');lab.textContent='Fetching…';}
+    if(!silent){btn.disabled=true;btn.classList.add('load');lab.textContent=btn.dataset.busy||'Checking\u2026';}
     fetch('/otp.php',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'fetch','Accept':'application/json'},
       body:new URLSearchParams({ajax:'1',csrf:csrf,tab:tab,data:inp.value})})
       .then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
@@ -378,7 +440,7 @@ textarea.otp-input{min-height:68px;resize:vertical}
 
   /* Copy buttons (big "Copy code" and the small icon next to each code) */
   wrap.addEventListener('click',function(e){
-    var b=e.target.closest('.cp,.mc-cp'); if(!b) return;
+    var b=e.target.closest('.cp,.mc-cp,.mcp'); if(!b||!b.dataset.code) return;
     var t=b.dataset.code||'', s=$('span',b), o=s?s.textContent:'';
     function done(){if(s)s.textContent='Copied!';b.classList.add('done');setTimeout(function(){if(s)s.textContent=o;b.classList.remove('done');},1600);}
     function fb(){var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(x){}document.body.removeChild(a);done();}
