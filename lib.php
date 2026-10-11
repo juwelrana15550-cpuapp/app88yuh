@@ -411,13 +411,48 @@ function user_end(): void {
     $tabs = [
         'dashboard'    => ['/dashboard.php', 'Home', 'home'],
         'orders'       => ['/orders.php', 'Orders', 'cart'],
-        'deposits'     => ['/deposits.php', 'Deposit', 'coins'],
+        'deposits'     => ['/deposits.php', 'Deposit', 'plus'],
         'transactions' => ['/transactions.php', 'History', 'history'],
         'otp'          => ['/otp.php', 'Get OTP', 'key'],
     ]; ?>
+<style>
+/* Bottom bar: glass (transparent) buttons, highlighted "+" Deposit, bigger icon-only support button */
+body .tabbar{overflow:visible;background:rgba(255,255,255,.72);-webkit-backdrop-filter:blur(18px) saturate(1.5);backdrop-filter:blur(18px) saturate(1.5);border:1px solid rgba(99,102,241,.16);box-shadow:0 12px 32px -12px rgba(30,27,75,.38),inset 0 1px 0 rgba(255,255,255,.7)}
+body .tabbar a{background:transparent;box-shadow:none;color:#64748b;transition:color .2s,background .2s}
+body .tabbar a .tl{color:inherit;font-weight:600}
+body .tabbar a:hover{color:#4338ca}
+body .tabbar a.on{background:rgba(79,70,229,.1);color:#4338ca;box-shadow:inset 0 0 0 1px rgba(79,70,229,.14)}
+body .tabbar a.on .ico,body .tabbar a .ico{background:transparent;box-shadow:none}
+body .tabbar a.dep{background:transparent;box-shadow:none;color:#059669}
+body .tabbar a.dep .ico{position:relative;display:flex;align-items:center;justify-content:center;width:46px;height:46px;margin-top:-22px;border-radius:50%;color:#fff;
+  background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 10px 20px -6px rgba(5,150,105,.75),0 0 0 4px rgba(255,255,255,.75)}
+body .tabbar a.dep .ico:after{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 0 rgba(16,185,129,.55);animation:depPulse 2.2s ease-out infinite}
+body .tabbar a.dep .ico svg.i{width:24px;height:24px;stroke-width:2.8}
+body .tabbar a.dep .tl{color:#047857;font-weight:700}
+body .tabbar a.dep.on{background:transparent;box-shadow:none}
+@keyframes depPulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,.5)}70%,100%{box-shadow:0 0 0 12px rgba(16,185,129,0)}}
+@media(prefers-reduced-motion:reduce){body .tabbar a.dep .ico:after{animation:none}}
+/* Support button: bigger icon, translucent, no text labels */
+body .fab .fab-i .lbl{display:none}
+body .fab .fab-main{animation:fabGlow 2s ease-in-out infinite}
+body .fab.open .fab-main{animation:none;box-shadow:0 0 0 3px rgba(129,140,248,.55),0 8px 20px -6px rgba(79,70,229,.7)}
+@keyframes fabGlow{
+  0%,100%{box-shadow:0 0 0 2px rgba(99,102,241,.25),0 0 4px 0 rgba(99,102,241,.2)}
+  33%{box-shadow:0 0 0 5px rgba(99,102,241,.5),0 0 22px 6px rgba(99,102,241,.75)}
+  66%{box-shadow:0 0 0 5px rgba(236,72,153,.5),0 0 22px 6px rgba(236,72,153,.7)}
+}
+@media(prefers-reduced-motion:reduce){body .fab .fab-main{animation:none}}
+
+body .fab .fab-main{width:54px;height:54px;background:rgba(79,70,229,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.35)}
+body .fab .fab-main svg.i{width:26px;height:26px}
+body .fab .fab-i b{width:46px;height:46px;background:rgba(255,255,255,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(148,163,184,.3);box-shadow:0 8px 18px -8px rgba(15,23,42,.45)}
+body .fab .fab-i b svg.i{width:22px;height:22px}
+body .fab .fab-i.tg b{color:#229ed9}
+body .fab .fab-i.wa b{color:#16a34a}
+</style>
 <nav class="tabbar" aria-label="Quick navigation">
 <?php foreach ($tabs as $k => $t): ?>
-  <a href="<?= $t[0] ?>" class="<?= $k === $act ? 'on' : '' ?>"<?= $k === $act ? ' aria-current="page"' : '' ?>><span class="ico"><?= icon($t[2]) ?></span><span class="tl"><?= e($t[1]) ?></span></a>
+  <a href="<?= $t[0] ?>" class="<?= trim(($k === $act ? 'on' : '') . ($k === 'deposits' ? ' dep' : '')) ?>"<?= $k === $act ? ' aria-current="page"' : '' ?>><span class="ico"><?= icon($t[2]) ?></span><span class="tl"><?= e($t[1]) ?></span></a>
 <?php endforeach; ?>
 </nav>
 <?php if ($tg || $wa): ?>
