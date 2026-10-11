@@ -9,14 +9,6 @@ $sub     = setting('subtitle', 'Affordable software and digital tool subscriptio
 $support = setting('telegram_url') ?: setting('support_url');
 $logo    = media_url('logo');
 $banner  = media_url('banner');
-$plans = [
-  ['name' => 'Starter',  'price' => '৳500',   'per' => '/ month', 'hot' => false,
-   'items' => ['1 tool access', 'Email support', 'Monthly renewal']],
-  ['name' => 'Pro',      'price' => '৳1,200', 'per' => '/ month', 'hot' => true,
-   'items' => ['5 tools access', '24/7 support', 'Fast activation', 'Referral bonus']],
-  ['name' => 'Business', 'price' => '৳2,500', 'per' => '/ month', 'hot' => false,
-   'items' => ['All tools access', 'Priority support', 'Multiple team seats']],
-];
 $features = [
   ['⚡', 'Fast Activation', 'Your subscription goes live shortly after payment is confirmed.'],
   ['🛡️', 'Secure Payments', 'Your wallet and account are protected with secure password hashing.'],
@@ -38,12 +30,20 @@ $heroStyle = $banner
 html{scroll-behavior:smooth}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1e293b;background:#f8fafc;overflow-x:hidden}
 a{text-decoration:none;color:inherit}
-nav{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:rgba(15,23,42,.55);backdrop-filter:blur(10px);color:#fff}
-nav .brand{font-weight:800;font-size:1.2rem;display:inline-flex;align-items:center;gap:8px}
-nav .brand img{height:30px;border-radius:8px}
-nav .links a{margin-left:14px;font-size:.92rem;opacity:.9}
-nav .links .pill{background:#fff;color:var(--a);padding:7px 16px;border-radius:99px;font-weight:600;opacity:1}
-.hero{position:relative;min-height:100vh;display:flex;align-items:center;padding:100px 22px 80px;color:#fff;
+nav{position:fixed;top:0;left:0;right:0;z-index:10;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 18px;background:linear-gradient(180deg,rgba(15,23,42,.92),rgba(30,27,75,.88));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);color:#fff;border-bottom:1px solid rgba(255,255,255,.14);box-shadow:0 8px 28px -12px rgba(0,0,0,.55)}
+nav:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:linear-gradient(90deg,transparent,#a5b4fc,#f472b6,#a5b4fc,transparent);opacity:.9}
+nav .brand{font-weight:800;font-size:1.2rem;display:inline-flex;align-items:center;gap:10px;letter-spacing:.2px;min-width:0}
+nav .brand span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:linear-gradient(90deg,#fff,#c7d2fe);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+nav .brand img{height:34px;width:34px;object-fit:cover;border-radius:10px;box-shadow:0 0 0 2px rgba(255,255,255,.25)}
+nav .links{display:flex;align-items:center;gap:8px;flex:none}
+nav .links a{font-size:.92rem;font-weight:600;border-radius:99px;padding:8px 16px;transition:background .2s,transform .2s,box-shadow .2s}
+nav .links a.lk{color:rgba(255,255,255,.85);padding:8px 12px}
+nav .links a.lk:hover{color:#fff;background:rgba(255,255,255,.12)}
+nav .links a.lg{color:#fff;border:1.5px solid rgba(255,255,255,.55);background:rgba(255,255,255,.1)}
+nav .links a.lg:hover{background:rgba(255,255,255,.22);transform:translateY(-1px)}
+nav .links .pill{background:linear-gradient(135deg,#fff,#e0e7ff);color:#3730a3;font-weight:800;box-shadow:0 6px 18px -4px rgba(165,180,252,.8),inset 0 -2px 0 rgba(79,70,229,.15)}
+nav .links .pill:hover{transform:translateY(-2px);box-shadow:0 10px 24px -4px rgba(165,180,252,.95)}
+.hero{position:relative;min-height:100vh;display:flex;align-items:center;padding:96px 22px 210px;color:#fff;
  background:linear-gradient(120deg,var(--a),var(--b),var(--c),var(--a));background-size:300% 300%;animation:flow 12s ease infinite;overflow:hidden}
 @keyframes flow{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}
 .hero .in{max-width:760px;margin:auto;text-align:center;position:relative;z-index:2}
@@ -55,10 +55,20 @@ nav .links .pill{background:#fff;color:var(--a);padding:7px 16px;border-radius:9
 .btn.w{background:#fff;color:var(--a)}
 .btn.o{border:2px solid #fff;color:#fff}
 @keyframes up{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:none}}
-.orb{position:absolute;border-radius:50%;filter:blur(2px);opacity:.28;background:#fff;animation:float 9s ease-in-out infinite}
-.o1{width:220px;height:220px;top:8%;left:-60px}
-.o2{width:140px;height:140px;bottom:12%;right:6%;animation-delay:-3s}
-.o3{width:90px;height:90px;top:30%;right:18%;animation-delay:-6s}
+.orb{position:absolute;display:grid;place-items:center;border-radius:50%;background:radial-gradient(circle at 30% 28%,rgba(255,255,255,.38),rgba(255,255,255,.14) 62%);border:1px solid rgba(255,255,255,.28);box-shadow:0 12px 34px -12px rgba(0,0,0,.28),inset 0 0 22px rgba(255,255,255,.14);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);animation:float 9s ease-in-out infinite;pointer-events:none}
+.orb svg,.orb .em{width:52%!important;height:52%!important;display:block;filter:blur(1.6px) saturate(1.1);opacity:.7}
+.orb .em{display:grid;place-items:center;font-size:2.2rem;line-height:1}
+.orb.hl{background:radial-gradient(circle at 30% 28%,rgba(255,255,255,.6),rgba(255,255,255,.26) 64%);border:1.5px solid rgba(255,255,255,.65);box-shadow:0 0 0 6px rgba(255,255,255,.1),0 0 44px rgba(255,255,255,.42),0 16px 40px -10px rgba(0,0,0,.35),inset 0 0 26px rgba(255,255,255,.3)}
+.orb.hl svg,.orb.hl .em{width:56%!important;height:56%!important;filter:blur(.3px) drop-shadow(0 4px 10px rgba(0,0,0,.3));opacity:1}
+.o1{width:190px;height:190px;top:8%;left:-45px}
+.o2{width:150px;height:150px;bottom:9%;right:4%;animation-delay:-3s}
+.o3{width:140px;height:140px;top:14%;right:-30px;animation-delay:-2s}
+.o4{width:130px;height:130px;bottom:10%;left:6%;animation-delay:-5s}
+.o5{width:90px;height:90px;top:32%;right:22%;animation-delay:-6s}
+.o6{width:84px;height:84px;top:50%;left:3%;animation-delay:-7s}
+.o7{width:76px;height:76px;top:20%;left:46%;animation-delay:-8s}
+.o8{width:90px;height:90px;bottom:28%;right:40%;animation-delay:-4s}
+.o9{width:70px;height:70px;bottom:4%;left:44%;animation-delay:-1s}
 @keyframes float{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-40px) scale(1.08)}}
 section{padding:70px 20px;max-width:1000px;margin:auto}
 h2{text-align:center;font-size:1.9rem;margin-bottom:8px}
@@ -86,27 +96,39 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
 .rv{opacity:0;transform:translateY(34px);transition:all .7s}
 .rv.show{opacity:1;transform:none}
 .plan.hot.rv.show{transform:scale(1.04)}
-@media(max-width:600px){nav .links a.hide{display:none}.plan.hot{transform:none}.plan.hot:hover{transform:translateY(-8px)}.plan.hot.rv.show{transform:none}}
+@media(max-width:600px){nav .links a.hide{display:none}nav .links a{padding:7px 14px;font-size:.88rem}nav .brand{font-size:1.05rem}.plan.hot{transform:none}.plan.hot:hover{transform:translateY(-8px)}.plan.hot.rv.show{transform:none}}
 </style></head><body>
+<?= app_icon_sprite() ?>
 
-<nav><a class="brand" href="/"><?php if ($logo): ?><img src="<?= e($logo) ?>" alt=""><?php endif; ?><?= e($brand) ?></a>
+<nav><a class="brand" href="/"><?php if ($logo): ?><img src="<?= e($logo) ?>" alt=""><?php endif; ?><span><?= e($brand) ?></span></a>
 <div class="links">
-<a class="hide" href="#features">Features</a><a class="hide" href="#plans">Plans</a>
+<a class="hide lk" href="/">Home</a><a class="hide lk" href="#features">Features</a>
 <?php if ($u): ?>
   <a class="pill" href="/dashboard.php">Dashboard</a>
 <?php else: ?>
-  <a href="/login.php">Login</a><a class="pill" href="/register.php">Register</a>
+  <a class="lg" href="/login.php">Login</a><a class="pill" href="/register.php">Register</a>
 <?php endif; ?>
 </div></nav>
 
 <header class="hero" <?= $heroStyle ? 'style="' . $heroStyle . '"' : '' ?>>
-  <span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span>
+  <?php
+  // Bubble icons: app icon (blurred, soft) when the shop's icon set has it, otherwise an emoji.
+  $bubbles = [   // [icon key, fallback emoji, highlighted?]
+      ['gmail', '✉️', 1], ['facebook', '👍', 1], ['instagram', '📸', 1], ['outlook', '📧', 1],
+      ['youtube', '▶️', 0], ['tiktok', '🎵', 0], ['snapchat', '👻', 0], ['shield', '🛡️', 0], ['proxy', '🌐', 0],
+  ];
+  foreach ($bubbles as $bi => [$bk, $be, $hl]) {
+      if ($bk === 'outlook' && !isset(app_icons()['outlook']) && isset(app_icons()['hotmail'])) $bk = 'hotmail';
+      echo '<span class="orb o' . ($bi + 1) . ($hl ? ' hl' : '') . '" aria-hidden="true">';
+      echo isset(app_icons()[$bk]) ? app_icon_svg($bk, '40px') : '<span class="em">' . $be . '</span>';
+      echo '</span>';
+  }
+  ?>
   <div class="in">
     <h1><?= e($tagline) ?></h1>
     <p><?= e($sub) ?></p>
     <div class="btns">
       <a class="btn w" href="<?= $u ? '/dashboard.php' : '/register.php' ?>">Get Started</a>
-      <a class="btn o" href="#plans">View Plans</a>
     </div>
   </div>
 </header>
@@ -117,22 +139,6 @@ footer{text-align:center;padding:24px;color:#64748b;font-size:.9rem}
   <div class="grid">
   <?php foreach ($features as $f): ?>
     <div class="card rv"><div class="ic"><?= $f[0] ?></div><h3><?= e($f[1]) ?></h3><p><?= e($f[2]) ?></p></div>
-  <?php endforeach; ?>
-  </div>
-</section>
-
-<section id="plans" class="plans">
-  <h2 class="rv">Our Plans</h2>
-  <p class="lead rv">Pick the plan that fits your needs</p>
-  <div class="grid">
-  <?php foreach ($plans as $p): ?>
-    <div class="card plan rv <?= $p['hot'] ? 'hot' : '' ?>">
-      <?php if ($p['hot']): ?><span class="tag">Popular</span><?php endif; ?>
-      <h3><?= e($p['name']) ?></h3>
-      <div class="price"><?= e($p['price']) ?><small> <?= e($p['per']) ?></small></div>
-      <ul><?php foreach ($p['items'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul>
-      <a class="btn" href="<?= $u ? '/shop.php' : '/register.php' ?>">Choose Plan</a>
-    </div>
   <?php endforeach; ?>
   </div>
 </section>
