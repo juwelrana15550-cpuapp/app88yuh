@@ -26,7 +26,7 @@ user_start('Order #' . (int)$o['id'], $u, 'orders'); ?>
     <h4 class="cap">Product information</h4>
     <div class="ord-prod">
       <span class="ord-pi"><?= icon('box') ?></span>
-      <div class="ord-pt"><b><?= e($o['product_name']) ?></b><small>ID: <?= (int)$o['product_id'] ?> &times; <?= number_format($qty) ?><?= $qty > 1 ? ' &middot; ' . e(money($unit)) . ' each' : '' ?></small></div>
+      <div class="ord-pt"><b><?= e($o['product_name']) ?></b><small>ID <?= (int)$o['product_id'] ?> &middot; Qty <?= number_format($qty) ?><?= $qty > 1 ? ' &middot; ' . e(money($unit)) . ' each' : '' ?></small></div>
       <span class="badge <?= e($o['status']) ?>"><?= e($labels[$o['status']] ?? $o['status']) ?></span>
     </div>
     <div class="ord-paid"><span>Total Paid</span><b><?= e(money($o['price'])) ?></b></div>
@@ -44,7 +44,7 @@ user_start('Order #' . (int)$o['id'], $u, 'orders'); ?>
         <button type="button" class="btn ghost" id="cpy"><?= icon('copy') ?><span>Copy</span></button>
       </div>
     </form>
-    <div class="dv-h"><span><?= number_format(count($lines)) ?> item<?= count($lines) === 1 ? '' : 's' ?></span><?php if (count($lines) > 6): ?><small>Showing first 6 &middot; download or copy for all</small><?php endif; ?></div>
+    <div class="dv-h"><span><?= number_format(count($lines)) ?> item<?= count($lines) === 1 ? '' : 's' ?></span><?php if (count($lines) > 6): ?><small>First 6 shown &middot; Download/Copy for all</small><?php endif; ?></div>
     <pre class="dv mono" id="prev"><?= e(implode("\n", array_slice($lines, 0, 6))) ?></pre>
     <textarea id="rawData" class="sr" readonly tabindex="-1" aria-hidden="true"><?= e(implode("\n", $lines)) ?></textarea>
 <?php elseif ($o['status'] === 'pending'): ?>
