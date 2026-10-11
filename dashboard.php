@@ -27,7 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($have < 1) throw new RuntimeException('Sorry, this product is out of stock.');
                 if ($have < $qty) throw new RuntimeException('Only ' . number_format($have) . ' available right now. Please lower the quantity.');
             }
-            $cents = (int)round((float)$p['price'] * 100) * $qty;   // work in cents: no float drift
+            $pct = discount_pct($p, user_disc_map((int)$u['id']));   // product discount or this user's discount, whichever is bigger
+            $cents = final_cents((int)round((float)$p['price'] * 100), $pct) * $qty;   // work in cents: no float drift
             if ((int)round($coins * 100) < $cents) throw new RuntimeException('Not enough balance. Please add funds first.');
             $total = number_format($cents / 100, 2, '.', '');
             $pdo->prepare('UPDATE users SET coins = coins - ? WHERE id = ?')->execute([$total, $u['id']]);
@@ -45,7 +46,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 stock_sync($pdo, (int)$p['id']);
                 $GLOBALS['__instant'] = true;
             }
-            add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : ''));
+            add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : '') . ($pct > 0 ? ' (' . pct_fmt($pct) . '% off)' : ''));
             return $id;
         });
         flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');

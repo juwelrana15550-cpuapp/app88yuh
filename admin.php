@@ -4,18 +4,20 @@ $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = '';
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'announce', 'settings'];
 
 /** Redirect to an admin page, optionally with a success message. */
-function go(string $p, ?string $ok = null): void {
+function go(string $p, ?string $ok = null, string $extra = ''): void {
     if ($ok) flash('ok', $ok);
-    header('Location: /admin.php' . ($p === 'overview' ? '' : '?p=' . $p));
+    header('Location: /admin.php' . ($p === 'overview' ? '' : '?p=' . $p) . $extra);
     exit;
 }
+/** Back to one user's page (after an action). Optionally with a success message. */
+function go_user(int $id, ?string $ok = null): void { go('users', $ok, '&u=' . $id); }
 
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
@@ -28,6 +30,7 @@ function product_fields(): array {
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
         'auto'    => empty($_POST['auto_delivery']) ? 0 : 1,   // 1 = deliver uploaded stock instantly
+        'disc'    => min(99, max(0, round((float)($_POST['pdisc'] ?? 0), 2))),   // % off for everyone, 0 = none
         'icon'    => (function () {   // '' = automatic (guessed from the name, else the category icon)
             $ic = trim($_POST['picon'] ?? '');
             if ($ic === '') return '';
@@ -119,17 +122,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'],
                 ]];
             } elseif ($isEdit) {
                 $pid = (int)$_POST['update_product'];
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $pid]);
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
                 go('products', 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon) VALUES (?,?,?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon']]);
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct) VALUES (?,?,?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc']]);
                 if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
                 go('products', 'Product added.');
             }
@@ -203,6 +206,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
             go('orders', isset($_POST['deliver']) ? 'Order marked as delivered.' : 'Order cancelled and refunded.');
 
+        } elseif (isset($_POST['save_notice'])) {
+            $page = 'announce';
+            $txt  = mb_substr(trim($_POST['notice_text'] ?? ''), 0, 500);
+            $type = in_array($_POST['notice_type'] ?? '', ['info', 'success', 'warning', 'danger'], true) ? $_POST['notice_type'] : 'info';
+            $on   = !empty($_POST['notice_on']);
+            if ($on && $txt === '') {
+                $noticeErr = 'Write the notice text first, then turn it on.';
+            } else {
+                // A new version number makes users who closed the old notice see this one again.
+                if ($txt !== trim(setting('notice_text')) || (setting('notice_on', '0') !== '1' && $on)) save_setting('notice_v', (string)time());
+                save_setting('notice_text', $txt);
+                save_setting('notice_type', $type);
+                save_setting('notice_on', $on ? '1' : '0');
+                save_setting('notice_dismiss', empty($_POST['notice_dismiss']) ? '0' : '1');
+                go('announce', $on ? 'Notice saved and visible to users.' : 'Notice saved (currently hidden).');
+            }
+
+        } elseif (isset($_POST['toggle_maintenance']) || isset($_POST['save_maintenance'])) {
+            if (isset($_POST['toggle_maintenance'])) {   // quick switch from the red bar
+                $on = setting('maintenance_on', '0') !== '1';
+                save_setting('maintenance_on', $on ? '1' : '0');
+                $back = in_array($_POST['back'] ?? '', ADMIN_PAGES, true) ? $_POST['back'] : 'announce';
+            } else {
+                $on = !empty($_POST['maintenance_on']);
+                save_setting('maintenance_on', $on ? '1' : '0');
+                save_setting('maintenance_msg', mb_substr(trim($_POST['maintenance_msg'] ?? ''), 0, 300));
+                save_setting('maintenance_eta', mb_substr(trim($_POST['maintenance_eta'] ?? ''), 0, 60));
+                $back = 'announce';
+            }
+            go($back, $on ? 'Maintenance mode is ON. Visitors now see the maintenance page.' : 'Maintenance mode is OFF. The site is live again.');
+
+        } elseif (isset($_POST['user_adjust'])) {
+            $uid  = (int)$_POST['user_adjust'];
+            $amt  = round((float)str_replace(',', '', (string)($_POST['amount'] ?? '0')), 2);
+            $dir  = ($_POST['dir'] ?? '') === 'deduct' ? 'deduct' : 'add';
+            $note = mb_substr(trim($_POST['note'] ?? ''), 0, 120);
+            if ($amt <= 0 || $amt > 10000000) { flash('err', 'Enter an amount above 0.'); go_user($uid); }
+            $problem = with_tx($pdo, function (PDO $pdo) use ($uid, $amt, $dir, $note) {
+                $st = $pdo->prepare('SELECT coins FROM users WHERE id = ? FOR UPDATE'); $st->execute([$uid]);
+                $bal = $st->fetchColumn();
+                if ($bal === false) return 'User not found.';
+                if ($dir === 'deduct') {
+                    if ((float)$bal < $amt) return 'Balance is only ' . money($bal) . ', so ' . money($amt) . ' cannot be deducted.';
+                    $pdo->prepare('UPDATE users SET coins = coins - ? WHERE id = ?')->execute([$amt, $uid]);
+                    add_tx($pdo, $uid, 'admin', -$amt, $note !== '' ? 'Admin: ' . $note : 'Admin deduction');
+                } else {
+                    $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$amt, $uid]);
+                    add_tx($pdo, $uid, 'admin', $amt, $note !== '' ? 'Admin: ' . $note : 'Admin credit');
+                }
+                return null;
+            });
+            if ($problem) { flash('err', $problem); go_user($uid); }
+            go_user($uid, ($dir === 'deduct' ? 'Deducted ' : 'Added ') . money($amt) . '.');
+
+        } elseif (isset($_POST['user_password'])) {
+            $uid = (int)$_POST['user_password']; $pw = (string)($_POST['new_password'] ?? '');
+            if (strlen($pw) < 8 || strlen($pw) > 72) { flash('err', 'Password must be 8 to 72 characters.'); go_user($uid); }
+            $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([password_hash($pw, PASSWORD_DEFAULT), $uid]);
+            go_user($uid, 'Password changed. Send the new password to the user.');
+
+        } elseif (isset($_POST['user_email'])) {
+            $uid = (int)$_POST['user_email']; $mail = trim((string)($_POST['new_email'] ?? ''));
+            if (!filter_var($mail, FILTER_VALIDATE_EMAIL) || mb_strlen($mail) > 190) { flash('err', 'Enter a valid email address.'); go_user($uid); }
+            try { $pdo->prepare('UPDATE users SET email = ? WHERE id = ?')->execute([$mail, $uid]); }
+            catch (PDOException $ex) {
+                if ((string)$ex->getCode() !== '23000') throw $ex;
+                flash('err', 'That email is already used by another account.'); go_user($uid);
+            }
+            go_user($uid, 'Email updated.');
+
+        } elseif (isset($_POST['user_ban'])) {
+            $uid = (int)$_POST['user_ban']; $to = empty($_POST['to']) ? 0 : 1;
+            $pdo->prepare('UPDATE users SET banned = ? WHERE id = ?')->execute([$to, $uid]);
+            go_user($uid, $to ? 'User banned. They are signed out and cannot use the account.' : 'User unbanned.');
+
+        } elseif (isset($_POST['user_disc_set'])) {
+            $uid = (int)$_POST['user_disc_set']; $pid = max(0, (int)($_POST['disc_product'] ?? 0)); $pct = round((float)($_POST['disc_pct'] ?? 0), 2);
+            if ($pct < 0.01 || $pct > 99) { flash('err', 'Discount must be between 0.01% and 99%.'); go_user($uid); }
+            if ($pid > 0) {
+                $st = $pdo->prepare('SELECT COUNT(*) FROM products WHERE id = ?'); $st->execute([$pid]);
+                if (!(int)$st->fetchColumn()) { flash('err', 'Product not found.'); go_user($uid); }
+            }
+            $pdo->prepare('INSERT INTO user_discounts (user_id, product_id, percent) VALUES (?,?,?) ON DUPLICATE KEY UPDATE percent = VALUES(percent)')->execute([$uid, $pid, $pct]);
+            go_user($uid, 'Discount saved: ' . pct_fmt($pct) . '% off ' . ($pid ? 'this product.' : 'all products.'));
+
+        } elseif (isset($_POST['user_disc_del'])) {
+            $uid = (int)($_POST['uid'] ?? 0);
+            $pdo->prepare('DELETE FROM user_discounts WHERE id = ? AND user_id = ?')->execute([(int)$_POST['user_disc_del'], $uid]);
+            go_user($uid, 'Discount removed.');
+
+        } elseif (isset($_POST['user_delete'])) {
+            $uid = (int)$_POST['user_delete'];
+            $n = (int)$pdo->query('SELECT (SELECT COUNT(*) FROM orders WHERE user_id = ' . $uid . ') + (SELECT COUNT(*) FROM deposits WHERE user_id = ' . $uid . ')')->fetchColumn();
+            if ($n > 0) { flash('err', 'This user has orders or deposits, so the account cannot be deleted (your records would break). Ban the user instead.'); go_user($uid); }
+            with_tx($pdo, function (PDO $pdo) use ($uid) {
+                $pdo->prepare('UPDATE users SET referred_by = NULL WHERE referred_by = ?')->execute([$uid]);
+                $pdo->prepare('DELETE FROM api_keys WHERE user_id = ?')->execute([$uid]);
+                $pdo->prepare('DELETE FROM user_discounts WHERE user_id = ?')->execute([$uid]);
+                $pdo->prepare('DELETE FROM transactions WHERE user_id = ?')->execute([$uid]);
+                $pdo->prepare('DELETE FROM users WHERE id = ?')->execute([$uid]);
+            });
+            go('users', 'User deleted.');
+
         } elseif (isset($_POST['id'], $_POST['action'])) {
             with_tx($pdo, function (PDO $pdo) use ($bonus) {
                 $st = $pdo->prepare("SELECT * FROM deposits WHERE id = ? AND status = 'pending' FOR UPDATE");
@@ -267,7 +373,32 @@ $catOpts = function ($sel) use ($cats) {
     return $h;
 };
 $rows = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status='pending' ORDER BY d.id")->fetchAll();
-$users = $pdo->query('SELECT u.id, u.email, u.coins, u.created_at, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs FROM users u ORDER BY u.id DESC LIMIT 100')->fetchAll();
+$maint = setting('maintenance_on', '0') === '1';
+$userView = null; $users = []; $uq = ''; $uPg = 1; $uPages = 1; $uMatch = 0;
+$uStats = ['banned' => 0, 'week' => 0];
+if ($page === 'users') {
+    $vid = (int)($_GET['u'] ?? 0);
+    if ($vid > 0) {   // one user's page
+        $st = $pdo->prepare('SELECT u.*, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs, (SELECT r.email FROM users r WHERE r.id = u.referred_by) AS ref_email FROM users u WHERE u.id = ?');
+        $st->execute([$vid]); $userView = $st->fetch() ?: null;
+        if (!$userView) { flash('err', 'User not found.'); go('users'); }
+        $st = $pdo->prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 15'); $st->execute([$vid]); $uOrders = $st->fetchAll();
+        $st = $pdo->prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 15'); $st->execute([$vid]); $uTx = $st->fetchAll();
+        $st = $pdo->prepare("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN price END),0) spent FROM orders WHERE user_id = ?"); $st->execute([$vid]); $uOrd = $st->fetch();
+        $st = $pdo->prepare("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE user_id = ? AND status = 'approved'"); $st->execute([$vid]); $uDep = (float)$st->fetchColumn();
+        $st = $pdo->prepare('SELECT d.*, p.name AS pname FROM user_discounts d LEFT JOIN products p ON p.id = d.product_id WHERE d.user_id = ? ORDER BY d.product_id'); $st->execute([$vid]); $uDisc = $st->fetchAll();
+    } else {          // searchable, paged list
+        $uq = mb_substr(trim((string)($_GET['q'] ?? '')), 0, 80);
+        $w = ''; $args = [];
+        if ($uq !== '') { $w = ' WHERE (u.email LIKE ? OR u.id = ?)'; $args = ['%' . addcslashes($uq, '%_\\') . '%', (int)$uq]; }
+        $st = $pdo->prepare('SELECT COUNT(*) FROM users u' . $w); $st->execute($args); $uMatch = (int)$st->fetchColumn();
+        $per = 50; $uPages = max(1, (int)ceil($uMatch / $per)); $uPg = min(max(1, (int)($_GET['pg'] ?? 1)), $uPages);
+        $st = $pdo->prepare('SELECT u.id, u.email, u.coins, u.created_at, u.banned, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS ords FROM users u' . $w . ' ORDER BY u.id DESC LIMIT ' . $per . ' OFFSET ' . (($uPg - 1) * $per));
+        $st->execute($args); $users = $st->fetchAll();
+        $uStats['banned'] = (int)$pdo->query('SELECT COUNT(*) FROM users WHERE banned = 1')->fetchColumn();
+        $uStats['week'] = (int)$pdo->query('SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL 7 DAY')->fetchColumn();
+    }
+}
 $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status <> 'pending' ORDER BY d.id DESC LIMIT 30")->fetchAll();
 
 /** Icon picker (searchable app icons + emoji). $auto adds an "Automatic" choice (stored as an empty value). */
@@ -296,6 +427,7 @@ function icon_picker_html(string $pre, string $field, string $initial, bool $aut
 /** Admin-only icons (everything else comes from icon() in lib.php). */
 function ai(string $n): string {
     static $x = [
+        'bell'    => '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
         'grid'    => '<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
         'sliders' => '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
         'pencil'  => '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
@@ -310,7 +442,7 @@ $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
     'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
-    'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0]],
+    'Manage'  => [['users', 'Users', 'users', 0], ['announce', 'Notice & Maintenance', 'bell', 0], ['settings', 'Site settings', 'sliders', 0]],
 ];
 $titles = [
     'overview'   => ['Overview', 'Store activity at a glance'],
@@ -318,9 +450,11 @@ $titles = [
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
-    'users'      => ['Users', 'Latest 100 registered users'],
+    'users'      => ['Users', 'Search, top up, ban and manage accounts'],
+    'announce'   => ['Notice & Maintenance', 'Show a notice to users and switch the site into maintenance mode'],
     'settings'   => ['Site settings', 'Name, headline, dollar rate, support links, logo and banner'],
 ];
+if ($page === 'users' && $userView) $titles['users'] = ['User #' . (int)$userView['id'], (string)$userView['email']];
 $sv = fn(string $k) => e($_POST[$k] ?? setting($k));
 $lg = media_url('logo');
 ?>
@@ -356,10 +490,13 @@ $lg = media_url('logo');
 
 <main class="main">
 <div class="mtop"><button type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu')"><?= ai('menu') ?></button><b><?= e($titles[$page][0]) ?></b></div>
+<?php if ($maint): ?><div class="mbar"><span>🛠️ Maintenance mode is ON — visitors cannot use the site (you can, while logged in here).</span>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="back" value="<?= e($page) ?>"><button class="btn sm ghost" name="toggle_maintenance" value="1">Turn off</button></form></div><?php endif; ?>
 <div class="ph">
   <div><h1><?= e($titles[$page][0]) ?></h1><p><?= e($titles[$page][1]) ?></p></div>
   <?php if ($page === 'products'): ?><button type="button" class="btn" id="addProduct"><?= ai('plus') ?>Add product</button><?php endif; ?>
   <?php if ($page === 'categories'): ?><button type="button" class="btn" id="addCategory"><?= ai('plus') ?>Add category</button><?php endif; ?>
+  <?php if ($page === 'users' && $userView): ?><a class="btn ghost" href="/admin.php?p=users"><?= ai('back') ?>All users</a><?php endif; ?>
 </div>
 <?php flash_html(); ?>
 
@@ -422,12 +559,12 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? '')];
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct']];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
     <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
-    <td class="money"><?= money($p['price']) ?></td>
+    <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : '') ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
@@ -459,6 +596,7 @@ $lg = media_url('logo');
   </style>
   <div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" id="p_price" step="0.01" min="0.01" required></div>
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
+  <label>Discount % <small>(optional, shown to everyone as a sale · 0 = none)</small></label><input type="number" name="pdisc" id="p_disc" min="0" max="99" step="0.01" inputmode="decimal" placeholder="e.g. 20">
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
   <label>App icon <small>(pick one, or leave Automatic - it follows the product name)</small></label>
@@ -520,14 +658,103 @@ $lg = media_url('logo');
 </form></dialog>
 
 <?php /* ============================ USERS ============================ */ elseif ($page === 'users'): ?>
-<div class="card">
-  <div class="tb"><div class="srch grow"><?= ai('search') ?><input type="search" id="uq" placeholder="Search by email or ID" autocomplete="off"></div></div>
-  <div class="tw"><table id="utable"><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Referrals</th><th class="hm">Joined</th></tr></thead><tbody>
-  <?php foreach ($users as $x): ?>
-  <tr data-s="<?= e(mb_strtolower($x['email'] . ' ' . $x['id'])) ?>"><td><?= (int)$x['id'] ?></td><td><?= e($x['email']) ?></td><td class="money"><?= money($x['coins']) ?></td><td class="hm"><?= (int)$x['refs'] ?></td><td class="hm"><?= e($x['created_at']) ?></td></tr>
-  <?php endforeach; if (!$users): ?><tr><td colspan="5">No users yet.</td></tr><?php endif; ?></tbody></table></div>
-  <div class="empty" id="unone" style="display:none">No matching users.</div>
+<?php if (!$userView): ?>
+<div class="stats s3">
+  <div class="stat"><span>Total users</span><b><?= $totalUsers ?></b></div>
+  <div class="stat <?= $uStats['banned'] ? 'alert' : '' ?>"><span>Banned</span><b><?= $uStats['banned'] ?></b></div>
+  <div class="stat"><span>New in 7 days</span><b><?= $uStats['week'] ?></b></div>
 </div>
+<div class="card">
+  <form method="get" class="tb"><input type="hidden" name="p" value="users">
+    <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($uq) ?>" placeholder="Search by email or ID" autocomplete="off"></div>
+    <button class="btn">Search</button><?php if ($uq !== ''): ?><a class="btn ghost" href="/admin.php?p=users">Clear</a><?php endif; ?>
+  </form>
+  <div class="tw"><table><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Orders</th><th class="hm">Referrals</th><th class="hm">Joined</th><th>Status</th><th></th></tr></thead><tbody>
+  <?php foreach ($users as $x): ?>
+  <tr><td><?= (int)$x['id'] ?></td><td><a href="/admin.php?p=users&amp;u=<?= (int)$x['id'] ?>"><?= e($x['email']) ?></a></td><td class="money"><?= money($x['coins']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td><td class="hm"><?= (int)$x['refs'] ?></td><td class="hm"><?= e($x['created_at']) ?></td>
+    <td><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span></td>
+    <td class="ra"><a class="btn sm ghost" href="/admin.php?p=users&amp;u=<?= (int)$x['id'] ?>"><?= ai('pencil') ?>Manage</a></td></tr>
+  <?php endforeach; if (!$users): ?><tr><td colspan="8"><?= $uq !== '' ? 'No matching users.' : 'No users yet.' ?></td></tr><?php endif; ?></tbody></table></div>
+  <?php if ($uPages > 1): $qs = $uq !== '' ? '&q=' . urlencode($uq) : ''; ?>
+  <div class="pager">
+    <?php if ($uPg > 1): ?><a class="btn sm ghost" href="/admin.php?p=users<?= $qs ?>&amp;pg=<?= $uPg - 1 ?>">&larr; Previous</a><?php endif; ?>
+    <span>Page <?= $uPg ?> of <?= $uPages ?> · <?= number_format($uMatch) ?> users</span>
+    <?php if ($uPg < $uPages): ?><a class="btn sm ghost" href="/admin.php?p=users<?= $qs ?>&amp;pg=<?= $uPg + 1 ?>">Next &rarr;</a><?php endif; ?>
+  </div>
+  <?php endif; ?>
+</div>
+<?php else: $x = $userView; $xid = (int)$x['id']; ?>
+<div class="cols">
+  <div class="card"><div class="card-h"><h3>Account</h3><span class="badge <?= $x['banned'] ? 'banned' : 'on' ?>"><?= $x['banned'] ? 'Banned' : 'Active' ?></span></div>
+    <div class="kv">
+      <div><span>Email</span><b><?= e($x['email']) ?></b></div>
+      <div><span>Balance</span><b class="money"><?= money($x['coins']) ?></b></div>
+      <div><span>Joined</span><b><?= e($x['created_at']) ?></b></div>
+      <div><span>Referral code</span><b><?= e($x['referral_code']) ?></b></div>
+      <div><span>Referred by</span><b><?= $x['referred_by'] ? '<a href="/admin.php?p=users&amp;u=' . (int)$x['referred_by'] . '">' . e($x['ref_email'] ?? ('#' . $x['referred_by'])) . '</a>' : '—' ?></b></div>
+      <div><span>People referred</span><b><?= (int)$x['refs'] ?></b></div>
+      <div><span>Orders</span><b><?= (int)$uOrd['n'] ?> · <?= money($uOrd['spent']) ?></b></div>
+      <div><span>Total deposited</span><b><?= money($uDep) ?></b></div>
+    </div>
+  </div>
+  <div class="card"><h3>Add or deduct balance</h3>
+    <form method="post"><?= csrf_field() ?>
+      <label style="margin-top:0">Amount <small>(BDT)</small></label><input type="number" name="amount" step="0.01" min="0.01" inputmode="decimal" required placeholder="e.g. 100">
+      <label>Action</label><select name="dir"><option value="add">Add to balance</option><option value="deduct">Deduct from balance</option></select>
+      <label>Note <small>(optional, the user sees it in Transactions)</small></label><input type="text" name="note" maxlength="120" placeholder="e.g. Bonus / correction">
+      <div class="acts" style="margin-top:14px"><button class="btn" name="user_adjust" value="<?= $xid ?>">Apply</button></div>
+    </form>
+  </div>
+</div>
+<div class="cols" style="margin-top:18px">
+  <div class="card"><h3>Change password</h3>
+    <form method="post"><?= csrf_field() ?>
+      <label style="margin-top:0">New password <small>(8 to 72 characters)</small></label><input type="text" name="new_password" minlength="8" maxlength="72" autocomplete="off" required>
+      <div class="acts" style="margin-top:14px"><button class="btn" name="user_password" value="<?= $xid ?>">Set password</button></div>
+    </form>
+    <h3>Change email</h3>
+    <form method="post"><?= csrf_field() ?>
+      <input type="text" name="new_email" maxlength="190" value="<?= e($x['email']) ?>" required>
+      <div class="acts" style="margin-top:14px"><button class="btn" name="user_email" value="<?= $xid ?>">Save email</button></div>
+    </form>
+  </div>
+  <div class="card"><h3>Access</h3>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="to" value="<?= $x['banned'] ? 0 : 1 ?>">
+      <small class="hint" style="margin:0 0 12px"><?= $x['banned'] ? 'This user is banned: they are signed out and cannot log in or use the account.' : 'Banning signs the user out at once and blocks the account. Balance and history are kept.' ?></small>
+      <button class="btn <?= $x['banned'] ? 'ok-b' : 'red' ?>" name="user_ban" value="<?= $xid ?>"<?= $x['banned'] ? '' : ' onclick="return confirm(\'Ban this user?\')"' ?>><?= $x['banned'] ? 'Unban user' : 'Ban user' ?></button>
+    </form>
+    <h3>Delete account</h3>
+    <form method="post"><?= csrf_field() ?>
+      <small class="hint" style="margin:0 0 12px">Only possible for users with no orders and no deposits. Otherwise ban the user instead.</small>
+      <button class="btn ghost red-t" name="user_delete" value="<?= $xid ?>" onclick="return confirm('Delete this account permanently? This cannot be undone.')"><?= ai('trash') ?>Delete user</button>
+    </form>
+  </div>
+</div>
+<div class="card" style="margin-top:18px"><h3>Discounts for this user</h3>
+  <?php foreach ($uDisc as $d): ?>
+  <div class="mini"><div><b><?= (int)$d['product_id'] ? e($d['pname'] ?? ('Product #' . (int)$d['product_id'])) : 'All products' ?></b><small>Applies to every purchase</small></div>
+    <form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= $xid ?>"><span class="tag" style="margin:0">-<?= pct_fmt((float)$d['percent']) ?>%</span>
+      <button class="btn sm red" name="user_disc_del" value="<?= (int)$d['id'] ?>" aria-label="Remove discount"><?= ai('trash') ?></button></form></div>
+  <?php endforeach; if (!$uDisc): ?><div class="empty">No special discounts for this user yet.</div><?php endif; ?>
+  <form method="post"><?= csrf_field() ?>
+    <div class="grid2"><div><label>Applies to</label><select name="disc_product"><option value="0">All products</option>
+      <?php foreach ($products as $pr): ?><option value="<?= (int)$pr['id'] ?>"><?= e($pr['name']) ?> (ID <?= (int)$pr['id'] ?>)</option><?php endforeach; ?></select></div>
+    <div><label>Discount %</label><input type="number" name="disc_pct" min="0.01" max="99" step="0.01" inputmode="decimal" required placeholder="e.g. 10"></div></div>
+    <div class="acts" style="margin-top:14px"><button class="btn" name="user_disc_set" value="<?= $xid ?>">Save discount</button></div>
+    <small class="hint">Saving again for the same product replaces the old percent. If a product also has its own discount, the bigger one is used (they are not added together).</small>
+  </form>
+</div>
+<div class="card"><h3>Recent orders</h3>
+  <div class="tw"><table><thead><tr><th>#</th><th>Product</th><th>Price</th><th>Status</th><th class="hm">Date</th></tr></thead><tbody>
+  <?php foreach ($uOrders as $o): ?>
+  <tr><td><?= (int)$o['id'] ?></td><td><?= e($o['product_name']) ?><?= (int)$o['qty'] > 1 ? ' × ' . (int)$o['qty'] : '' ?></td><td class="money"><?= money($o['price']) ?></td><td><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></td><td class="hm"><?= e($o['created_at']) ?></td></tr>
+  <?php endforeach; if (!$uOrders): ?><tr><td colspan="5">No orders yet.</td></tr><?php endif; ?></tbody></table></div></div>
+<div class="card"><h3>Recent transactions</h3>
+  <div class="tw"><table><thead><tr><th>Type</th><th>Amount</th><th class="hm">Note</th><th class="hm">Date</th></tr></thead><tbody>
+  <?php foreach ($uTx as $t): ?>
+  <tr><td><?= e($t['type']) ?></td><td class="money"><?= money($t['amount']) ?></td><td class="hm"><?= e($t['note']) ?></td><td class="hm"><?= e($t['created_at']) ?></td></tr>
+  <?php endforeach; if (!$uTx): ?><tr><td colspan="4">No transactions yet.</td></tr><?php endif; ?></tbody></table></div></div>
+<?php endif; ?>
 
 <?php /* ============================ SETTINGS ============================ */ elseif ($page === 'settings'): ?>
 <?php if ($setErr): ?><div class="err"><?= e($setErr) ?></div><?php endif; ?>
@@ -555,6 +782,42 @@ $lg = media_url('logo');
   <input type="file" name="banner" accept="image/png,image/jpeg,image/webp,image/gif">
   <?php if ($bn = media_url('banner')): ?><img class="preview" src="<?= e($bn) ?>" alt="Banner"><label class="rm"><input type="checkbox" name="remove_banner" value="1"> Remove banner</label><?php endif; ?>
   <div class="savebar"><button class="btn" name="save_settings" value="1">Save settings</button></div>
+</div>
+</form>
+<?php /* ============================ NOTICE & MAINTENANCE ============================ */ elseif ($page === 'announce'):
+  $posted = isset($_POST['save_notice']);
+  $nOn   = $posted ? !empty($_POST['notice_on']) : setting('notice_on', '0') === '1';
+  $nTxt  = $posted ? (string)($_POST['notice_text'] ?? '') : setting('notice_text');
+  $nType = $posted ? (string)($_POST['notice_type'] ?? 'info') : setting('notice_type', 'info');
+  if (!in_array($nType, ['info', 'success', 'warning', 'danger'], true)) $nType = 'info';
+  $nClose = $posted ? !empty($_POST['notice_dismiss']) : setting('notice_dismiss', '1') === '1';
+  $nIcons = ['info' => 'ℹ️', 'success' => '✅', 'warning' => '⚠️', 'danger' => '🚨']; ?>
+<?php if ($noticeErr): ?><div class="err"><?= e($noticeErr) ?></div><?php endif; ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><div class="card-h"><h3>Notice for users</h3><span class="badge <?= setting('notice_on', '0') === '1' ? 'on' : 'off' ?>"><?= setting('notice_on', '0') === '1' ? 'Visible' : 'Hidden' ?></span></div>
+  <label class="sw"><input type="checkbox" name="notice_on" value="1"<?= $nOn ? ' checked' : '' ?>><span class="tg"></span><span>Show this notice on the website</span></label>
+  <label style="margin-top:0">Message <small>(max 500 characters, new lines are kept)</small></label>
+  <textarea name="notice_text" id="n_text" maxlength="500" rows="3" placeholder="e.g. Deposits are processed within 30 minutes. Thank you for your patience."><?= e($nTxt) ?></textarea>
+  <label>Style</label>
+  <select name="notice_type" id="n_type">
+    <?php foreach (['info' => 'Info (blue)', 'success' => 'Good news (green)', 'warning' => 'Warning (yellow)', 'danger' => 'Important (red)'] as $k => $l): ?><option value="<?= $k ?>"<?= $nType === $k ? ' selected' : '' ?>><?= e($l) ?></option><?php endforeach; ?>
+  </select>
+  <label class="chk" style="display:flex;align-items:center;gap:10px;font-weight:500"><input type="checkbox" name="notice_dismiss" value="1"<?= $nClose ? ' checked' : '' ?>> Let users close the notice <small>(it comes back when you change the text)</small></label>
+  <label>Preview</label>
+  <div class="nt nt-<?= e($nType) ?>" id="ntPrev" style="margin-top:0"><span class="nt-i"><?= $nIcons[$nType] ?></span><div class="nt-t"><?= e($nTxt !== '' ? $nTxt : 'Your notice will look like this.') ?></div></div>
+  <div class="savebar"><button class="btn" name="save_notice" value="1">Save notice</button></div>
+</div>
+</form>
+
+<form method="post" onsubmit="return !this.maintenance_on.checked || <?= $maint ? 'true' : 'false' ?> || confirm('Turn ON maintenance mode? Visitors will not be able to use the site until you turn it off.')"><?= csrf_field() ?>
+<div class="card"><div class="card-h"><h3>Maintenance mode</h3><span class="badge <?= $maint ? 'off' : 'on' ?>"><?= $maint ? 'ON — site closed' : 'OFF — site live' ?></span></div>
+  <label class="sw warn"><input type="checkbox" name="maintenance_on" value="1"<?= $maint ? ' checked' : '' ?>><span class="tg"></span><span>Maintenance mode</span></label>
+  <small class="hint" style="margin:-6px 0 6px">While ON, visitors and logged-in users see a maintenance page. You (logged in to this admin panel) can still open the site and this panel. Switch it OFF here any time.</small>
+  <label>Message shown to visitors</label>
+  <textarea name="maintenance_msg" maxlength="300" rows="3" placeholder="We are doing some scheduled maintenance. Please check back soon."><?= e(setting('maintenance_msg')) ?></textarea>
+  <label>Expected back <small>(optional, e.g. “in about 30 minutes” or “6:00 PM”)</small></label>
+  <input type="text" name="maintenance_eta" maxlength="60" value="<?= e(setting('maintenance_eta')) ?>">
+  <div class="savebar"><button class="btn<?= $maint ? '' : ' red' ?>" name="save_maintenance" value="1">Save maintenance settings</button></div>
 </div>
 </form>
 <?php endif; ?>
@@ -645,7 +908,7 @@ $lg = media_url('logo');
     descTa.addEventListener('input',renderDescPrev);
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
-      $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
+      $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_disc').value=+v.disc>0?v.disc:'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
       $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync(); renderDescPrev();
@@ -653,7 +916,7 @@ $lg = media_url('logo');
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     /* stock upload dialog */
@@ -677,13 +940,13 @@ $lg = media_url('logo');
     q.addEventListener('input',filt); c.addEventListener('change',filt);
   }
 
-  /* ---------- users ---------- */
-  var uq=$('#uq');
-  if(uq){ uq.addEventListener('input',function(){
-    var t=uq.value.trim().toLowerCase(), n=0, rows=$$('#utable tbody tr[data-s]');
-    rows.forEach(function(r){ var ok=!t||r.dataset.s.indexOf(t)>-1; r.style.display=ok?'':'none'; if(ok)n++; });
-    $('#unone').style.display = (rows.length && !n) ? '' : 'none';
-  }); }
+  /* ---------- notice preview ---------- */
+  var nt=$('#n_text');
+  if(nt){
+    var np=$('#ntPrev'), ntype=$('#n_type'), ICO={info:'\u2139\uFE0F',success:'\u2705',warning:'\u26A0\uFE0F',danger:'\uD83D\uDEA8'};
+    var upd=function(){ var t=nt.value.trim(); np.className='nt nt-'+ntype.value; $('.nt-t',np).textContent=t||'Your notice will look like this.'; $('.nt-i',np).textContent=ICO[ntype.value]; };
+    nt.addEventListener('input',upd); ntype.addEventListener('change',upd);
+  }
 
   /* ---------- categories ---------- */
   var cd=$('#cdlg');

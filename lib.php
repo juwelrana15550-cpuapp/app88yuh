@@ -16,7 +16,8 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '8';
+const SCHEMA_VERSION = '10';
+maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
 function db(): PDO {
     static $pdo = null;
@@ -121,6 +122,15 @@ function migrate(PDO $pdo): void {
         received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX (email, id)
     ) ENGINE=InnoDB");
+    // Discounts the admin gives one user. product_id 0 = every product. percent is 0.01 - 99.
+    $pdo->exec("CREATE TABLE IF NOT EXISTS user_discounts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        product_id INT NOT NULL DEFAULT 0,
+        percent DECIMAL(5,2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_user_prod (user_id, product_id)
+    ) ENGINE=InnoDB");
     $pdo->exec("CREATE TABLE IF NOT EXISTS categories (
         id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(40) NOT NULL,
@@ -147,6 +157,8 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD INDEX idx_category (category_id)",
         "ALTER TABLE products ADD COLUMN icon VARCHAR(16) NOT NULL DEFAULT ''",   // optional per-product app icon ('' = automatic)
         "ALTER TABLE orders ADD COLUMN qty INT NOT NULL DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN banned TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD COLUMN discount_pct DECIMAL(5,2) NOT NULL DEFAULT 0",   // product-wide discount for everyone   // 1 = account suspended by admin
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
     ] as $sql) {
         try { $pdo->exec($sql); }
@@ -211,6 +223,30 @@ function money($n): string {
     return '৳' . number_format($v, 2);
 }
 
+
+/* ---------- discounts ---------- */
+function pct_fmt(float $p): string { return rtrim(rtrim(number_format($p, 2, '.', ''), '0'), '.'); }
+/** Discounts the admin gave one user: [0 => % on all products, productId => % on that product]. */
+function user_disc_map(int $uid): array {
+    static $m = [];
+    if ($uid <= 0) return [];
+    if (!isset($m[$uid])) {
+        $m[$uid] = [];
+        try {
+            $st = db()->prepare('SELECT product_id, percent FROM user_discounts WHERE user_id = ?'); $st->execute([$uid]);
+            foreach ($st as $r) $m[$uid][(int)$r['product_id']] = (float)$r['percent'];
+        } catch (Throwable $ex) {}
+    }
+    return $m[$uid];
+}
+/** Discount that applies: the biggest of the product's own %, the user's all-products % and the user's % on this product (never added together). */
+function discount_pct(array $p, array $ud): float {
+    return min(99.0, max(0.0, (float)($p['discount_pct'] ?? 0), (float)($ud[0] ?? 0), (float)($ud[(int)$p['id']] ?? 0)));
+}
+/** Unit price in cents after a percentage discount (never below 1 cent). The shop and the checkout both use this, so they always agree. */
+function final_cents(int $cents, float $pct): int { return $pct > 0 ? max(1, (int)round($cents * (100 - $pct) / 100)) : $cents; }
+function final_price(float $price, float $pct): float { return final_cents((int)round($price * 100), $pct) / 100; }
+
 function setting(string $k, string $default = ''): string {
     static $cache = null;
     if ($cache === null) {
@@ -258,6 +294,62 @@ function flash_html(): void {
     unset($_SESSION['flash']);
 }
 
+/** Maintenance mode. Visitors get a 503 page; the admin panel, media and manifest stay reachable, and so does anyone logged into admin. */
+function maintenance_gate(): void {
+    if (PHP_SAPI === 'cli') return;
+    $script = basename((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+    // Add any endpoint that must keep working during maintenance (e.g. an OTP / payment webhook) to this list.
+    if (in_array($script, ['admin.php', 'media.php', 'manifest.php'], true)) return;
+    if (!empty($_SESSION['admin'])) return;
+    if (setting('maintenance_on', '0') !== '1') return;
+    $msg = setting('maintenance_msg', 'We are doing some scheduled maintenance. Please check back soon.');
+    $eta = setting('maintenance_eta', '');
+    http_response_code(503);
+    header('Retry-After: 1800'); header('Cache-Control: no-store');
+    if (stripos((string)($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json') !== false || strncmp($script, 'api', 3) === 0) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'maintenance', 'message' => $msg], JSON_UNESCAPED_UNICODE); exit;
+    }
+    $lg = media_url('logo'); $tg = setting('telegram_url'); $wa = setting('whatsapp_url'); ?>
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="60">
+<title>Maintenance - <?= e(site_name()) ?></title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(135deg,#eef2ff,#f5f3ff);color:#1e293b;font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Bengali","Hind Siliguri",sans-serif}
+.box{width:100%;max-width:440px;background:#fff;border-radius:20px;padding:32px 26px;text-align:center;box-shadow:0 20px 50px -20px rgba(67,56,202,.35)}
+.box img{width:64px;height:64px;border-radius:16px;object-fit:cover}.ic{font-size:52px;line-height:1}
+h1{margin:14px 0 8px;font-size:23px}p{margin:0 0 14px;color:#475569;word-break:break-word}
+.eta{display:inline-block;margin-bottom:16px;padding:8px 14px;border-radius:99px;background:#eef2ff;color:#3730a3;font-size:14px}
+.sup{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:16px}.sup a{padding:8px 14px;border-radius:10px;background:#f1f5f9;color:#334155;text-decoration:none;font-weight:600;font-size:14px}
+button{display:block;width:100%;padding:12px;border:0;border-radius:12px;background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+small{display:block;margin-top:12px;color:#94a3b8}
+</style></head><body>
+<div class="box">
+<?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php else: ?><div class="ic">🛠️</div><?php endif; ?>
+<h1>We'll be right back</h1>
+<p><?= nl2br(e($msg)) ?></p>
+<?php if ($eta !== ''): ?><div class="eta">Expected back: <b><?= e($eta) ?></b></div><?php endif; ?>
+<?php if ($tg || $wa): ?><div class="sup"><?php if ($tg): ?><a href="<?= e($tg) ?>" target="_blank" rel="noopener">Telegram</a><?php endif; ?><?php if ($wa): ?><a href="<?= e($wa) ?>" target="_blank" rel="noopener">WhatsApp</a><?php endif; ?></div><?php endif; ?>
+<button type="button" onclick="location.reload()">Refresh</button>
+<small>This page refreshes by itself every minute.</small>
+</div></body></html>
+<?php exit; }
+
+/** Admin notice banner (Admin > Notice & Maintenance). Shown on public pages and the user dashboard. */
+function notice_html(): void {
+    if (setting('notice_on', '0') !== '1') return;
+    $t = trim(setting('notice_text', ''));
+    if ($t === '') return;
+    $ty = setting('notice_type', 'info');
+    if (!in_array($ty, ['info', 'success', 'warning', 'danger'], true)) $ty = 'info';
+    $ic = ['info' => 'ℹ️', 'success' => '✅', 'warning' => '⚠️', 'danger' => '🚨'][$ty];
+    $close = setting('notice_dismiss', '1') === '1'; ?>
+<div class="nt nt-<?= $ty ?>" id="sxNotice" role="status" data-v="<?= e(setting('notice_v', '1')) ?>"><span class="nt-i"><?= $ic ?></span><div class="nt-t"><?= nl2br(e($t)) ?></div><?php if ($close): ?><button type="button" class="nt-x" aria-label="Close notice">&times;</button><?php endif; ?></div>
+<script>(function(){var n=document.getElementById('sxNotice');if(!n)return;var k='sxn_'+n.getAttribute('data-v');try{if(localStorage.getItem(k)){n.parentNode.removeChild(n);return;}}catch(e){}var b=n.querySelector('.nt-x');if(b)b.addEventListener('click',function(){n.parentNode.removeChild(n);try{localStorage.setItem(k,'1');}catch(e){}});})();</script>
+<?php }
+
 function icon(string $n): string {
     static $p = [
         'user'    => '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
@@ -304,7 +396,13 @@ function current_user(): ?array {
     if (empty($_SESSION['uid'])) return null;
     $s = db()->prepare('SELECT * FROM users WHERE id = ?');
     $s->execute([$_SESSION['uid']]);
-    return $s->fetch() ?: null;
+    $r = $s->fetch();
+    if ($r && !empty($r['banned'])) {   // suspended by admin: sign out right away
+        unset($_SESSION['uid']);
+        flash('err', 'Your account has been suspended. Please contact support.');
+        return null;
+    }
+    return $r ?: null;
 }
 function require_login(): array {
     $u = current_user();
@@ -338,7 +436,7 @@ function header_html(string $title, ?array $user = null, string $variant = 'app'
 <?php endif; ?>
 </div></nav>
 <main class="<?= $variant === 'auth' ? 'narrow' : 'wide' ?>">
-<?php flash_html(); }
+<?php if (!$admin) notice_html(); flash_html(); }
 
 function footer_html(bool $closeMain = true): void { if ($closeMain) echo "</main>\n"; ?>
 <script>
@@ -401,7 +499,7 @@ function user_start(string $title, array $u, string $active): void {
   </div>
 </aside>
 <main class="wide with-side">
-<?php flash_html(); }
+<?php notice_html(); flash_html(); }
 
 function user_end(): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
@@ -502,7 +600,8 @@ function catalog_url(array $x): string {
 function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
     $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
-    $card = function (array $p) use ($byId, $c, $q) {
+    $ud = user_disc_map((int)($_SESSION['uid'] ?? 0));
+    $card = function (array $p) use ($byId, $c, $q, $ud) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
         $icon = product_icon_value($p, $k);
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
@@ -510,7 +609,9 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
         elseif ($stock <= 0) { $sl = 'Out of stock'; $sc = 'out'; }
         elseif ($stock <= 10) { $sl = 'Low stock · ' . number_format($stock) . ' pcs'; $sc = 'low'; }
         else { $sl = 'In Stock · ' . number_format($stock) . ' pcs'; $sc = ''; }
-        $out = $stock !== null && $stock <= 0; ?>
+        $out = $stock !== null && $stock <= 0;
+        $pct = discount_pct($p, $ud); $fin = final_price((float)$p['price'], $pct);
+        $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied ?>
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
       <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
@@ -524,11 +625,11 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
           <p class="pc-d"><?= e($descLines[0] ?? $p['description']) ?></p>
         <?php endif; ?>
       <?php endif; ?>
-      <div class="pc-price"><?= money($p['price']) ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?></div>
+      <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
-        <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format((float)$p['price'], 2, '.', '')) ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
+        <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format($fin, 2, '.', '')) ?>" data-old="<?= $pct > 0 ? e(number_format((float)$p['price'], 2, '.', '')) : '' ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
       </form>
     </div>
 <?php }; ?>
@@ -722,12 +823,12 @@ function buy_modal_html(float $balance, int $c, string $q): void {
   function open(btn){
     last=btn;
     cur={id:btn.dataset.id,name:btn.dataset.name||'',price:parseFloat(btn.dataset.price)||0,unit:btn.dataset.unit||'',stock:btn.dataset.stock===''?null:parseInt(btn.dataset.stock,10)};
-    cur.auto=btn.dataset.auto==='1';
+    cur.auto=btn.dataset.auto==='1'; cur.old=parseFloat(btn.dataset.old)||0;
     if(hideT){ clearTimeout(hideT); hideT=null; }
     F.elements.csrf.value=SX.csrf; F.elements.c.value=SX.c||''; F.elements.q.value=SX.q||'';
     $('bmId').value=cur.id; $('bmT').textContent=cur.name; $('bmBal').textContent=fmt(SX.bal);
     $('bmSub').textContent=cur.auto?'\u26A1 Instant delivery after purchase':'Review your order';
-    $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'');
+    $('bmP').textContent=fmt(cur.price)+(cur.unit?' / '+cur.unit:'')+(cur.old>cur.price?' (was '+fmt(cur.old)+')':'');
     $('bmA').textContent=cur.stock===null?'In stock':cur.stock.toLocaleString('en-US')+' pcs';
     var card=btn.closest('.pc'), ic=card&&card.querySelector('.pc-ic'); $('bmIc').innerHTML=ic?ic.innerHTML:'';
     Q.value=1; Q.max=maxQty()||''; chips(); go.textContent='Confirm Purchase'; render();
