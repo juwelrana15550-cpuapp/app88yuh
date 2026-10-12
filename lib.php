@@ -681,7 +681,34 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .sec-h{margin:8px 2px 8px!important;gap:7px!important;font-size:.95rem!important}
 .sec-h .ci{width:24px!important;height:24px!important;border-radius:7px!important;font-size:.9rem!important}
 .sec-h em{padding:0 7px!important}
-.catalog{gap:10px!important}
+.catalog{gap:8px!important}
+/* Compact product cards for phones */
+.catalog{grid-template-columns:minmax(0,1fr)!important}
+.pc{padding:11px 12px 12px!important;gap:7px!important;border-radius:14px!important}
+.pc:hover{transform:none!important}
+.pc .ribbon{top:10px!important;font-size:9.5px!important;padding:3px 8px 3px 10px!important;letter-spacing:.03em!important}
+.pc-h{gap:9px!important}
+.pc.pop .pc-h{padding-right:70px!important}
+.pc-ic{width:36px!important;height:36px!important;border-radius:11px!important;font-size:1.1rem!important}
+.pc-ic svg{width:22px!important;height:22px!important}
+.pc h4{font-size:14px!important;line-height:1.28!important}
+.pc-c{font-size:11px!important;margin-top:1px!important}
+.pc-d{font-size:12px!important;line-height:1.4!important}
+.pc-dl{font-size:12px!important;margin:0!important}
+.pc-dl li{padding:3px 0 3px 17px!important;line-height:1.35!important}
+.pc-dl li:before{top:3px!important;font-size:12px!important}
+.pc-dom{font-size:11px!important;margin:0!important}
+.pc-price{font-size:1.2rem!important;line-height:1.2!important}
+.pc-price small{font-size:11px!important}
+.pc-price .pc-old{font-size:.6em!important}
+.pc-off{font-size:10.5px!important;padding:1px 7px!important;margin-left:6px!important}
+.sx-meta{margin:0!important}
+.sx-stk{padding:2px 8px!important;font-size:11px!important;gap:5px!important}
+.sx-stk:before{width:6px!important;height:6px!important;box-shadow:0 0 0 2px rgba(22,163,74,.2)!important}
+.sx-pid{font-size:11px!important;padding:2px 7px!important}
+.pc .inst{font-size:11.5px!important;margin:0!important}
+.pc .btn.buy{margin-top:0!important;padding:9px 12px!important;font-size:13.5px!important;border-radius:10px!important;gap:6px!important}
+.pc .btn.buy svg{width:16px!important;height:16px!important}
 }
 .sx-cat,.sx-cat:hover,.sx-cat:focus,.sx-cat:active{text-decoration:none}
 .sx-cat{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;height:28px;padding:0 10px 0 4px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:12.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);outline:0;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background-color .25s ease,border-color .25s ease,color .25s ease,box-shadow .25s ease}
