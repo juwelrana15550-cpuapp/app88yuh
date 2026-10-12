@@ -125,13 +125,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'products';
             $isEdit = isset($_POST['update_product']);
             $f = product_fields();
-            if ($f['sup'] && ($f['an'] || $f['ad']) && bm_connected()) {   // auto-sync ticked: take the supplier's text now
+            $sp0 = null; $sp0err = '';   // ONE lookup at bulkmail.shop per save (text + current stock); the public API has a small request limit
+            if ($f['sup'] && bm_connected()) {
                 $sp0 = bm_product((int)$f['sup']);
-                if (!isset($sp0['error'])) {
-                    if ($f['an'] && $sp0['name'] !== '') $f['name'] = $sp0['name'];
+                if (isset($sp0['error'])) { $sp0err = $sp0['error']; $sp0 = null; }
+                else {
+                    if ($f['an'] && $sp0['name'] !== '') $f['name'] = $sp0['name'];            // auto-sync ticked: take the supplier's text now
                     if ($f['ad'] && $sp0['description'] !== '') $f['desc'] = $sp0['description'];
                 }
             }
+            $oldStock = null;
+            if ($isEdit) { $q = $pdo->prepare('SELECT stock FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldStock = $q->fetchColumn(); }
             $bad = '';
             if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
                 $bad = 'Enter a product name (max 80 chars) and a price above 0.';
@@ -140,7 +144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($isEdit) { $q = $pdo->prepare('SELECT supplier_id FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldSup = (int)$q->fetchColumn(); }
                 if ($oldSup !== (int)$f['sup']) {
                     if (!bm_connected()) $bad = 'Connect your bulkmail.shop API key first (Admin > API Management), then link the product.';
-                    else { $sp = bm_product((int)$f['sup']); if (isset($sp['error'])) $bad = 'Supplier product ID: ' . $sp['error']; }
+                    elseif ($sp0 === null) $bad = 'Supplier product ID: ' . ($sp0err !== '' ? $sp0err : 'could not read the product.');
                 }
             }
             if ($bad !== '') {
@@ -154,13 +158,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=? WHERE id=?')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
-                if ($f['sup']) bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                if ($f['sup']) {
+                    // show a real number at once (the stock we just read, else the previous one), then refresh it live
+                    $keep = $sp0 ? (int)$sp0['stock'] : ($oldStock !== null && $oldStock !== false ? (int)$oldStock : 0);
+                    $pdo->prepare('UPDATE products SET stock = ? WHERE id = ?')->execute([$keep, $pid]);
+                    bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                }
                 go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
             } else {
                 $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id, sup_auto_name, sup_auto_desc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad']]);
-                if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
-                if ($f['sup']) bm_sync_stock($pdo, true);
+                $newId = (int)$pdo->lastInsertId();
+                if ($f['auto']) stock_sync($pdo, $newId);
+                if ($f['sup']) {
+                    if ($sp0) $pdo->prepare('UPDATE products SET stock = ? WHERE id = ?')->execute([(int)$sp0['stock'], $newId]);
+                    bm_sync_stock($pdo, true);
+                }
                 go('products', $f['sup'] ? 'Product added and linked to bulkmail.shop.' : 'Product added.');
             }
 

@@ -152,8 +152,8 @@ function bm_product(int $id): array {
 }
 
 /**
- * Keeps name + description (incl. possible domains) of linked products equal to bulkmail.shop.
- * Only products whose "auto-sync" box is ticked are touched, so text the admin wrote by hand is never overwritten.
+ * Keeps name + description (incl. possible domains) of linked products equal to bulkmail.shop, and refreshes their stock too.
+ * Name / description are only changed where the "auto-sync" box is ticked, so text the admin wrote by hand is never overwritten.
  * One list request covers up to 100 products. Runs at most once per BM_INFO_EVERY seconds unless $force. Never throws.
  */
 function bm_sync_info(PDO $pdo, bool $force = false): void {
@@ -164,7 +164,7 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             if (time() - $ts < BM_INFO_EVERY) return;
         }
         $pdo->prepare("INSERT INTO settings (k, v) VALUES ('bm_info_ts', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([(string)time()]);
-        $rows = $pdo->query('SELECT id, name, description, supplier_id, sup_auto_name, sup_auto_desc FROM products WHERE supplier_id IS NOT NULL AND (sup_auto_name = 1 OR sup_auto_desc = 1)')->fetchAll();
+        $rows = $pdo->query('SELECT id, name, description, stock, supplier_id, sup_auto_name, sup_auto_desc FROM products WHERE supplier_id IS NOT NULL')->fetchAll();
         if (!$rows) return;
         $need = []; foreach ($rows as $row) $need[(int)$row['supplier_id']] = true;
         $found = [];
@@ -182,14 +182,15 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             $one = bm_product((int)$sid);
             if (!isset($one['error'])) $found[(int)$sid] = $one;
         }
-        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ? WHERE id = ?');
+        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, stock = ? WHERE id = ?');   // the list also carries the live stock: a second way to keep it right
         foreach ($rows as $row) {
             $sp = $found[(int)$row['supplier_id']] ?? null;
             if (!$sp) continue;
             $name = (string)$row['name']; $desc = (string)$row['description'];
             if ((int)$row['sup_auto_name'] === 1 && $sp['name'] !== '') $name = $sp['name'];
             if ((int)$row['sup_auto_desc'] === 1 && $sp['description'] !== '') $desc = $sp['description'];
-            if ($name !== (string)$row['name'] || $desc !== (string)$row['description']) $upd->execute([$name, $desc, (int)$row['id']]);
+            $stk = max(0, (int)$sp['stock']);
+            if ($name !== (string)$row['name'] || $desc !== (string)$row['description'] || $stk !== (int)$row['stock']) $upd->execute([$name, $desc, $stk, (int)$row['id']]);
         }
     } catch (Throwable $ex) { error_log('bulkmail info sync: ' . $ex->getMessage()); }
 }
@@ -211,7 +212,11 @@ function bm_sync_stock(PDO $pdo, bool $force = false): void {
         $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_id = ?');
         foreach (array_chunk($ids, 50) as $chunk) {
             $r = bm_call('GET', '/stock/check?ids=' . implode(',', array_map('intval', $chunk)), null, null, 6);
-            if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail stock sync: ' . bm_err($r)); continue; }
+            if (empty($r['success']) || !is_array($r['data'] ?? null)) {
+                error_log('bulkmail stock sync: ' . bm_err($r));
+                if ($force) save_setting('bm_last_error', date('Y-m-d H:i') . ' · live stock could not be refreshed: ' . bm_err($r));   // shown in Admin > API Management
+                continue;
+            }
             foreach ($r['data'] as $row) {
                 if (!is_array($row) || !isset($row['product_id'])) continue;
                 $upd->execute([max(0, (int)($row['stock_count'] ?? 0)), (int)$row['product_id']]);
