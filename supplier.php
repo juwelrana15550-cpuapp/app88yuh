@@ -19,7 +19,7 @@ if (!defined('SCHEMA_VERSION')) { http_response_code(404); exit; }   // never ru
  */
 
 const BM_DEFAULT_BASE = 'https://bulkmail.shop/api/v2';
-const BM_INFO_EVERY   = 900;  // seconds between name / description refreshes of linked products
+const BM_INFO_EVERY   = 300;  // seconds between name / description / domain refreshes of linked products
 const BM_SYNC_EVERY   = 60;   // seconds between stock refreshes (the public stock endpoints allow 20 requests / minute)
 
 function bm_base(): string { return rtrim(setting('bm_base', BM_DEFAULT_BASE), '/'); }
@@ -101,7 +101,8 @@ function bm_connect(PDO $pdo, string $key): array {
 function bm_disconnect(PDO $pdo): void {
     save_setting('bm_connected', '0');
     save_setting('bm_key', '');
-    $pdo->exec('UPDATE products SET stock = 0 WHERE supplier_id IS NOT NULL');
+    // API stock is gone; local (own) stock of linked products stays sellable.
+    $pdo->exec('UPDATE products SET sup_stock = 0, stock = (SELECT COUNT(*) FROM stock_items WHERE product_id = products.id AND order_id IS NULL) WHERE supplier_id IS NOT NULL');
 }
 
 /** Customers must never learn who the supplier is: the supplier's name/domain is removed from any text copied into the shop. */
@@ -110,31 +111,51 @@ function bm_clean(string $t): string {
     return trim(preg_replace('/[ \t]{2,}/', ' ', $t));
 }
 
-/** "Possible domains" line, only if the supplier sends the domains as a separate field (otherwise they are already inside the description text). */
-function bm_domains_line(array $d): string {
-    foreach (['possible_domains', 'domains', 'domain'] as $k) {
-        if (!isset($d[$k])) continue;
-        $v = $d[$k];
-        if (is_array($v)) $v = implode(', ', array_filter(array_map(fn($x) => is_scalar($x) ? trim((string)$x) : '', $v), 'strlen'));
-        $v = trim((string)$v);
-        if ($v !== '') return 'Possible domains: ' . $v;
+/**
+ * "Possible Domain" list of a supplier product as plain text ("a.com, b.net"), or ''.
+ * 1) any field whose name contains "domain" (also nested), 2) text like "Possible Domain (a.com)" inside description / name / sku.
+ * When it was found inside the description text, that text is removed from $desc (the shop shows it on its own line instead).
+ */
+function bm_find_domains(array $d, string &$desc): string {
+    $out = [];
+    $add = function ($v) use (&$add, &$out) {
+        if (is_array($v)) { foreach ($v as $x) $add($x); return; }
+        if (!is_scalar($v)) return;
+        foreach (preg_split('/[\s,;|]+/', (string)$v) as $t) {
+            $t = trim($t, " \t()[]\"'");
+            if ($t !== '' && preg_match('/^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}$/i', $t)) $out[strtolower($t)] = $t;
+        }
+    };
+    $scan = function (array $a) use (&$scan, $add) {
+        foreach ($a as $k => $v) {
+            if (is_string($k) && stripos($k, 'domain') !== false) $add($v);
+            elseif (is_array($v)) $scan($v);
+        }
+    };
+    $scan($d);
+    if (!$out) {
+        foreach (['description', 'name', 'sku'] as $f) {
+            $txt = (string)($d[$f] ?? '');
+            if ($txt !== '' && preg_match('/possible\s*domains?\s*[:(\-]?\s*\(?([^)\n]+)\)?/i', $txt, $m)) {
+                $add($m[1]);
+                if ($out && $f === 'description') $desc = trim(preg_replace('/[ \t]{2,}/', ' ', str_ireplace($m[0], '', $desc)));
+                if ($out) break;
+            }
+        }
     }
-    return '';
+    return mb_substr(implode(', ', array_values($out)), 0, 255);
 }
 
 /** One supplier product row from the API -> shop-ready text (name max 80, description max 500, supplier name removed). */
 function bm_norm(array $d, int $fallbackId = 0): array {
     $desc = preg_replace('~<br\s*/?>~i', "\n", (string)($d['description'] ?? ''));
     $desc = bm_clean(str_replace(["\r\n", "\r"], "\n", $desc));
-    $dom  = bm_clean(bm_domains_line($d));
-    if ($dom !== '' && stripos($desc, 'domain') === false) {   // keep the domains line even when the description is long
-        $desc = trim(mb_substr($desc, 0, max(0, 500 - mb_strlen($dom) - 1)));
-        $desc = trim($desc . ($desc !== '' ? "\n" : '') . $dom);
-    }
+    $dom  = bm_clean(bm_find_domains($d, $desc));   // shown on its own "Possible Domain (...)" line on the product card
     return [
         'id'          => (int)($d['id'] ?? $fallbackId),
         'name'        => mb_substr(bm_clean((string)($d['name'] ?? '')), 0, 80),
         'description' => mb_substr($desc, 0, 500),
+        'domains'     => $dom,
         'price'       => (float)($d['price'] ?? 0),
         'stock'       => (int)($d['stock_quantity'] ?? 0),
     ];
@@ -164,15 +185,18 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             if (time() - $ts < BM_INFO_EVERY) return;
         }
         $pdo->prepare("INSERT INTO settings (k, v) VALUES ('bm_info_ts', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([(string)time()]);
-        $rows = $pdo->query('SELECT id, name, description, stock, supplier_id, sup_auto_name, sup_auto_desc FROM products WHERE supplier_id IS NOT NULL')->fetchAll();
+        $rows = $pdo->query('SELECT id, name, description, sup_stock, sup_domain, supplier_id, sup_auto_name, sup_auto_desc FROM products WHERE supplier_id IS NOT NULL')->fetchAll();
         if (!$rows) return;
         $need = []; foreach ($rows as $row) $need[(int)$row['supplier_id']] = true;
-        $found = [];
+        $found = []; $rawSample = null;
         for ($page = 1; $page <= 10 && count($found) < count($need); $page++) {
             $r = bm_call('GET', '/products?page=' . $page . '&per_page=100', null, null, 8);
             if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail info sync: ' . bm_err($r)); break; }
             foreach ($r['data'] as $d) {
-                if (is_array($d) && isset($d['id']) && isset($need[(int)$d['id']])) $found[(int)$d['id']] = bm_norm($d);
+                if (is_array($d) && isset($d['id']) && isset($need[(int)$d['id']])) {
+                    $found[(int)$d['id']] = bm_norm($d);
+                    if ($force && !isset($rawSample)) $rawSample = $d;   // shown in Admin > API Management so you can see exactly what bulkmail.shop sends
+                }
             }
             if ($page >= (int)($r['meta']['total_pages'] ?? $page)) break;
         }
@@ -182,7 +206,8 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             $one = bm_product((int)$sid);
             if (!isset($one['error'])) $found[(int)$sid] = $one;
         }
-        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, stock = ? WHERE id = ?');   // the list also carries the live stock: a second way to keep it right
+        if ($rawSample) save_setting('bm_raw_sample', mb_substr(json_encode($rawSample, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), 0, 3000));
+        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, sup_stock = ?, stock = ? + (SELECT COUNT(*) FROM stock_items WHERE product_id = products.id AND order_id IS NULL), sup_domain = ? WHERE id = ?');   // the list also carries the live stock: a second way to keep it right
         foreach ($rows as $row) {
             $sp = $found[(int)$row['supplier_id']] ?? null;
             if (!$sp) continue;
@@ -190,7 +215,8 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             if ((int)$row['sup_auto_name'] === 1 && $sp['name'] !== '') $name = $sp['name'];
             if ((int)$row['sup_auto_desc'] === 1 && $sp['description'] !== '') $desc = $sp['description'];
             $stk = max(0, (int)$sp['stock']);
-            if ($name !== (string)$row['name'] || $desc !== (string)$row['description'] || $stk !== (int)$row['stock']) $upd->execute([$name, $desc, $stk, (int)$row['id']]);
+            $dom = $sp['domains'] !== '' ? $sp['domains'] : null;   // always follows the supplier (domains change often)
+            if ($name !== (string)$row['name'] || $desc !== (string)$row['description'] || $stk !== (int)$row['sup_stock'] || $dom !== ($row['sup_domain'] !== null && $row['sup_domain'] !== '' ? (string)$row['sup_domain'] : null)) $upd->execute([$name, $desc, $stk, $stk, $dom, (int)$row['id']]);
         }
     } catch (Throwable $ex) { error_log('bulkmail info sync: ' . $ex->getMessage()); }
 }
@@ -209,7 +235,8 @@ function bm_sync_stock(PDO $pdo, bool $force = false): void {
         $pdo->prepare("INSERT INTO settings (k, v) VALUES ('bm_sync_ts', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([(string)time()]);   // set first: a slow API never makes every page wait
         $ids = $pdo->query('SELECT DISTINCT supplier_id FROM products WHERE supplier_id IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN);
         if (!$ids) return;
-        $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_id = ?');
+        // API number goes to sup_stock; the shown stock = API + unsold local items
+        $upd = $pdo->prepare('UPDATE products SET sup_stock = ?, stock = ? + (SELECT COUNT(*) FROM stock_items WHERE product_id = products.id AND order_id IS NULL) WHERE supplier_id = ?');
         foreach (array_chunk($ids, 50) as $chunk) {
             $r = bm_call('GET', '/stock/check?ids=' . implode(',', array_map('intval', $chunk)), null, null, 6);
             if (empty($r['success']) || !is_array($r['data'] ?? null)) {
@@ -219,7 +246,8 @@ function bm_sync_stock(PDO $pdo, bool $force = false): void {
             }
             foreach ($r['data'] as $row) {
                 if (!is_array($row) || !isset($row['product_id'])) continue;
-                $upd->execute([max(0, (int)($row['stock_count'] ?? 0)), (int)$row['product_id']]);
+                $n = max(0, (int)($row['stock_count'] ?? 0));
+                $upd->execute([$n, $n, (int)$row['product_id']]);
             }
         }
     } catch (Throwable $ex) { error_log('bulkmail stock sync: ' . $ex->getMessage()); }
@@ -255,7 +283,15 @@ function bm_fulfil(PDO $pdo, int $orderId): array {
     if ($claim->rowCount() !== 1) return ['status' => 'pending', 'msg' => 'Your order is being processed.'];
 
     $qty = max(1, (int)$o['qty']);
-    $r = bm_call('POST', '/orders', ['product_id' => (int)$o['supplier_id'], 'quantity' => $qty], '', 45);
+    // Items already taken from our own (local) stock for this order: only the rest is bought at bulkmail.shop.
+    $lq = $pdo->prepare('SELECT line FROM stock_items WHERE order_id = ? ORDER BY id'); $lq->execute([$orderId]);
+    $localLines = $lq->fetchAll(PDO::FETCH_COLUMN);
+    $apiQty = $qty - count($localLines);
+    if ($apiQty < 1) {   // safety: everything was local
+        $pdo->prepare("UPDATE orders SET status = 'delivered', delivery = ?, supplier_order_id = NULL WHERE id = ? AND status = 'pending'")->execute([implode("\n", $localLines), $orderId]);
+        return ['status' => 'delivered', 'msg' => 'Purchase successful! Your items are ready below.'];
+    }
+    $r = bm_call('POST', '/orders', ['product_id' => (int)$o['supplier_id'], 'quantity' => $apiQty], '', 45);
     $http = (int)$r['_http'];
 
     if (!empty($r['success']) && !empty($r['data']) && is_array($r['data'])) {
@@ -266,9 +302,9 @@ function bm_fulfil(PDO $pdo, int $orderId): array {
             if (!empty($g['success'])) $items = bm_items($g);
         }
         if ($items) {
-            if (count($items) < $qty) error_log('bulkmail order #' . $orderId . ': asked ' . $qty . ', got ' . count($items));
+            if (count($items) < $apiQty) error_log('bulkmail order #' . $orderId . ': asked ' . $apiQty . ', got ' . count($items));
             $pdo->prepare("UPDATE orders SET status = 'delivered', delivery = ?, supplier_order_id = ? WHERE id = ? AND status = 'pending'")
-                ->execute([implode("\n", $items), mb_substr($sid, 0, 40), $orderId]);
+                ->execute([implode("\n", array_merge($localLines, $items)), mb_substr($sid, 0, 40), $orderId]);   // local items first, then the API items
             bm_sync_stock($pdo, true);
             return ['status' => 'delivered', 'msg' => 'Purchase successful! Your items are ready below.'];
         }
@@ -290,6 +326,8 @@ function bm_fulfil(PDO $pdo, int $orderId): array {
             $q = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND status = 'pending' FOR UPDATE"); $q->execute([$orderId]);
             if (!($ord = $q->fetch())) return;
             $pdo->prepare("UPDATE orders SET status = 'cancelled', supplier_order_id = NULL WHERE id = ?")->execute([$orderId]);
+            $pdo->prepare('UPDATE stock_items SET order_id = NULL WHERE order_id = ?')->execute([$orderId]);   // local items taken for this order go back on the shelf
+            stock_sync($pdo, (int)$ord['product_id']);
             $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$ord['price'], $ord['user_id']]);
             add_tx($pdo, (int)$ord['user_id'], 'refund', (float)$ord['price'], 'Refund for order #' . $orderId);
         });

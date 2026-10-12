@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '12';
+const SCHEMA_VERSION = '14';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -166,10 +166,14 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD COLUMN sup_auto_name TINYINT(1) NOT NULL DEFAULT 0",   // 1 = name follows bulkmail.shop automatically (existing products stay 0 = untouched)
         "ALTER TABLE products ADD COLUMN sup_auto_desc TINYINT(1) NOT NULL DEFAULT 0",   // 1 = description (+ possible domains) follows bulkmail.shop
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
+        "ALTER TABLE products ADD COLUMN sup_domain VARCHAR(255) NULL",   // "Possible Domain" list copied from bulkmail.shop (refreshed automatically)
+        "ALTER TABLE products ADD COLUMN sup_stock INT NOT NULL DEFAULT 0",   // live stock at bulkmail.shop (products.stock = sup_stock + unsold local items)
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
     }
+    // One-time: linked products used to keep the API number in `stock`; copy it to sup_stock (no local items exist yet at this point).
+    try { $pdo->exec('UPDATE products SET sup_stock = stock WHERE supplier_id IS NOT NULL AND sup_stock = 0 AND stock > 0'); } catch (Throwable $ex) {}
     // One-time default categories, added only if the shop has none yet. Rename / hide / delete them any time in Admin > Categories.
     try {
         if (!$pdo->query("SELECT COUNT(*) FROM settings WHERE k = 'cats_seeded'")->fetchColumn()) {
@@ -188,13 +192,17 @@ function migrate(PDO $pdo): void {
     $pdo->prepare("INSERT INTO settings (k, v) VALUES ('schema_v', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([SCHEMA_VERSION]);
 }
 
-/** For instant-delivery products the shown stock is simply the number of unsold uploaded items. */
+/**
+ * Shown stock = unsold local items (stock_items) + live bulkmail.shop stock (sup_stock, only for linked products).
+ * For plain instant-delivery products that is simply the number of unsold uploaded items.
+ */
 function stock_sync(PDO $pdo, int $pid): void {
-    $pdo->prepare('UPDATE products SET stock = (SELECT COUNT(*) FROM stock_items WHERE product_id = ? AND order_id IS NULL) WHERE id = ?')->execute([$pid, $pid]);
+    $pdo->prepare('UPDATE products SET stock = (SELECT COUNT(*) FROM stock_items WHERE product_id = products.id AND order_id IS NULL) + IF(supplier_id IS NOT NULL, sup_stock, 0) WHERE id = ?')->execute([$pid]);
 }
 function stock_sync_if_auto(PDO $pdo, int $pid): void {
-    $st = $pdo->prepare('SELECT auto_delivery FROM products WHERE id = ?'); $st->execute([$pid]);
-    if ((int)$st->fetchColumn() === 1) stock_sync($pdo, $pid);
+    $st = $pdo->prepare('SELECT auto_delivery, supplier_id FROM products WHERE id = ?'); $st->execute([$pid]);
+    $r = $st->fetch();
+    if ($r && ((int)$r['auto_delivery'] === 1 || $r['supplier_id'] !== null)) stock_sync($pdo, $pid);
 }
 
 /** Run $fn inside a transaction; rolls back on any exception and re-throws. */
@@ -640,6 +648,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
           <p class="pc-d"><?= e($descLines[0] ?? $p['description']) ?></p>
         <?php endif; ?>
       <?php endif; ?>
+      <?php if (!empty($p['sup_domain'])): ?><div class="pc-dom" style="margin:0 0 8px;font:600 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b45309;word-break:break-all">Possible Domain (<?= e($p['sup_domain']) ?>)</div><?php endif; ?>
       <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>

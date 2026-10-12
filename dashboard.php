@@ -14,16 +14,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $st = $pdo->prepare('SELECT * FROM products WHERE id = ? AND active = 1 FOR UPDATE');
             $st->execute([(int)($_POST['product_id'] ?? 0)]); $p = $st->fetch();
             if (!$p) throw new RuntimeException('Product not found.');
-            $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: bought there after payment
-            if ($sup && !bm_connected()) throw new RuntimeException('This product is temporarily unavailable.');
+            $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: local stock is sold first, the rest is bought there after payment
             $auto  = !$sup && !empty($p['auto_delivery']);
             $items = [];
-            if ($auto) {
-                // Instant delivery: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
+            $need  = 0;   // how many items must come from bulkmail.shop
+            if ($auto || $sup) {
+                // Own (local) stock first: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
                 $it = $pdo->prepare('SELECT id, line FROM stock_items WHERE product_id = ? AND order_id IS NULL ORDER BY id LIMIT ' . (int)$qty . ' FOR UPDATE');
                 $it->execute([$p['id']]); $items = $it->fetchAll();
+            }
+            if ($auto) {
                 if (!$items) throw new RuntimeException('Sorry, this product is out of stock.');
                 if (count($items) < $qty) throw new RuntimeException('Only ' . number_format(count($items)) . ' available right now. Please lower the quantity.');
+            } elseif ($sup) {
+                $need = $qty - count($items);
+                if ($need > 0) {
+                    $apiHave = bm_connected() ? max(0, (int)$p['sup_stock']) : 0;
+                    if ($need > $apiHave) {
+                        $all = count($items) + $apiHave;   // local items are fewer than $qty here, so count($items) is all of them
+                        if ($all < 1) throw new RuntimeException(bm_connected() ? 'Sorry, this product is out of stock.' : 'This product is temporarily unavailable.');
+                        throw new RuntimeException('Only ' . number_format($all) . ' available right now. Please lower the quantity.');
+                    }
+                }
             } elseif ($p['stock'] !== null) {
                 $have = (int)$p['stock'];
                 if ($have < 1) throw new RuntimeException('Sorry, this product is out of stock.');
@@ -34,7 +46,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((int)round($coins * 100) < $cents) throw new RuntimeException('Not enough balance. Please add funds first.');
             $total = number_format($cents / 100, 2, '.', '');
             $pdo->prepare('UPDATE users SET coins = coins - ? WHERE id = ?')->execute([$total, $u['id']]);
-            if ($auto) {
+            $instant = $auto || ($sup && $need === 0);   // everything comes from local stock: deliver at once
+            if ($instant) {
                 $pdo->prepare("INSERT INTO orders (user_id, product_id, product_name, price, qty, status, delivery) VALUES (?,?,?,?,?,'delivered',?)")
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty, implode("\n", array_column($items, 'line'))]);
             } else {
@@ -44,13 +57,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
             }
             $id = (int)$pdo->lastInsertId();   // read before add_tx inserts another row
-            if ($auto) {
+            if ($items) {   // mark the local items as sold (for a mixed order they are reserved for it; bm_fulfil adds the API items after them)
                 $pdo->exec('UPDATE stock_items SET order_id = ' . (int)$id . ' WHERE id IN (' . implode(',', array_map('intval', array_column($items, 'id'))) . ')');
                 stock_sync($pdo, (int)$p['id']);
-                $GLOBALS['__instant'] = true;
             }
+            if ($instant) $GLOBALS['__instant'] = true;
             add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : '') . ($pct > 0 ? ' (' . pct_fmt($pct) . '% off)' : ''));
-            if ($sup) $GLOBALS['__sup'] = true;
+            if ($sup && $need > 0) $GLOBALS['__sup'] = true;
             return $id;
         });
         if (!empty($GLOBALS['__sup'])) {

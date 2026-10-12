@@ -135,7 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $oldStock = null;
-            if ($isEdit) { $q = $pdo->prepare('SELECT stock FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldStock = $q->fetchColumn(); }
+            if ($isEdit) { $q = $pdo->prepare('SELECT sup_stock FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldStock = $q->fetchColumn(); }
             $bad = '';
             if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
                 $bad = 'Enter a product name (max 80 chars) and a price above 0.';
@@ -158,11 +158,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=? WHERE id=?')
                     ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
+                if (!$f['sup']) $pdo->prepare('UPDATE products SET sup_domain = NULL WHERE id = ?')->execute([$pid]);   // unlinked: no supplier domains
                 if ($f['sup']) {
                     // show a real number at once (the stock we just read, else the previous one), then refresh it live
                     $keep = $sp0 ? (int)$sp0['stock'] : ($oldStock !== null && $oldStock !== false ? (int)$oldStock : 0);
-                    $pdo->prepare('UPDATE products SET stock = ? WHERE id = ?')->execute([$keep, $pid]);
-                    bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                    $pdo->prepare('UPDATE products SET sup_stock = ?, sup_domain = ? WHERE id = ?')->execute([$keep, ($sp0 && $sp0['domains'] !== '') ? $sp0['domains'] : null, $pid]);
+                    stock_sync($pdo, $pid);      // stock = bulkmail.shop stock + own (local) stock
+                    bm_sync_stock($pdo, true);   // then refresh the bulkmail.shop part live
                 }
                 go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
             } else {
@@ -171,7 +173,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $newId = (int)$pdo->lastInsertId();
                 if ($f['auto']) stock_sync($pdo, $newId);
                 if ($f['sup']) {
-                    if ($sp0) $pdo->prepare('UPDATE products SET stock = ? WHERE id = ?')->execute([(int)$sp0['stock'], $newId]);
+                    if ($sp0) { $pdo->prepare('UPDATE products SET sup_stock = ?, sup_domain = ? WHERE id = ?')->execute([(int)$sp0['stock'], $sp0['domains'] !== '' ? $sp0['domains'] : null, $newId]); stock_sync($pdo, $newId); }
                     bm_sync_stock($pdo, true);
                 }
                 go('products', $f['sup'] ? 'Product added and linked to bulkmail.shop.' : 'Product added.');
@@ -232,7 +234,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $got = stock_collect((string)($_POST['stock_text'] ?? ''), $_FILES['stock_file'] ?? null, !empty($_POST['skip_header']));
                 if (!$got['lines']) throw new RuntimeException('Nothing to add. Paste some items or choose a file.');
                 [$added, $dup] = stock_add($pdo, (int)$_POST['upload_stock'], $got['lines'], !empty($_POST['dedupe']));
-                $msg = number_format($added) . ' item' . ($added === 1 ? '' : 's') . ' added. This product now delivers instantly.';
+                stock_sync($pdo, (int)$_POST['upload_stock']);   // shown stock = local + API (linked products)
+                $msg = number_format($added) . ' item' . ($added === 1 ? '' : 's') . ' added. These are sold first, before any bulkmail.shop stock.';
                 if ($dup) $msg .= ' ' . number_format($dup) . ' duplicate' . ($dup === 1 ? '' : 's') . ' skipped.';
                 if ($got['long']) $msg .= ' ' . number_format($got['long']) . ' line(s) skipped (over ' . STOCK_MAX_LEN . ' characters).';
                 go('products', $msg);
@@ -263,6 +266,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
                         add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
                         $pdo->prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL AND auto_delivery = 0 AND supplier_id IS NULL')->execute([max(1, (int)$o['qty']), $o['product_id']]);
+                        $pdo->prepare('UPDATE stock_items SET order_id = NULL WHERE order_id = ?')->execute([$oid]);   // local items reserved by this order go back on the shelf
+                        stock_sync_if_auto($pdo, (int)$o['product_id']);
                     }
                 }
             });
@@ -446,7 +451,7 @@ $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $pendOrders = $pdo->query("SELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
-$products = $pdo->query('SELECT * FROM products ORDER BY id DESC')->fetchAll();
+$products = $pdo->query('SELECT p.*, (SELECT COUNT(*) FROM stock_items si WHERE si.product_id = p.id AND si.order_id IS NULL) AS local_stock FROM products p ORDER BY p.id DESC')->fetchAll();
 $cats = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS n FROM categories c ORDER BY c.sort_order, c.id')->fetchAll();
 $catById = []; foreach ($cats as $k) $catById[(int)$k['id']] = $k;
 $catOpts = function ($sel) use ($cats) {
@@ -651,12 +656,12 @@ $lg = media_url('logo');
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
            'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id'], 'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0)];
-    $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
+    $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['local_stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
     <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
-    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : ($p['supplier_id'] !== null ? ' <small>live</small>' : '')) ?></td>
+    <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['supplier_id'] !== null ? ' <small>API ' . number_format((int)$p['sup_stock']) . ' + local ' . number_format((int)$p['local_stock']) . '</small>' : ($p['auto_delivery'] ? ' <small>unsold</small>' : '')) ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
       <button type="button" class="btn sm ghost" data-stock="<?= e(json_encode($sj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('plus') ?>Stock</button>
@@ -926,7 +931,7 @@ $lg = media_url('logo');
 <?php /* ============================ API MANAGEMENT ============================ */ elseif ($page === 'api'):
   $bmOn = bm_connected(); $bmBal = $bmOn ? bm_balance() : null;
   if ($bmBal) save_setting('bm_currency', $bmBal['currency']);
-  $linked = $pdo->query('SELECT id, name, supplier_id, stock, active FROM products WHERE supplier_id IS NOT NULL ORDER BY id DESC')->fetchAll();
+  $linked = $pdo->query('SELECT id, name, supplier_id, stock, sup_stock, active, (SELECT COUNT(*) FROM stock_items si WHERE si.product_id = products.id AND si.order_id IS NULL) AS local_stock FROM products WHERE supplier_id IS NOT NULL ORDER BY id DESC')->fetchAll();
   $bmErr = trim(setting('bm_last_error', '')); ?>
 <?php if ($apiErr): ?><div class="err"><?= e($apiErr) ?></div><?php endif; ?>
 <div class="card"><div class="card-h"><h3>bulkmail.shop connection</h3><span class="badge <?= $bmOn ? 'on' : 'off' ?>"><?= $bmOn ? 'Connected' : 'Disconnected' ?></span></div>
@@ -964,8 +969,14 @@ $lg = media_url('logo');
 <div class="card"><h3>Linked products</h3>
   <div class="tw"><table class="rt"><thead><tr><th>Product</th><th>bulkmail ID</th><th>Stock</th><th>Status</th></tr></thead><tbody>
   <?php foreach ($linked as $x): ?>
-  <tr><td><b><?= e($x['name']) ?></b><small style="display:block">Shop ID <?= (int)$x['id'] ?></small></td><td>#<?= (int)$x['supplier_id'] ?></td><td><?= number_format((int)$x['stock']) ?></td><td><span class="badge <?= $x['active'] ? 'on' : 'off' ?>"><?= $x['active'] ? 'Visible' : 'Hidden' ?></span></td></tr>
+  <tr><td><b><?= e($x['name']) ?></b><small style="display:block">Shop ID <?= (int)$x['id'] ?></small></td><td>#<?= (int)$x['supplier_id'] ?></td><td><?= number_format((int)$x['stock']) ?> <small>(API <?= number_format((int)$x['sup_stock']) ?> + local <?= number_format((int)$x['local_stock']) ?>)</small></td><td><span class="badge <?= $x['active'] ? 'on' : 'off' ?>"><?= $x['active'] ? 'Visible' : 'Hidden' ?></span></td></tr>
   <?php endforeach; if (!$linked): ?><tr><td colspan="4">No linked products yet.</td></tr><?php endif; ?></tbody></table></div>
+  <?php $rawS = trim(setting('bm_raw_sample', '')); if ($rawS !== ''): ?>
+  <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">What bulkmail.shop sends (sample, for checking the fields)</summary>
+    <pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;background:#f8fafc;border-radius:10px;padding:10px;margin-top:8px"><?= e($rawS) ?></pre>
+    <small class="hint">Press “Refresh stock &amp; details now” above to update this sample. Domains are copied from any field with “domain” in its name, or from text like “Possible Domain (…)”.</small>
+  </details>
+  <?php endif; ?>
 </div>
 <?php /* ============================ NOTICE & MAINTENANCE ============================ */ elseif ($page === 'announce'):
   $posted = isset($_POST['save_notice']);
