@@ -1081,6 +1081,18 @@ $lg = media_url('logo');
   var $=function(s,r){return (r||document).querySelector(s)}, $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
   var REOPEN = <?= json_encode($reopen, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
 
+  /* shows a script error on the page instead of failing silently */
+  function jsErr(err){
+    try{ console.error(err); var m=document.querySelector('main'); if(!m) return;
+      var d=document.createElement('div'); d.className='err'; d.style.margin='0 0 12px';
+      d.textContent='Page script error: '+((err&&err.message)||err)+' (send this message to the developer)'; m.insertBefore(d,m.firstChild); }catch(x){}
+  }
+  /* safety net: the Add buttons always open their dialog, even if a later script step fails */
+  [['addProduct','pdlg'],['addCategory','cdlg']].forEach(function(x){
+    var b=$('#'+x[0]); if(!b) return;
+    b.addEventListener('click',function(){ var d=$('#'+x[1]); if(d && !d.open && !b.dataset.ready) d.showModal(); });
+  });
+
   document.addEventListener('keydown',function(e){ if(e.key==='Escape') document.body.classList.remove('menu'); });
   $$('.s-nav a').forEach(function(a){ a.addEventListener('click',function(){ document.body.classList.remove('menu'); }); });
 
@@ -1132,7 +1144,7 @@ $lg = media_url('logo');
 
   /* ---------- products ---------- */
   var pd=$('#pdlg');
-  if(pd){
+  if(pd){ try{
     var ICONS=<?= json_encode(array_map(fn($d) => $d[0], app_icons()), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
     var ALIAS={twitter:'x',vpn:'shield',hotmail:'outlook',office:'microsoft','prime video':'amazon','gift card':'gift'};
     var guessIcon=function(){   // same rule the shop uses when no icon is chosen
@@ -1192,7 +1204,7 @@ $lg = media_url('logo');
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
-    $('#addProduct').addEventListener('click',function(){ fill({},0); });
+    $('#addProduct').dataset.ready='1'; $('#addProduct').addEventListener('click',function(){ fill({},0); });
     $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup,sort:v.sort,img:v.img}, v.id); }); });
     $('#p_img').addEventListener('change',function(){ var f=this.files&&this.files[0]; if(f){ $('#p_imgPrev').innerHTML=''; var im=document.createElement('img'); im.src=URL.createObjectURL(f); $('#p_imgPrev').appendChild(im); $('#p_imgRm').checked=false; } });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
@@ -1216,7 +1228,7 @@ $lg = media_url('logo');
       none.textContent='No products match your search.'; none.style.display = (rows.length && !n) ? '' : 'none';
     };
     q.addEventListener('input',filt); c.addEventListener('change',filt);
-  }
+  }catch(err){ jsErr(err); } }
 
   /* ---------- notice preview ---------- */
   var nt=$('#n_text');
@@ -1241,7 +1253,7 @@ $lg = media_url('logo');
       var s=$('#cSave'); s.name = id ? 'update_category' : 'add_category'; s.value = id ? id : '1';
       cd.showModal();
     };
-    $('#addCategory').addEventListener('click',function(){ fillC({},0); });
+    $('#addCategory').dataset.ready='1'; $('#addCategory').addEventListener('click',function(){ fillC({},0); });
     $$('[data-edit-c]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editC); fillC(v,v.id); }); });
     if(REOPEN && REOPEN.t==='category') fillC(REOPEN.v, REOPEN.id);
   }
