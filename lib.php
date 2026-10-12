@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '14';
+const SCHEMA_VERSION = '15';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -166,6 +166,7 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD COLUMN sup_auto_name TINYINT(1) NOT NULL DEFAULT 0",   // 1 = name follows bulkmail.shop automatically (existing products stay 0 = untouched)
         "ALTER TABLE products ADD COLUMN sup_auto_desc TINYINT(1) NOT NULL DEFAULT 0",   // 1 = description (+ possible domains) follows bulkmail.shop
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
+        "ALTER TABLE products ADD COLUMN sup_show_dom TINYINT(1) NOT NULL DEFAULT 1",   // 1 = show the "Possible Domain (...)" line on the product card
         "ALTER TABLE products ADD COLUMN sup_domain VARCHAR(255) NULL",   // "Possible Domain" list copied from bulkmail.shop (refreshed automatically)
         "ALTER TABLE products ADD COLUMN sup_stock INT NOT NULL DEFAULT 0",   // live stock at bulkmail.shop (products.stock = sup_stock + unsold local items)
     ] as $sql) {
@@ -648,7 +649,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
           <p class="pc-d"><?= e($descLines[0] ?? $p['description']) ?></p>
         <?php endif; ?>
       <?php endif; ?>
-      <?php if (!empty($p['sup_domain'])): ?><div class="pc-dom" style="margin:0 0 8px;font:600 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b45309;word-break:break-all">Possible Domain (<?= e($p['sup_domain']) ?>)</div><?php endif; ?>
+      <?php if (!empty($p['sup_domain']) && (int)($p['sup_show_dom'] ?? 1) === 1): ?><div class="pc-dom" style="margin:0 0 8px;font:600 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b45309;word-break:break-all">Possible Domain (<?= e($p['sup_domain']) ?>)</div><?php endif; ?>
       <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>

@@ -146,6 +146,41 @@ function bm_find_domains(array $d, string &$desc): string {
     return mb_substr(implode(', ', array_values($out)), 0, 255);
 }
 
+/**
+ * {supplier product ID => possible domain} read from the public bulkmail.shop pages, where every product card shows
+ * "ID: 513 · Possible Domain (0r9.org)". Used when the API answer carries no domain. Cached 60 s (and per request).
+ */
+function bm_site_domains(): array {
+    static $mem = null;
+    if ($mem !== null) return $mem;
+    $mem = [];
+    try {
+        $cached = json_decode(setting('bm_site_dom', ''), true);
+        if (is_array($cached) && time() - (int)($cached['t'] ?? 0) < 60 && is_array($cached['m'] ?? null)) return $mem = $cached['m'];
+    } catch (Throwable $ex) {}
+    $origin = preg_replace('~/api(/v\d+)?$~i', '', bm_base());
+    foreach ([$origin . '/products', $origin . '/'] as $page) {
+        $ch = curl_init($page);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 7, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 3,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_HTTPHEADER => ['Accept: text/html,application/xhtml+xml'],
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
+        ]);
+        $html = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        if ($html === false || $code !== 200) continue;
+        $text = preg_replace('/<[^>]+>/', ' ', (string)$html);                       // drop tags
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');          // &middot; etc.
+        $text = preg_replace('/\s+/u', ' ', $text);
+        if (preg_match_all('/ID:\s*(\d+)\D{0,12}?Possible\s*Domain\s*\(([^)]*)\)/iu', $text, $mm, PREG_SET_ORDER)) {
+            foreach ($mm as $m) { $d = trim($m[2]); if ($d !== '') $mem[(int)$m[1]] = mb_substr($d, 0, 255); }
+        }
+        if ($mem) break;
+    }
+    if ($mem) { try { save_setting('bm_site_dom', json_encode(['t' => time(), 'm' => $mem])); } catch (Throwable $ex) {} }
+    return $mem;
+}
+
 /** One supplier product row from the API -> shop-ready text (name max 80, description max 500, supplier name removed). */
 function bm_norm(array $d, int $fallbackId = 0): array {
     $desc = preg_replace('~<br\s*/?>~i', "\n", (string)($d['description'] ?? ''));
@@ -169,7 +204,9 @@ function bm_product(int $id): array {
         if ((int)$r['_http'] === 404) return ['error' => 'No product with ID ' . $id . ' at bulkmail.shop.'];
         return ['error' => 'Could not read the product: ' . bm_err($r)];
     }
-    return bm_norm($r['data'], $id);
+    $n = bm_norm($r['data'], $id);
+    if ($n['domains'] === '') $n['domains'] = bm_clean(bm_site_domains()[$id] ?? '');   // API has no domain: read it from the website like the bot does
+    return $n;
 }
 
 /**
@@ -200,11 +237,17 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             }
             if ($page >= (int)($r['meta']['total_pages'] ?? $page)) break;
         }
-        $i = 0;   // products missing from the list (hidden / on another page): ask for them one by one, a few per run
+        $i = 0; $fetched = [];   // products missing from the list (hidden / on another page): ask for them one by one, a few per run
         foreach (array_keys(array_diff_key($need, $found)) as $sid) {
             if (++$i > 5) break;
             $one = bm_product((int)$sid);
-            if (!isset($one['error'])) $found[(int)$sid] = $one;
+            if (!isset($one['error'])) { $found[(int)$sid] = $one; $fetched[(int)$sid] = true; }
+        }
+        $siteDom = null;   // the API may carry no domain: read it from the public website (one request covers every product)
+        foreach ($found as $sid => $fp) {
+            if ($fp['domains'] !== '') continue;
+            if ($siteDom === null) $siteDom = bm_site_domains();
+            if (!empty($siteDom[$sid])) $found[$sid]['domains'] = bm_clean($siteDom[$sid]);
         }
         if ($rawSample) save_setting('bm_raw_sample', mb_substr(json_encode($rawSample, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), 0, 3000));
         $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, sup_stock = ?, stock = ? + (SELECT COUNT(*) FROM stock_items WHERE product_id = products.id AND order_id IS NULL), sup_domain = ? WHERE id = ?');   // the list also carries the live stock: a second way to keep it right
@@ -212,11 +255,17 @@ function bm_sync_info(PDO $pdo, bool $force = false): void {
             $sp = $found[(int)$row['supplier_id']] ?? null;
             if (!$sp) continue;
             $name = (string)$row['name']; $desc = (string)$row['description'];
-            if ((int)$row['sup_auto_name'] === 1 && $sp['name'] !== '') $name = $sp['name'];
-            if ((int)$row['sup_auto_desc'] === 1 && $sp['description'] !== '') $desc = $sp['description'];
             $stk = max(0, (int)$sp['stock']);
-            $dom = $sp['domains'] !== '' ? $sp['domains'] : null;   // always follows the supplier (domains change often)
-            if ($name !== (string)$row['name'] || $desc !== (string)$row['description'] || $stk !== (int)$row['sup_stock'] || $dom !== ($row['sup_domain'] !== null && $row['sup_domain'] !== '' ? (string)$row['sup_domain'] : null)) $upd->execute([$name, $desc, $stk, $stk, $dom, (int)$row['id']]);
+            $old = ($row['sup_domain'] !== null && $row['sup_domain'] !== '') ? (string)$row['sup_domain'] : null;
+            $dom = $sp['domains'] !== '' ? $sp['domains'] : $old;   // follows the supplier; one failed read never wipes the last known domain
+            // "auto name" ON: the product name = the Possible Domain (like the bot); without a domain it follows the supplier's name.
+            // The admin can type his own name any time (that switches auto name OFF and the sync never touches it again).
+            if ((int)$row['sup_auto_name'] === 1) {
+                if ($dom !== null) $name = mb_substr($dom, 0, 40);
+                elseif ($sp['name'] !== '') $name = $sp['name'];
+            }
+            if ((int)$row['sup_auto_desc'] === 1 && $sp['description'] !== '') $desc = $sp['description'];
+            if ($name !== (string)$row['name'] || $desc !== (string)$row['description'] || $stk !== (int)$row['sup_stock'] || $dom !== $old) $upd->execute([$name, $desc, $stk, $stk, $dom, (int)$row['id']]);
         }
     } catch (Throwable $ex) { error_log('bulkmail info sync: ' . $ex->getMessage()); }
 }
