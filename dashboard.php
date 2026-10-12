@@ -73,6 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 bm_sync_stock($pdo);   // linked bulkmail.shop products: refresh live stock (at most once a minute)
+bm_sync_info($pdo);    // ... and name / description / possible domains (at most every 15 minutes, only products with auto-sync on)
 
 $c = (int)($_GET['c'] ?? 0);
 $q = mb_substr(trim($_GET['q'] ?? ''), 0, 80);
@@ -91,27 +92,25 @@ if ($q !== '') {
 }
 $s = $pdo->prepare('SELECT p.* FROM products p LEFT JOIN categories c ON c.id = p.category_id
                     WHERE ' . implode(' AND ', $where) . '
-                    ORDER BY (p.category_id IS NULL), c.sort_order, c.id, (p.sort_order = 0), p.sort_order, p.popular DESC, p.id DESC LIMIT 300');
+                    ORDER BY (p.category_id IS NULL), c.sort_order, c.id, p.popular DESC, p.id DESC LIMIT 300');
 $s->execute($args);
 $rows = $s->fetchAll();
 
 if (isset($_GET['ajax'])) { header('Content-Type: text/html; charset=utf-8'); header('Cache-Control: no-store'); catalog_list_html($cats, $rows, $c, $q); exit; }
 
 user_start('Home', $u, 'dashboard'); ?>
+<style>
+@media(max-width:699px){
+.top{padding:8px 12px}
+main.with-side{padding:10px 12px 112px}
+.card.wallet.bbar{padding:10px 14px;margin-bottom:8px;border-radius:16px}
+.card.wallet.bbar::before{width:130px;height:130px;top:-70px}
+.card.wallet.bbar::after{width:80px;height:80px;bottom:-50px}
+.card.wallet.bbar b{font-size:1.4rem;margin-top:0}
+.card.wallet.bbar small{font-size:.75rem}
+.card.wallet.bbar .btn.sm{padding:7px 12px;font-size:.8rem;border-radius:10px}
+}
+</style>
 <div class="card wallet bbar"><div><small>Available balance</small><b><?= money($u['coins']) ?></b></div><a class="btn sm" href="/deposits.php">+ Add Funds</a></div>
 <?php catalog_html($cats, $rows, $c, $q, $total, (float)$u['coins']); ?>
-<script>
-/* Live refresh: stock numbers and "possible domain" follow the supplier without reloading the page (every 20 s, only while the tab is open and no Buy window is showing). */
-(function(){
-  var res=document.getElementById('cat-res'); if(!res) return;
-  setInterval(function(){
-    if(document.hidden||document.querySelector('.bx.open,.mdl.show,body.modal')||res.classList.contains('busy')) return;
-    var s=location.search.replace(/^\?/,'').split('&').filter(function(x){return x&&x.indexOf('ajax=')!==0&&x.indexOf('cur=')!==0;});
-    fetch('/dashboard.php?'+s.concat('ajax=1').join('&'),{credentials:'same-origin',headers:{'X-Requested-With':'fetch'}})
-      .then(function(r){return r.ok?r.text():null;}).then(function(h){
-        if(h&&h.trim()!==res.innerHTML.trim()&&!document.querySelector('.bx.open')){ var y=window.pageYOffset; res.innerHTML=h; window.scrollTo(0,y); }
-      }).catch(function(){});
-  },20000);
-})();
-</script>
 <?php user_end();

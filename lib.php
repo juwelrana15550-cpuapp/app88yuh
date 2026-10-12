@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '13';
+const SCHEMA_VERSION = '12';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -163,9 +163,9 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL",   // bulk orders can carry thousands of lines
         "ALTER TABLE products ADD COLUMN supplier_id INT NULL",          // bulkmail.shop product ID (NULL = normal product)
         "ALTER TABLE products ADD INDEX idx_supplier (supplier_id)",
-        "ALTER TABLE products ADD COLUMN supplier_domain VARCHAR(120) NULL",   // 'possible domain' copied from the supplier
+        "ALTER TABLE products ADD COLUMN sup_auto_name TINYINT(1) NOT NULL DEFAULT 0",   // 1 = name follows bulkmail.shop automatically (existing products stay 0 = untouched)
+        "ALTER TABLE products ADD COLUMN sup_auto_desc TINYINT(1) NOT NULL DEFAULT 0",   // 1 = description (+ possible domains) follows bulkmail.shop
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
-        "ALTER TABLE products ADD COLUMN sort_order INT NOT NULL DEFAULT 0",   // serial: 1 = first, 0 = automatic (after the numbered ones)
     ] as $sql) {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
@@ -473,8 +473,17 @@ function user_start(string $title, array $u, string $active): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');
     $GLOBALS['__active'] = $active;
     page_head($title, 'app'); ?>
+<style>
+.top .brand{gap:8px!important;letter-spacing:-.02em;font-size:1.1rem!important;line-height:1}
+.top .brand .bm svg{display:block}
+.top .brand .bm{flex:none;width:30px;height:30px;border-radius:10px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;letter-spacing:0;box-shadow:0 4px 10px -3px rgba(79,70,229,.6),inset 0 1px 0 rgba(255,255,255,.35)}
+.top .brand img{height:30px!important}
+.top .brand .bn b{font-weight:800;color:#1e1b4b}
+.top .brand .bn i{font-style:normal;font-weight:800;background:linear-gradient(90deg,#4f46e5,#9333ea);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#6d28d9}
+</style>
 <div class="top"><button class="burger" type="button" aria-label="Open menu" onclick="document.body.classList.toggle('menu')"><?= icon('menu') ?></button>
-<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php endif; ?><span class="bn"><?= e(site_name()) ?></span></a>
+<?php $sn = trim((string)site_name()); $sp = strpos($sn, ' '); $bw1 = $sp === false ? $sn : substr($sn, 0, $sp); $bw2 = $sp === false ? '' : trim(substr($sn, $sp + 1)); ?>
+<a class="brand" href="/dashboard.php"><?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php else: ?><span class="bm"><svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M9 8V7a3 3 0 0 1 6 0v1" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M5.2 8h13.6l-1 11.1a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5.2 8z" fill="#fff"/><path d="M12 11.6l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="#6d28d9"/></svg></span><?php endif; ?><span class="bn"><b><?= e($bw1) ?></b><?php if ($bw2 !== ''): ?> <i><?= e($bw2) ?></i><?php endif; ?></span></a>
 <?php if (usd_rate() > 0): $curNow = cur_code(); ?>
 <div class="cur" role="group" aria-label="Currency"><a href="?cur=usd" data-cur="usd" class="<?= $curNow === 'usd' ? 'on' : '' ?>">$</a><a href="?cur=bdt" data-cur="bdt" class="<?= $curNow === 'bdt' ? 'on' : '' ?>">BDT</a></div>
 <?php endif; ?>
@@ -597,14 +606,6 @@ function product_icon_value(array $p, ?array $cat = null): string {
     return (string)($cat['icon'] ?? '');
 }
 
-/** Product icon HTML: an uploaded image ("img:<version>") or the normal app icon / emoji. */
-function prod_icon_html(array $p, string $icon, string $size = '1em'): string {
-    if (strncmp($icon, 'img:', 4) === 0 && !empty($p['id'])) {
-        return '<img class="pimg" src="/pimg.php?id=' . (int)$p['id'] . '&amp;v=' . e(substr($icon, 4)) . '" alt="" loading="lazy">';
-    }
-    return cat_icon($icon, $size);
-}
-
 function catalog_url(array $x): string {
     $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
     return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
@@ -628,7 +629,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
         $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied ?>
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
-      <div class="pc-h"><span class="pc-ic"><?= prod_icon_html($p, $icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
+      <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
       <?php if ($p['description']):
           // One line = one bullet. 2+ non-empty lines render as a checklist (matches the plans section on the homepage); a single line stays plain text.
           $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $p['description'])), function ($l) { return $l !== ''; }));
@@ -641,7 +642,6 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <?php endif; ?>
       <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
-      <?php if (!empty($p['supplier_domain'])): ?><div class="sx-dom">Possible Domain (<?= e($p['supplier_domain']) ?>)</div><?php endif; ?>
       <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
       <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
         <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format($fin, 2, '.', '')) ?>" data-old="<?= $pct > 0 ? e(number_format((float)$p['price'], 2, '.', '')) : '' ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
@@ -661,30 +661,37 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
     echo app_icon_sprite(); ?>
 <style>
 /* Category tiles - self-contained, does not depend on style.css */
-.sx-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:8px;margin:12px 0 14px;padding:0}
-@media(min-width:700px){.sx-cats{display:flex;flex-wrap:wrap}}
+.sx-cats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:6px 0 4px;padding:0}
+@media(min-width:700px){.sx-cats{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 14px}}
+@media(max-width:699px){
+#catF.search{margin:0!important;padding:3px 3px 3px 10px!important;height:38px!important;border-radius:12px!important;gap:6px!important}
+#catF.search svg{width:16px!important;height:16px!important}
+#catF.search input{padding:0!important;height:30px!important;font-size:14px!important}
+#catF.search button{padding:0 14px!important;height:30px!important;font-size:13px!important;border-radius:9px!important}
+.sec-h{margin:8px 2px 8px!important;gap:7px!important;font-size:.95rem!important}
+.sec-h .ci{width:24px!important;height:24px!important;border-radius:7px!important;font-size:.9rem!important}
+.sec-h em{padding:0 7px!important}
+.catalog{gap:10px!important}
+}
 .sx-cat,.sx-cat:hover,.sx-cat:focus,.sx-cat:active{text-decoration:none}
-.sx-cat{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;height:36px;padding:0 14px 0 6px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:13.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);outline:0;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background-color .25s ease,border-color .25s ease,color .25s ease,box-shadow .25s ease}
+.sx-cat{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;height:28px;padding:0 10px 0 4px;background:#fff;border:1px solid #e2e8f0;border-radius:99px;color:#475569;font-size:12.5px;font-weight:600;line-height:1;cursor:pointer;-webkit-tap-highlight-color:rgba(0,0,0,0);outline:0;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background-color .25s ease,border-color .25s ease,color .25s ease,box-shadow .25s ease}
 .sx-cat:hover{border-color:#c7d2fe;color:#3730a3}
 .sx-cat:not(.on):active{background-color:#eef2ff;border-color:#c7d2fe}
 .sx-cat:focus{outline:0}
 .sx-cat:focus-visible{box-shadow:0 0 0 3px rgba(99,102,241,.35)}
-.sx-cat.sx-all{padding:0 15px;justify-content:center}
-.sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#f1f5f9;font-size:14px;line-height:1;overflow:hidden}
-.sx-cat .sx-ci svg{width:16px;height:16px;display:block}
+.sx-cat.sx-all{padding:0 12px;justify-content:center}
+.sx-cat .sx-ci{flex:none;display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#f1f5f9;font-size:12px;line-height:1;overflow:hidden}
+.sx-cat .sx-ci svg{width:14px;height:14px;display:block}
 .sx-cat b{min-width:0;max-width:200px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sx-cat.on{background:linear-gradient(135deg,#4f46e5,#6d28d9);border-color:transparent;color:#fff;box-shadow:0 2px 8px -3px rgba(79,70,229,.4)}
 .sx-cat.on b{color:#fff}
 .sx-cat.on .sx-ci{background:#fff}
-.pc-ic img.pimg,.bx-ic img.pimg{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
-.bx-ic img.pimg{border-radius:10px}
 #cat-res{scroll-margin-top:72px}
 #cat-res{transition:opacity .2s ease}
 #cat-res.busy{opacity:.8;pointer-events:none}
 /* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
 .btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
-.sx-dom{margin:-2px 0 10px;font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:#0e7490;overflow-wrap:anywhere}
 .sx-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
 .sx-stk{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;line-height:1.3;background:#dcfce7;color:#15803d;border:1px solid #86efac}
 .sx-stk:before{content:"";flex:none;width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.2)}
@@ -742,7 +749,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 <div class="sx-cats" id="catRow">
   <a class="sx-cat sx-all <?= $c ? '' : 'on' ?>" data-c="0" title="All (<?= (int)$total ?>)" href="<?= e(catalog_url(['q' => $q])) ?>"><b>All</b></a>
   <?php foreach ($cats as $k): ?>
-  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '16px') ?></span><b><?= e($k['name']) ?></b></a>
+  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '14px') ?></span><b><?= e($k['name']) ?></b></a>
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>

@@ -4,7 +4,7 @@ $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = ''; $bmTest = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = '';
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
@@ -31,47 +31,20 @@ function product_fields(): array {
         'price'   => round((float)($_POST['pprice'] ?? 0), 2),
         'cat'     => ((int)($_POST['category_id'] ?? 0)) ?: null,
         'sup'     => $sup,
+        'an'      => ($sup && !empty($_POST['sup_auto_name'])) ? 1 : 0,   // 1 = name follows bulkmail.shop
+        'ad'      => ($sup && !empty($_POST['sup_auto_desc'])) ? 1 : 0,   // 1 = description (+ possible domains) follows bulkmail.shop
         'stock'   => $sup ? 0 : ($st === '' ? null : max(0, (int)$st)),   // linked product: real stock is copied from bulkmail.shop right after saving; blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
         'auto'    => ($sup || empty($_POST['auto_delivery'])) ? 0 : 1,   // 1 = deliver uploaded stock instantly (never for linked products)
         'disc'    => min(99, max(0, round((float)($_POST['pdisc'] ?? 0), 2))),   // % off for everyone, 0 = none
-        'sort'    => max(0, min(100000, (int)($_POST['psort'] ?? 0))),   // serial: 1 = first, 0 = automatic
         'icon'    => (function () {   // '' = automatic (guessed from the name, else the category icon)
             $ic = trim($_POST['picon'] ?? '');
-            if ($ic === '' || strncmp($ic, 'img:', 4) === 0) return '';
+            if ($ic === '') return '';
             if (strncmp($ic, 'app:', 4) === 0) return isset(app_icons()[substr($ic, 4)]) ? $ic : '';
             return mb_substr($ic, 0, 8);
         })(),
     ];
-}
-/** Product image upload (field "pimg"). Returns null = no file, string = error text, [mime, binary] = ready to store (shrunk to 256px when GD is available). */
-function product_image_upload() {
-    $f = $_FILES['pimg'] ?? null;
-    if (!$f || $f['error'] === UPLOAD_ERR_NO_FILE) return null;
-    if ($f['error'] !== UPLOAD_ERR_OK || $f['size'] > 3145728) return 'Product image is too large (max 3 MB).';
-    $info = @getimagesize($f['tmp_name']);
-    if (!$info || !in_array($info['mime'], ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) return 'Product image must be a PNG, JPG, WEBP or GIF file.';
-    $mime = $info['mime']; $bin = file_get_contents($f['tmp_name']);
-    if ($mime !== 'image/gif' && function_exists('imagecreatefromstring') && $info[0] * $info[1] <= 25000000) {
-        $im = @imagecreatefromstring($bin);
-        if ($im) {
-            $w = imagesx($im); $h = imagesy($im); $max = 256;
-            if ($w > $max || $h > $max) {
-                $r = min($max / $w, $max / $h); $nw = max(1, (int)round($w * $r)); $nh = max(1, (int)round($h * $r));
-                $dst = imagecreatetruecolor($nw, $nh);
-                imagealphablending($dst, false); imagesavealpha($dst, true);
-                imagefill($dst, 0, 0, imagecolorallocatealpha($dst, 255, 255, 255, 127));
-                imagecopyresampled($dst, $im, 0, 0, 0, 0, $nw, $nh, $w, $h);
-                imagedestroy($im); $im = $dst;
-            }
-            ob_start();
-            if ($mime === 'image/jpeg') imagejpeg($im, null, 85); else { imagesavealpha($im, true); imagepng($im, null, 6); $mime = 'image/png'; }
-            $out = ob_get_clean(); imagedestroy($im);
-            if ($out !== '' && $out !== false) $bin = $out; else $mime = $info['mime'];
-        }
-    }
-    return [$mime, $bin];
 }
 function category_fields(): array {
     $ic = trim($_POST['cicon'] ?? '');
@@ -152,64 +125,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'products';
             $isEdit = isset($_POST['update_product']);
             $f = product_fields();
-            $bad = ''; $img = null; $sp = null; $old = null;
-            $pid = $isEdit ? (int)$_POST['update_product'] : 0;
-            if ($isEdit) { $q = $pdo->prepare('SELECT supplier_id, stock, supplier_domain, icon FROM products WHERE id = ?'); $q->execute([$pid]); $old = $q->fetch() ?: null; }
-            $oldSup  = $old ? (int)$old['supplier_id'] : 0;
-            $oldIcon = $old ? (string)$old['icon'] : '';
-            $oldImg  = strncmp($oldIcon, 'img:', 4) === 0;
+            if ($f['sup'] && ($f['an'] || $f['ad']) && bm_connected()) {   // auto-sync ticked: take the supplier's text now
+                $sp0 = bm_product((int)$f['sup']);
+                if (!isset($sp0['error'])) {
+                    if ($f['an'] && $sp0['name'] !== '') $f['name'] = $sp0['name'];
+                    if ($f['ad'] && $sp0['description'] !== '') $f['desc'] = $sp0['description'];
+                }
+            }
+            $bad = '';
             if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
                 $bad = 'Enter a product name (max 80 chars) and a price above 0.';
-            } else {
-                $img = product_image_upload();
-                if (is_string($img)) { $bad = $img; $img = null; }
-            }
-            // Linked to bulkmail.shop. The "Fetch" button already read the product, so its answer is reused (no second API call = fast save).
-            // Only when the ID was typed without pressing Fetch, ONE quick lookup is made. An unchanged link needs no lookup at all.
-            if ($bad === '' && $f['sup'] && $oldSup !== (int)$f['sup']) {
-                if (!bm_connected()) $bad = 'Connect your bulkmail.shop API key first (Admin > API Management), then link the product.';
-                elseif ((int)($_POST['sup_fetched_id'] ?? 0) === (int)$f['sup'] && trim((string)($_POST['sup_fetched_stock'] ?? '')) !== '') {
-                    $sp = ['stock' => max(0, (int)$_POST['sup_fetched_stock']), 'domain' => mb_substr(trim((string)($_POST['sup_fetched_domain'] ?? '')), 0, 100)];
-                } else {
-                    $sp = bm_product((int)$f['sup']);
-                    if (isset($sp['error'])) { $bad = 'Supplier product ID: ' . $sp['error']; $sp = null; }
+            } elseif ($f['sup']) {   // linked to bulkmail.shop: the product must exist there (skipped when editing a product whose link did not change)
+                $oldSup = 0;
+                if ($isEdit) { $q = $pdo->prepare('SELECT supplier_id FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldSup = (int)$q->fetchColumn(); }
+                if ($oldSup !== (int)$f['sup']) {
+                    if (!bm_connected()) $bad = 'Connect your bulkmail.shop API key first (Admin > API Management), then link the product.';
+                    else { $sp = bm_product((int)$f['sup']); if (isset($sp['error'])) $bad = 'Supplier product ID: ' . $sp['error']; }
                 }
             }
             if ($bad !== '') {
                 $prodErr = $bad;
-                $reopen = ['t' => 'product', 'id' => $pid, 'v' => [
+                $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'], 'sup' => $f['sup'] ?? '', 'sort' => $f['sort'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'], 'sup' => $f['sup'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'],
                 ]];
-            } else {
-                // linked product: stock/domain come from the lookup above, or stay as they are when the link did not change
-                $dom = null;
-                if ($f['sup']) {
-                    if ($sp) { $f['stock'] = (int)$sp['stock']; $dom = ($sp['domain'] ?? '') !== '' ? $sp['domain'] : null; }
-                    else { $f['stock'] = (int)($old['stock'] ?? 0); $dom = $old['supplier_domain'] ?? null; }
-                }
-                // icon: new image > picked app icon > keep the current image > automatic
-                if ($img) $icon = 'img:' . time();
-                elseif ($f['icon'] !== '') $icon = $f['icon'];
-                elseif ($oldImg && empty($_POST['remove_pimg'])) $icon = $oldIcon;
-                else $icon = '';
-                if ($isEdit) {
-                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, supplier_domain=?, sort_order=? WHERE id=?')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $icon, $f['disc'], $f['sup'], $dom, $f['sort'], $pid]);
-                } else {
-                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id, supplier_domain, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $icon, $f['disc'], $f['sup'], $dom, $f['sort']]);
-                    $pid = (int)$pdo->lastInsertId();
-                }
-                if ($img) {
-                    $st = $pdo->prepare('REPLACE INTO media (k, mime, data) VALUES (?,?,?)');
-                    $st->bindValue(1, 'p' . $pid); $st->bindValue(2, $img[0]); $st->bindValue(3, $img[1], PDO::PARAM_LOB); $st->execute();
-                } elseif ($oldImg && $icon !== $oldIcon) {
-                    $pdo->prepare('DELETE FROM media WHERE k = ?')->execute(['p' . $pid]);
-                }
+            } elseif ($isEdit) {
+                $pid = (int)$_POST['update_product'];
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=? WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
-                $what = $isEdit ? 'saved' : 'added';
-                go('products', $f['sup'] ? 'Product ' . $what . ' and linked to bulkmail.shop.' : 'Product ' . $what . '.');
+                if ($f['sup']) bm_sync_stock($pdo, true);   // stock = live stock at bulkmail.shop
+                go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
+            } else {
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id, sup_auto_name, sup_auto_desc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad']]);
+                if ($f['auto']) stock_sync($pdo, (int)$pdo->lastInsertId());
+                if ($f['sup']) bm_sync_stock($pdo, true);
+                go('products', $f['sup'] ? 'Product added and linked to bulkmail.shop.' : 'Product added.');
             }
 
         } elseif (isset($_POST['bm_connect'])) {
@@ -226,13 +178,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             go('api', 'Disconnected. The API key was removed and linked products show as out of stock until you connect again.');
 
         } elseif (isset($_POST['bm_refresh'])) {
-            bm_sync_stock($pdo, true, true);
-            go('api', 'Stock refreshed from bulkmail.shop.');
-
-        } elseif (isset($_POST['bm_test'])) {
-            $page = 'api';
-            $tid = (int)($_POST['bm_test_id'] ?? 0);
-            $bmTest = ($tid > 0 && bm_connected()) ? bm_debug($tid) : 'Connect the API first and enter a product ID.';
+            bm_sync_stock($pdo, true);
+            bm_sync_info($pdo, true);
+            go('api', 'Stock, names and descriptions refreshed from bulkmail.shop.');
 
         } elseif (isset($_POST['bm_clear_err'])) {
             save_setting('bm_last_error', '');
@@ -485,7 +433,7 @@ $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $pendOrders = $pdo->query("SELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
-$products = $pdo->query('SELECT * FROM products ORDER BY (sort_order = 0), sort_order, id DESC')->fetchAll();
+$products = $pdo->query('SELECT * FROM products ORDER BY id DESC')->fetchAll();
 $cats = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS n FROM categories c ORDER BY c.sort_order, c.id')->fetchAll();
 $catById = []; foreach ($cats as $k) $catById[(int)$k['id']] = $k;
 $catOpts = function ($sel) use ($cats) {
@@ -689,13 +637,10 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id'],
-           'sort' => (int)($p['sort_order'] ?? 0)];
-    $pIcon = product_icon_value($p, $k); $pj['img'] = strncmp($pIcon, 'img:', 4) === 0 ? '/pimg.php?id=' . (int)$p['id'] . '&v=' . substr($pIcon, 4) : '';
-    if ($pj['img'] !== '') $pj['icon'] = '';
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id'], 'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0)];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['stock']]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= prod_icon_html($p, $pIcon, '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ((int)($p['sort_order'] ?? 0) > 0): ?><span class="tag">#<?= (int)$p['sort_order'] ?></span><?php endif; ?><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php if (!empty($p['supplier_domain'])): ?><span class="tag"><?= e($p['supplier_domain']) ?></span><?php endif; ?><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['auto_delivery'] ? ' <small>unsold</small>' : ($p['supplier_id'] !== null ? ' <small>live</small>' : '')) ?></td>
@@ -710,7 +655,7 @@ $lg = media_url('logo');
   <div class="empty" id="pnone" <?= $products ? 'style="display:none"' : '' ?>>No products yet. Click “Add product” to create the first one.</div>
 </div>
 
-<dialog id="pdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
+<dialog id="pdlg"><form method="post" class="dlg"><?= csrf_field() ?>
   <div class="dlg-h"><h3 id="pTitle">Add product</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($prodErr): ?><div class="err" style="margin-top:12px"><?= e($prodErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="pname" id="p_name" maxlength="80" required>
@@ -732,18 +677,6 @@ $lg = media_url('logo');
   <label>Discount % <small>(optional, shown to everyone as a sale · 0 = none)</small></label><input type="number" name="pdisc" id="p_disc" min="0" max="99" step="0.01" inputmode="decimal" placeholder="e.g. 20">
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
-  <label>Serial / order <small>(1 = shown first · blank or 0 = automatic, after the numbered ones)</small></label>
-  <input type="number" name="psort" id="p_sort" min="0" max="100000" step="1" inputmode="numeric" placeholder="e.g. 1">
-  <label>Product image <small>(optional · PNG/JPG/WEBP, max 3 MB · used instead of the app icon)</small></label>
-  <style>
-    .pimg-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-    .pimg-prev{flex:none;width:52px;height:52px;border-radius:12px;border:1.5px dashed #d6d1ee;background:#faf9ff;display:grid;place-items:center;overflow:hidden;color:#a39ec7;font-size:20px}
-    .pimg-prev img{width:100%;height:100%;object-fit:cover;display:block}
-    .pimg-row input[type=file]{flex:1;min-width:0}
-    .pn .ci img.pimg{width:1.4em;height:1.4em;object-fit:cover;border-radius:6px;display:block}
-  </style>
-  <div class="pimg-row"><span class="pimg-prev" id="p_imgPrev">&#128247;</span><input type="file" name="pimg" id="p_img" accept="image/png,image/jpeg,image/webp,image/gif"></div>
-  <label class="chk" id="p_imgRmW" style="margin-top:10px" hidden><input type="checkbox" name="remove_pimg" id="p_imgRm" value="1"> <span>Remove current image</span></label>
   <label>App icon <small>(pick one, or leave Automatic - it follows the product name)</small></label>
   <style>
     .ipk-q{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
@@ -756,8 +689,12 @@ $lg = media_url('logo');
   <?= icon_picker_html('pik', 'picon', '', true) ?>
   <label>bulkmail.shop product ID <small>(optional · links this product to the supplier)</small></label>
   <div style="display:flex;gap:8px"><input type="number" name="supplier_id" id="p_sup" min="1" step="1" inputmode="numeric" placeholder="e.g. 123"<?= bm_connected() ? '' : ' title="Connect the API first"' ?>><button type="button" class="btn ghost" id="p_supGo" style="flex:none">Fetch</button></div>
-  <input type="hidden" name="sup_fetched_id" id="p_fid"><input type="hidden" name="sup_fetched_stock" id="p_fst"><input type="hidden" name="sup_fetched_domain" id="p_fdm">
   <small id="p_supNote" style="display:block;margin-top:6px"><?= bm_connected() ? 'Stock is copied live from bulkmail.shop. When a customer buys, the order is placed there automatically and the items are delivered instantly.' : 'Not connected yet: open <a href="/admin.php?p=api">API Management</a> and connect your API key first.' ?></small>
+  <div id="p_supAuto" style="display:none;margin-top:10px">
+    <label class="chk"><input type="checkbox" name="sup_auto_name" id="p_an" value="1"> <span>Auto-update the name from the supplier</span></label>
+    <label class="chk" style="margin-top:8px"><input type="checkbox" name="sup_auto_desc" id="p_ad" value="1"> <span>Auto-update the description (with possible domains) from the supplier</span></label>
+    <small style="display:block;margin-top:4px">Ticked = refreshed automatically every 15 minutes. To use your own name or description, just type it: the box unticks itself and your text stays.</small>
+  </div>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <label class="chk" style="margin-top:12px"><input type="checkbox" name="auto_delivery" id="p_auto" value="1"> <span>Instant delivery from uploaded stock</span></label>
   <small id="p_autoNote" style="display:block;margin-top:4px">Stock = number of unsold uploaded items. Use the “Stock” button on the product to upload them.</small>
@@ -988,7 +925,7 @@ $lg = media_url('logo');
   </div>
   <small class="hint">Every sale of a linked product is bought at bulkmail.shop from this wallet balance, so keep it topped up. If it runs out, customers are refunded automatically and the product shows an error until you add funds.</small>
   <div class="acts" style="margin-top:16px">
-    <form method="post" class="inl"><?= csrf_field() ?><button class="btn ghost" name="bm_refresh" value="1">Refresh stock now</button></form>
+    <form method="post" class="inl"><?= csrf_field() ?><button class="btn ghost" name="bm_refresh" value="1">Refresh stock &amp; details now</button></form>
     <form method="post" class="inl"><?= csrf_field() ?><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect from bulkmail.shop? The API key is removed and linked products show as out of stock until you connect again.')">Disconnect</button></form>
   </div>
 <?php else: ?>
@@ -1000,13 +937,6 @@ $lg = media_url('logo');
   </form>
 <?php endif; ?>
 </div>
-<?php if ($bmOn): $syncAt = (int)setting('bm_sync_ts', '0'); ?>
-<div class="card"><h3>Check a product ID</h3>
-  <small class="hint" style="margin:0 0 10px">Live stock refreshes by itself about every 15 seconds and the possible domain about every 3 minutes (whenever someone opens the shop)<?= $syncAt ? ' · last stock refresh ' . e(date('H:i:s', $syncAt)) : '' ?>. Use this to see exactly what the supplier sends for one product.</small>
-  <form method="post" class="acts"><?= csrf_field() ?><input type="number" name="bm_test_id" min="1" placeholder="Product ID, e.g. 578" style="max-width:220px" required value="<?= (int)($_POST['bm_test_id'] ?? 0) ?: '' ?>"><button class="btn ghost" name="bm_test" value="1">Check</button></form>
-  <?php if ($bmTest !== ''): ?><pre class="mono" style="white-space:pre-wrap;word-break:break-all;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;max-height:380px;overflow:auto;margin-top:12px"><?= e($bmTest) ?></pre><?php endif; ?>
-</div>
-<?php endif; ?>
 <?php if ($bmErr !== ''): ?><div class="card"><div class="card-h"><h3>Last problem</h3>
   <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="bm_clear_err" value="1">Dismiss</button></form></div>
   <div class="err" style="margin:0"><?= e($bmErr) ?></div></div><?php endif; ?>
@@ -1133,16 +1063,16 @@ $lg = media_url('logo');
     var quickSync=function(){ var cv=$('#pikVal').value; $$('#pikQuick .ipk-qb').forEach(function(b){ b.classList.toggle('sel',b.dataset.v===cv); }); };
     $$('#pikQuick .ipk-qb').forEach(function(b){ b.addEventListener('click',function(){ pp.set(b.dataset.v); pp.close(); quickSync(); }); });
     $('#pik').addEventListener('click',function(){ setTimeout(quickSync,0); });
-    $('#p_name').addEventListener('input',function(){ pp.refresh(); });
+    $('#p_name').addEventListener('input',function(){ pp.refresh(); $('#p_an').checked=false; });
     pd.addEventListener('close',function(){ pp.close(); });
     var autoSync=function(){
       var sup=$('#p_sup').value.trim()!=='', on=$('#p_auto').checked && !sup;
+      $('#p_supAuto').style.display=sup?'block':'none';
       $('#p_auto').disabled=sup; if(sup) $('#p_auto').checked=false;
       $('#p_stock').disabled=on||sup; $('#p_autoNote').style.display=on?'block':'none'; if(on||sup) $('#p_stock').value='';
     };
     $('#p_auto').addEventListener('change',autoSync);
     $('#p_sup').addEventListener('input',autoSync);
-    $('#p_sup').addEventListener('input',function(){ if($('#p_fid').value!==$('#p_sup').value.trim()){ $('#p_fid').value=''; $('#p_fst').value=''; $('#p_fdm').value=''; } });
     var supGo=$('#p_supGo'), supNote=$('#p_supNote'), supNote0=supNote.innerHTML;
     supGo.addEventListener('click',function(){
       var id=$('#p_sup').value.trim();
@@ -1151,12 +1081,11 @@ $lg = media_url('logo');
       fetch('/admin.php?bm_lookup='+encodeURIComponent(id),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(j){
         supGo.disabled=false;
         if(!j.ok){ supNote.textContent=j.error||'Not found.'; return; }
-        var p=j.p; if(!$('#p_name').value.trim()) $('#p_name').value=p.name.slice(0,80);
-        if(!$('#p_desc').value.trim() && p.description){ $('#p_desc').value=p.description.slice(0,500); renderDescPrev(); }
+        var p=j.p; if($('#p_an').checked || !$('#p_name').value.trim()) $('#p_name').value=p.name.slice(0,80);
+        if(p.description && ($('#p_ad').checked || !$('#p_desc').value.trim())){ $('#p_desc').value=p.description.slice(0,500); renderDescPrev(); }
         if(!$('#p_price').value && j.cur==='USD' && +j.rate>0) $('#p_price').value=(Math.ceil(p.price*j.rate*100)/100).toFixed(2);
         pp.refresh();
-        $('#p_fid').value=id; $('#p_fst').value=p.stock; $('#p_fdm').value=p.domain||'';   // the save reuses this: no second request to the supplier
-        supNote.textContent='Found: '+p.name+' \u00B7 supplier price '+p.price+' '+j.cur+' \u00B7 '+p.stock.toLocaleString('en-US')+' in stock'+(p.domain?' \u00B7 domain '+p.domain:'')+'. Set your own selling price (add your profit).';
+        supNote.textContent='Found: '+p.name+' \u00B7 supplier price '+p.price+' '+j.cur+' \u00B7 '+p.stock.toLocaleString('en-US')+' in stock. Set your own selling price (add your profit).';
       }).catch(function(){ supGo.disabled=false; supNote.textContent='Could not reach the server. Try again.'; });
     });
     var descTa=$('#p_desc'), descPrev=$('#p_descPrev'), descWrap=$('#p_descPrevWrap');
@@ -1167,22 +1096,20 @@ $lg = media_url('logo');
       if(lines.length>1) descPrev.innerHTML='<ul class="pc-dl">'+lines.slice(0,6).map(function(l){ return '<li>'+descEsc(l)+'</li>'; }).join('')+'</ul>';
       else descPrev.innerHTML='<p class="pc-d">'+descEsc(lines[0]||'')+'</p>';
     };
-    descTa.addEventListener('input',renderDescPrev);
+    descTa.addEventListener('input',function(){ renderDescPrev(); $('#p_ad').checked=false; });
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_disc').value=+v.disc>0?v.disc:'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
-      $('#p_sup').value=v.sup||''; supNote.innerHTML=supNote0; $('#p_fid').value=''; $('#p_fst').value=''; $('#p_fdm').value='';
-      $('#p_sort').value=+v.sort>0?v.sort:''; $('#p_img').value=''; $('#p_imgRm').checked=false;
-      $('#p_imgPrev').innerHTML=v.img?'<img src="'+v.img+'" alt="">':'\uD83D\uDCF7'; $('#p_imgRmW').hidden=!v.img;
+      $('#p_sup').value=v.sup||''; supNote.innerHTML=supNote0;
+      $('#p_an').checked = (v.an===undefined||v.an===null) ? !id : !!+v.an; $('#p_ad').checked = (v.ad===undefined||v.ad===null) ? !id : !!+v.ad;   // new product: auto-sync on by default; old products keep what they had
       $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync(); renderDescPrev();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup,sort:v.sort,img:v.img}, v.id); }); });
-    $('#p_img').addEventListener('change',function(){ var f=this.files&&this.files[0]; if(f){ $('#p_imgPrev').innerHTML=''; var im=document.createElement('img'); im.src=URL.createObjectURL(f); $('#p_imgPrev').appendChild(im); $('#p_imgRm').checked=false; } });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup,an:v.an,ad:v.ad}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     /* stock upload dialog */

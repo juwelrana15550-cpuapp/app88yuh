@@ -7,6 +7,8 @@ if (!defined('SCHEMA_VERSION')) { http_response_code(404); exit; }   // never ru
  *  - Admin > API Management: paste the bulkmail.shop API key -> Connect / Disconnect.
  *  - Admin > Products: type the supplier "Product ID" -> the product is linked.
  *  - Stock shown in your shop = live stock at bulkmail.shop (refreshed at most once a minute).
+ *  - Name + description (with the possible domains) are copied from bulkmail.shop and refreshed every 15 minutes, for every product
+ *    whose "auto-sync" box is ticked. The admin can still write his own name / description: typing your own text unticks the box.
  *  - When a customer buys a linked product: the customer's wallet is charged, the order is placed at bulkmail.shop with
  *    your API key, and the delivered items (email:password) are shown to the customer instantly.
  *  - If bulkmail.shop clearly refuses the order (no stock, no balance, bad key ...) the customer is refunded automatically.
@@ -17,8 +19,8 @@ if (!defined('SCHEMA_VERSION')) { http_response_code(404); exit; }   // never ru
  */
 
 const BM_DEFAULT_BASE = 'https://bulkmail.shop/api/v2';
-const BM_SYNC_EVERY   = 15;    // seconds between live-stock refreshes (one request covers 50 products)
-const BM_DETAIL_EVERY = 180;   // seconds between 'possible domain' refreshes
+const BM_INFO_EVERY   = 900;  // seconds between name / description refreshes of linked products
+const BM_SYNC_EVERY   = 60;   // seconds between stock refreshes (the public stock endpoints allow 20 requests / minute)
 
 function bm_base(): string { return rtrim(setting('bm_base', BM_DEFAULT_BASE), '/'); }
 function bm_key(): string  { return trim(setting('bm_key', '')); }
@@ -34,7 +36,7 @@ function bm_mask(string $k): string {
  * $key = null sends no key (public endpoints), '' uses the saved key.
  */
 function bm_call(string $method, string $path, ?array $body = null, ?string $key = '', int $timeout = 15): array {
-    $headers = ['Accept: application/json', 'User-Agent: Mozilla/5.0 (compatible; ShopSync/1.0)'];   // some hosts refuse requests that have no User-Agent
+    $headers = ['Accept: application/json'];
     if ($key === '') $key = bm_key();
     if ($key !== null && $key !== '') $headers[] = 'X-API-Key: ' . $key;
     $ch = curl_init(bm_base() . $path);
@@ -90,7 +92,8 @@ function bm_connect(PDO $pdo, string $key): array {
     save_setting('bm_connected', '1');
     save_setting('bm_last_error', '');
     save_setting('bm_sync_ts', '0');
-    bm_sync_stock($pdo, true, true);
+    bm_sync_stock($pdo, true);
+    bm_sync_info($pdo, true);
     return [true, 'Connected to bulkmail.shop.'];
 }
 
@@ -107,122 +110,114 @@ function bm_clean(string $t): string {
     return trim(preg_replace('/[ \t]{2,}/', ' ', $t));
 }
 
+/** "Possible domains" line, only if the supplier sends the domains as a separate field (otherwise they are already inside the description text). */
+function bm_domains_line(array $d): string {
+    foreach (['possible_domains', 'domains', 'domain'] as $k) {
+        if (!isset($d[$k])) continue;
+        $v = $d[$k];
+        if (is_array($v)) $v = implode(', ', array_filter(array_map(fn($x) => is_scalar($x) ? trim((string)$x) : '', $v), 'strlen'));
+        $v = trim((string)$v);
+        if ($v !== '') return 'Possible domains: ' . $v;
+    }
+    return '';
+}
+
+/** One supplier product row from the API -> shop-ready text (name max 80, description max 500, supplier name removed). */
+function bm_norm(array $d, int $fallbackId = 0): array {
+    $desc = preg_replace('~<br\s*/?>~i', "\n", (string)($d['description'] ?? ''));
+    $desc = bm_clean(str_replace(["\r\n", "\r"], "\n", $desc));
+    $dom  = bm_clean(bm_domains_line($d));
+    if ($dom !== '' && stripos($desc, 'domain') === false) {   // keep the domains line even when the description is long
+        $desc = trim(mb_substr($desc, 0, max(0, 500 - mb_strlen($dom) - 1)));
+        $desc = trim($desc . ($desc !== '' ? "\n" : '') . $dom);
+    }
+    return [
+        'id'          => (int)($d['id'] ?? $fallbackId),
+        'name'        => mb_substr(bm_clean((string)($d['name'] ?? '')), 0, 80),
+        'description' => mb_substr($desc, 0, 500),
+        'price'       => (float)($d['price'] ?? 0),
+        'stock'       => (int)($d['stock_quantity'] ?? 0),
+    ];
+}
+
 /** One supplier product, normalised: ['id','name','description','price','stock'] or ['error' => text]. Needs no API key. */
 function bm_product(int $id): array {
     if ($id <= 0) return ['error' => 'Enter a valid product ID.'];
-    $r = bm_call('GET', '/products/' . $id, null, null, 8);
+    $r = bm_call('GET', '/products/' . $id, null, null, 12);
     if (empty($r['success']) || empty($r['data']) || !is_array($r['data'])) {
         if ((int)$r['_http'] === 404) return ['error' => 'No product with ID ' . $id . ' at bulkmail.shop.'];
         return ['error' => 'Could not read the product: ' . bm_err($r)];
     }
-    $d = $r['data'];
-    return [
-        'id'          => (int)($d['id'] ?? $id),
-        'name'        => bm_clean((string)($d['name'] ?? '')),
-        'description' => bm_clean((string)($d['description'] ?? '')),
-        'price'       => (float)($d['price'] ?? 0),
-        'stock'       => (int)($d['stock_quantity'] ?? 0),
-        'domain'      => bm_domain($d),
-    ];
-}
-
-/** The "possible domain" of a supplier product: a field with "domain" in its name, else the text "Possible Domain (x.com)" inside the name / description / sku. '' if none. */
-function bm_domain(array $d): string {
-    foreach ($d as $k => $v) {
-        if (is_string($v) && stripos((string)$k, 'domain') !== false && trim($v) !== '') return mb_substr(trim(preg_replace('/^possible\s*domain\s*/i', '', trim($v), 1), " ()"), 0, 100);
-        if (is_array($v) && stripos((string)$k, 'domain') !== false && $v) { $f = reset($v); if (is_string($f) && trim($f) !== '') return mb_substr(trim($f), 0, 100); }
-    }
-    $txt = implode("\n", array_filter([(string)($d['name'] ?? ''), (string)($d['description'] ?? ''), (string)($d['sku'] ?? '')], 'strlen'));
-    if (preg_match('/possible\s*domains?\s*[:\-]?\s*\(?\s*([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})/i', $txt, $m)) return mb_substr(strtolower($m[1]), 0, 100);
-    return '';
-}
-
-/** Raw answers for one product ID (Admin > API Management > "Check a product ID"), so you can see exactly what the supplier sends. */
-function bm_debug(int $id): string {
-    $out = '';
-    foreach ([['/products/' . $id, 'product details'], ['/stock/check?ids=' . $id, 'stock check'], ['/stock/' . $id, 'stock']] as [$path, $label]) {
-        $r = bm_call('GET', $path, null, '', 15);
-        $out .= '# ' . $label . '  GET ' . $path . '  ->  HTTP ' . (int)$r['_http'] . "\n" . mb_substr(json_encode($r, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 0, 3000) . "\n\n";
-    }
-    return $out;
+    return bm_norm($r['data'], $id);
 }
 
 /**
- * Keeps linked products up to date: live stock (every BM_SYNC_EVERY s) and "possible domain" (every BM_DETAIL_EVERY s).
- * Reads the connection from the database directly (never a stale per-request copy). Never throws.
+ * Keeps name + description (incl. possible domains) of linked products equal to bulkmail.shop.
+ * Only products whose "auto-sync" box is ticked are touched, so text the admin wrote by hand is never overwritten.
+ * One list request covers up to 100 products. Runs at most once per BM_INFO_EVERY seconds unless $force. Never throws.
  */
-function bm_sync_stock(PDO $pdo, bool $force = false, bool $withDetails = false): void {
+function bm_sync_info(PDO $pdo, bool $force = false): void {
     try {
-        $cfg = $pdo->query("SELECT k, v FROM settings WHERE k IN ('bm_connected','bm_key','bm_sync_ts','bm_dom_ts')")->fetchAll(PDO::FETCH_KEY_PAIR);
-        $key = trim((string)($cfg['bm_key'] ?? ''));
-        if (($cfg['bm_connected'] ?? '0') !== '1' || $key === '') return;
-        $now = time();
-        $doStock  = $force || $now - (int)($cfg['bm_sync_ts'] ?? 0) >= BM_SYNC_EVERY;
-        $doDetail = $withDetails || $now - (int)($cfg['bm_dom_ts'] ?? 0) >= BM_DETAIL_EVERY;
-        if (!$doStock && !$doDetail) return;
-        $mark = $pdo->prepare("INSERT INTO settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)");   // set first: a slow API never makes every page wait
-        if ($doStock)  $mark->execute(['bm_sync_ts', (string)$now]);
-        if ($doDetail) $mark->execute(['bm_dom_ts', (string)$now]);
-        $ids = array_map('intval', $pdo->query('SELECT DISTINCT supplier_id FROM products WHERE supplier_id IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN));
-        if (!$ids) return;
-        if ($doStock)  bm_sync_stock_now($pdo, $key, $ids);
-        if ($doDetail) bm_sync_details($pdo, $key, $ids);
-    } catch (Throwable $ex) { error_log('supplier sync: ' . $ex->getMessage()); }
+        if (!bm_connected()) return;
+        if (!$force) {
+            $ts = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_info_ts'")->fetchColumn();
+            if (time() - $ts < BM_INFO_EVERY) return;
+        }
+        $pdo->prepare("INSERT INTO settings (k, v) VALUES ('bm_info_ts', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([(string)time()]);
+        $rows = $pdo->query('SELECT id, name, description, supplier_id, sup_auto_name, sup_auto_desc FROM products WHERE supplier_id IS NOT NULL AND (sup_auto_name = 1 OR sup_auto_desc = 1)')->fetchAll();
+        if (!$rows) return;
+        $need = []; foreach ($rows as $row) $need[(int)$row['supplier_id']] = true;
+        $found = [];
+        for ($page = 1; $page <= 10 && count($found) < count($need); $page++) {
+            $r = bm_call('GET', '/products?page=' . $page . '&per_page=100', null, null, 8);
+            if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail info sync: ' . bm_err($r)); break; }
+            foreach ($r['data'] as $d) {
+                if (is_array($d) && isset($d['id']) && isset($need[(int)$d['id']])) $found[(int)$d['id']] = bm_norm($d);
+            }
+            if ($page >= (int)($r['meta']['total_pages'] ?? $page)) break;
+        }
+        $i = 0;   // products missing from the list (hidden / on another page): ask for them one by one, a few per run
+        foreach (array_keys(array_diff_key($need, $found)) as $sid) {
+            if (++$i > 5) break;
+            $one = bm_product((int)$sid);
+            if (!isset($one['error'])) $found[(int)$sid] = $one;
+        }
+        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ? WHERE id = ?');
+        foreach ($rows as $row) {
+            $sp = $found[(int)$row['supplier_id']] ?? null;
+            if (!$sp) continue;
+            $name = (string)$row['name']; $desc = (string)$row['description'];
+            if ((int)$row['sup_auto_name'] === 1 && $sp['name'] !== '') $name = $sp['name'];
+            if ((int)$row['sup_auto_desc'] === 1 && $sp['description'] !== '') $desc = $sp['description'];
+            if ($name !== (string)$row['name'] || $desc !== (string)$row['description']) $upd->execute([$name, $desc, (int)$row['id']]);
+        }
+    } catch (Throwable $ex) { error_log('bulkmail info sync: ' . $ex->getMessage()); }
 }
 
-function bm_sync_stock_now(PDO $pdo, string $key, array $ids): void {
-    $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_id = ?');
-    $done = []; $why = '';
-    foreach (array_chunk($ids, 50) as $chunk) {
-        $r = bm_call('GET', '/stock/check?ids=' . implode(',', $chunk), null, $key, 8);
-        if (!empty($r['success']) && is_array($r['data'] ?? null)) {
+/**
+ * Copies the live stock of every linked product into products.stock (so the shop shows the real number).
+ * Runs at most once per BM_SYNC_EVERY seconds unless $force. Never throws.
+ */
+function bm_sync_stock(PDO $pdo, bool $force = false): void {
+    try {
+        if (!bm_connected()) return;
+        if (!$force) {
+            $ts = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_sync_ts'")->fetchColumn();
+            if (time() - $ts < BM_SYNC_EVERY) return;
+        }
+        $pdo->prepare("INSERT INTO settings (k, v) VALUES ('bm_sync_ts', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([(string)time()]);   // set first: a slow API never makes every page wait
+        $ids = $pdo->query('SELECT DISTINCT supplier_id FROM products WHERE supplier_id IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN);
+        if (!$ids) return;
+        $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_id = ?');
+        foreach (array_chunk($ids, 50) as $chunk) {
+            $r = bm_call('GET', '/stock/check?ids=' . implode(',', array_map('intval', $chunk)), null, null, 6);
+            if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail stock sync: ' . bm_err($r)); continue; }
             foreach ($r['data'] as $row) {
                 if (!is_array($row) || !isset($row['product_id'])) continue;
-                $upd->execute([max(0, (int)($row['stock_count'] ?? $row['stock_quantity'] ?? 0)), (int)$row['product_id']]);
-                $done[(int)$row['product_id']] = 1;
+                $upd->execute([max(0, (int)($row['stock_count'] ?? 0)), (int)$row['product_id']]);
             }
-        } else { $why = bm_err($r); }
-    }
-    // Anything the bulk call did not return: ask one by one (limited, so a problem never turns into hundreds of requests).
-    $n = 0;
-    foreach ($ids as $id) {
-        if (isset($done[$id]) || $n++ >= 20) continue;
-        $r = bm_call('GET', '/stock/' . $id, null, $key, 8);
-        $c = $r['data']['stock_count'] ?? null;
-        if ($c === null) { $r = bm_call('GET', '/products/' . $id, null, $key, 8); $c = $r['data']['stock_quantity'] ?? null; }
-        if ($c !== null) { $upd->execute([max(0, (int)$c), $id]); $done[$id] = 1; } elseif ($why === '') $why = bm_err($r);
-    }
-    $missing = count($ids) - count($done);
-    if ($missing > 0) {
-        save_setting('bm_last_error', date('Y-m-d H:i') . ' · live stock could not be read for ' . $missing . ' linked product(s): ' . $why . ' (Admin > API Management > "Check a product ID" shows the raw answer)');
-        error_log('supplier stock sync: ' . $missing . ' missing: ' . $why);
-    } elseif (strpos((string)$pdo->query("SELECT v FROM settings WHERE k = 'bm_last_error'")->fetchColumn(), 'live stock could not') !== false) {
-        save_setting('bm_last_error', '');
-    }
-}
-
-/** Refreshes the "possible domain" of linked products from the supplier's product list (100 per request). */
-function bm_sync_details(PDO $pdo, string $key, array $ids): void {
-    $need = array_flip($ids);
-    $upd = $pdo->prepare('UPDATE products SET supplier_domain = ? WHERE supplier_id = ?');
-    for ($pg = 1; $pg <= 10 && $need; $pg++) {
-        $r = bm_call('GET', '/products?per_page=100&page=' . $pg, null, $key, 15);
-        if (empty($r['success']) || !is_array($r['data'] ?? null)) break;
-        foreach ($r['data'] as $d) {
-            if (!is_array($d) || !isset($d['id']) || !isset($need[(int)$d['id']])) continue;
-            $dom = bm_domain($d);
-            $upd->execute([$dom !== '' ? $dom : null, (int)$d['id']]);
-            unset($need[(int)$d['id']]);
         }
-        $tp = (int)($r['meta']['total_pages'] ?? 0);
-        if (count($r['data']) < 100 || ($tp && $pg >= $tp)) break;
-    }
-    $n = 0;
-    foreach (array_keys($need) as $id) {   // not on those pages: ask one by one (limited)
-        if ($n++ >= 15) break;
-        $r = bm_call('GET', '/products/' . $id, null, $key, 8);
-        if (!empty($r['success']) && is_array($r['data'] ?? null)) { $dom = bm_domain($r['data']); $upd->execute([$dom !== '' ? $dom : null, $id]); }
-    }
+    } catch (Throwable $ex) { error_log('bulkmail stock sync: ' . $ex->getMessage()); }
 }
 
 /** Delivery line in the shop's own format: "email:password" -> "email|password" (only the first colon, so passwords keep theirs). */
