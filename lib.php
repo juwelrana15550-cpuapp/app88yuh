@@ -874,9 +874,8 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .bx-no{background:#f1f5f9;color:#334155}
 .bx-ok{flex:1.5;background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff}
 .bx-btn:disabled{opacity:.5;cursor:not-allowed}
-/* Buy Now button: compact, right-aligned (overrides the older full-width / tall rules above) */
-.catalog .pc-buy{display:flex;justify-content:flex-end}
-.catalog .pc .btn.buy,.pc .btn.buy{width:auto!important;min-height:34px!important;height:34px;padding:0 18px!important;font-size:13px!important;border-radius:10px!important;gap:6px!important;margin-top:0!important}
+/* Buy Now button: same full width as before, slimmer height (overrides the older full-width / tall rules above) */
+.catalog .pc .btn.buy,.pc .btn.buy{width:100%!important;min-height:32px!important;height:32px;padding:0 12px!important;font-size:13px!important;border-radius:9px!important;gap:6px!important;margin-top:0!important}
 .catalog .pc .btn.buy svg,.pc .btn.buy svg{width:15px!important;height:15px!important}
 /* Category switch: skeleton cards + spinner while products load */
 @keyframes sxSpin{to{transform:rotate(360deg)}}
