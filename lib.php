@@ -874,6 +874,33 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .bx-no{background:#f1f5f9;color:#334155}
 .bx-ok{flex:1.5;background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff}
 .bx-btn:disabled{opacity:.5;cursor:not-allowed}
+/* Buy Now button: compact, right-aligned (overrides the older full-width / tall rules above) */
+.catalog .pc-buy{display:flex;justify-content:flex-end}
+.catalog .pc .btn.buy,.pc .btn.buy{width:auto!important;min-height:34px!important;height:34px;padding:0 18px!important;font-size:13px!important;border-radius:10px!important;gap:6px!important;margin-top:0!important}
+.catalog .pc .btn.buy svg,.pc .btn.buy svg{width:15px!important;height:15px!important}
+/* Category switch: skeleton cards + spinner while products load */
+@keyframes sxSpin{to{transform:rotate(360deg)}}
+@keyframes sxShim{0%{background-position:-200px 0}100%{background-position:200px 0}}
+.sx-ld{display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 0 12px;color:#4338ca;font-size:13.5px;font-weight:600}
+.sx-sp{flex:none;width:20px;height:20px;border-radius:50%;border:3px solid #e0e7ff;border-top-color:#4f46e5;animation:sxSpin .7s linear infinite}
+.sx-sk{pointer-events:none}
+.sx-sk .pc{display:flex;flex-direction:column;gap:10px;padding:14px;background:#fff;border:1px solid #eef0f4;border-radius:14px;min-height:170px}
+.sx-b{display:block;height:12px;border-radius:6px;background:linear-gradient(90deg,#f1f5f9 0,#e2e8f0 100px,#f1f5f9 200px);background-size:400px 100%;animation:sxShim 1.2s linear infinite}
+.sx-sk .sx-r{display:flex;align-items:center;gap:10px}
+.sx-sk .sx-c{flex:none;width:36px;height:36px;border-radius:11px}
+#cat-res.busy{opacity:1}
+/* Purchase in progress: overlay inside the dialog */
+.bx-ld{position:absolute;left:0;right:0;top:0;bottom:0;z-index:5;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px;text-align:center;background:rgba(255,255,255,.96);border-radius:16px}
+.bx-sh.busy .bx-ld{display:flex;animation:sxFade .2s ease}
+@keyframes sxFade{from{opacity:0}to{opacity:1}}
+.bx-ld .sx-sp{width:46px;height:46px;border-width:4px}
+.bx-ld b{font-size:15px;color:#1e293b}
+.bx-ld small{display:block;color:#64748b;font-size:12.5px;min-height:1.3em;transition:opacity .25s}
+.bx-ld .bx-dots{display:flex;gap:5px}
+.bx-ld .bx-dots i{width:7px;height:7px;border-radius:50%;background:#818cf8;animation:sxBounce 1s ease-in-out infinite}
+.bx-ld .bx-dots i:nth-child(2){animation-delay:.15s}.bx-ld .bx-dots i:nth-child(3){animation-delay:.3s}
+@keyframes sxBounce{0%,80%,100%{transform:scale(.6);opacity:.5}40%{transform:scale(1);opacity:1}}
+@media(prefers-reduced-motion:reduce){.sx-sp,.sx-b,.bx-ld .bx-dots i{animation-duration:2s}}
 </style>
 <form class="search" id="catF" method="get" action="/dashboard.php">
   <?= icon('search') ?><input type="text" name="q" value="<?= e($q) ?>" placeholder="Search products or ID" autocomplete="off" maxlength="80">
@@ -916,7 +943,16 @@ function buy_modal_html(float $balance, int $c, string $q): void {
    +'<div class="bx-bal"><span>Wallet balance</span><b id="bmBal"></b></div>'
    +'<div class="bx-msg" id="bmMsg" role="alert" hidden></div>'
    +'<div class="bx-f"><button type="button" class="bx-btn bx-no" data-x>Cancel</button><button type="submit" class="bx-btn bx-ok" id="bmGo">Confirm Purchase</button></div>'
+   +'<div class="bx-ld" id="bmLd" role="status" aria-live="polite"><div class="sx-sp"></div><b>Processing your order</b><small id="bmLdT">Placing your order…</small><div class="bx-dots"><i></i><i></i><i></i></div></div>'
    +'</form>';
+  var ldT=null;
+  function startLoading(){
+    F.classList.add('busy'); F.setAttribute('aria-busy','true');
+    var steps=['Placing your order…','Checking stock…','Preparing your product…','Almost done, please wait…'], i=0, t=$('bmLdT');
+    if(ldT) clearInterval(ldT);
+    ldT=setInterval(function(){ i=Math.min(i+1,steps.length-1); t.textContent=steps[i]; },2500);
+  }
+  function stopLoading(){ if(ldT){ clearInterval(ldT); ldT=null; } F.classList.remove('busy'); F.removeAttribute('aria-busy'); $('bmLdT').textContent='Placing your order…'; }
   function toast(t){
     var d=document.createElement('div');
     d.style.cssText='position:fixed;left:12px;right:12px;top:12px;z-index:4000;background:#7f1d1d;color:#fff;padding:12px 14px;border-radius:12px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.35)';
@@ -955,6 +991,7 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     if(best>1 && [1,5,10,50,100].indexOf(best)<0) addChip(box,best,'Max ('+best.toLocaleString('en-US')+')');
   }
   function close(){
+    if(F.classList.contains('busy')) return;   // order is being processed - don't close
     M.classList.remove('show'); M.setAttribute('aria-hidden','true');
     document.documentElement.style.overflow='';
     if(hideT) clearTimeout(hideT);
@@ -973,10 +1010,11 @@ function buy_modal_html(float $balance, int $c, string $q): void {
       if(!cur){ e.preventDefault(); return; }
       render(); if(go.disabled){ e.preventDefault(); return; }
       go.disabled=true; go.textContent='Processing\u2026';   // stops double-clicks from buying twice
+      startLoading();                                        // loading screen until the next page arrives
     });
     document.addEventListener('keydown',function(e){ if(e.key==='Escape' && M.classList.contains('open')) close(); });
     window.addEventListener('pageshow',function(ev){
-      if(ev.persisted){ M.classList.remove('open','show'); document.documentElement.style.overflow=''; go.disabled=false; go.textContent='Confirm Purchase'; }
+      if(ev.persisted){ stopLoading(); M.classList.remove('open','show'); document.documentElement.style.overflow=''; go.disabled=false; go.textContent='Confirm Purchase'; }
     });
   }
   function open(btn){
@@ -1024,6 +1062,10 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     var h=form.elements.c; if(state.c){ if(!h){ h=document.createElement('input'); h.type='hidden'; h.name='c'; form.appendChild(h); } h.value=state.c; } else if(h){ h.remove(); }
     if(window.SX){ SX.c=state.c||''; SX.q=state.q; }
   }
+  function skeleton(){
+    var card='<div class="pc"><div class="sx-r"><span class="sx-b sx-c"></span><span style="flex:1"><span class="sx-b" style="width:70%;margin-bottom:6px"></span><span class="sx-b" style="width:40%;height:9px"></span></span></div><span class="sx-b" style="width:90%"></span><span class="sx-b" style="width:75%"></span><span class="sx-b" style="width:35%;height:18px;margin-top:6px"></span><span class="sx-b" style="width:100%;height:30px;border-radius:10px"></span></div>';
+    return '<div class="sx-ld" role="status"><span class="sx-sp"></span>Loading products…</div><div class="catalog sx-sk">'+card+card+card+card+'</div>';
+  }
   function toResults(){ try{ res.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} }
   function load(c,q,push,scroll){
     state.c=c; state.q=q; qIn.value=q; sync();
@@ -1033,6 +1075,7 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
     clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);
     var y0=window.pageYOffset; res.style.minHeight=res.offsetHeight+'px'; res.classList.add('busy'); res.setAttribute('aria-busy','true');
+    res.innerHTML=skeleton();   // loading interface until the products arrive
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
       .then(function(h){
