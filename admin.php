@@ -12,6 +12,7 @@ const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories',
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null, string $extra = ''): void {
+    if ($p === 'products' || $p === 'categories') icon_gc(db());   // drop uploaded icon images nothing uses any more
     if ($ok) flash('ok', $ok);
     header('Location: /admin.php' . ($p === 'overview' ? '' : '?p=' . $p) . $extra);
     exit;
@@ -22,9 +23,22 @@ function go_user(int $id, ?string $ok = null): void {
     go('users', $ok, '&u=' . $id . ($t !== '' ? '&t=' . $t : ''));
 }
 
+/** Icon from the picker: an uploaded image wins, otherwise the chosen app icon / emoji / existing image. Returns [value, error]. */
+function icon_from_post(string $field, string $default): array {
+    [$up, $err] = icon_save_upload($_FILES[$field . '_file'] ?? null);
+    if ($err !== '') return [$default, $err];
+    if ($up !== '') return [$up, ''];
+    $ic = trim((string)($_POST[$field] ?? ''));
+    if ($ic === '') return [$default, ''];
+    if (strncmp($ic, 'app:', 4) === 0) return [isset(app_icons()[substr($ic, 4)]) ? $ic : $default, ''];
+    if (strncmp($ic, 'img:', 4) === 0) return [icon_img_exists($ic) ? $ic : $default, ''];
+    return [mb_substr($ic, 0, 8), ''];   // plain emoji
+}
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
     $sup = (int)($_POST['supplier_id'] ?? 0); $sup = $sup > 0 ? $sup : null;   // bulkmail.shop product ID
+    [$icon, $iconErr] = icon_from_post('picon', '');   // '' = automatic (guessed from the name, else the category icon)
+    $so = trim((string)($_POST['psort'] ?? ''));
     return [
         'name'    => trim($_POST['pname'] ?? ''),
         'desc'    => mb_substr(trim($_POST['pdesc'] ?? ''), 0, 500),
@@ -39,24 +53,17 @@ function product_fields(): array {
         'popular' => empty($_POST['popular']) ? 0 : 1,
         'auto'    => ($sup || empty($_POST['auto_delivery'])) ? 0 : 1,   // 1 = deliver uploaded stock instantly (never for linked products)
         'disc'    => min(99, max(0, round((float)($_POST['pdisc'] ?? 0), 2))),   // % off for everyone, 0 = none
-        'icon'    => (function () {   // '' = automatic (guessed from the name, else the category icon)
-            $ic = trim($_POST['picon'] ?? '');
-            if ($ic === '') return '';
-            if (strncmp($ic, 'app:', 4) === 0) return isset(app_icons()[substr($ic, 4)]) ? $ic : '';
-            return mb_substr($ic, 0, 8);
-        })(),
+        'icon'    => $icon,
+        'icon_err'=> $iconErr,
+        'sort'    => $so === '' ? null : max(-1000000, min(1000000, (int)$so)),   // display order, smaller first; null = last (new) / unchanged (edit)
     ];
 }
 function category_fields(): array {
-    $ic = trim($_POST['cicon'] ?? '');
-    if (strncmp($ic, 'app:', 4) === 0) {
-        if (!isset(app_icons()[substr($ic, 4)])) $ic = 'app:shop';   // unknown key -> default
-    } else {
-        $ic = mb_substr($ic, 0, 8) ?: 'app:shop';                    // plain emoji
-    }
+    [$ic, $icErr] = icon_from_post('cicon', 'app:shop');
     return [
         'name' => trim($_POST['cname'] ?? ''),
         'icon' => $ic,
+        'icon_err' => $icErr,
         'sort' => (int)($_POST['csort'] ?? 0),
     ];
 }
@@ -142,7 +149,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $oldStock = null;
             if ($isEdit) { $q = $pdo->prepare('SELECT sup_stock FROM products WHERE id = ?'); $q->execute([(int)$_POST['update_product']]); $oldStock = $q->fetchColumn(); }
             $bad = '';
-            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
+            if ($f['icon_err'] !== '') {
+                $bad = $f['icon_err'];
+            } elseif ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
                 $bad = 'Enter a product name (max 80 chars) and a price above 0.';
             } elseif ($f['sup']) {   // linked to bulkmail.shop: the product must exist there (skipped when editing a product whose link did not change)
                 $oldSup = 0;
@@ -156,12 +165,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = $bad;
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'], 'sup' => $f['sup'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'sort' => $_POST['psort'] ?? '', 'pop' => $f['popular'], 'auto' => $f['auto'], 'icon' => $f['icon'], 'disc' => $f['disc'], 'sup' => $f['sup'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'],
                 ]];
             } elseif ($isEdit) {
                 $pid = (int)$_POST['update_product'];
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $f['sd'], $pid]);
+                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, auto_delivery=?, icon=?, discount_pct=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sort_order=COALESCE(?, sort_order) WHERE id=?')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $f['sd'], $f['sort'], $pid]);
                 if ($f['auto']) stock_sync($pdo, $pid);   // stock = unsold uploaded items
                 if (!$f['sup']) $pdo->prepare('UPDATE products SET sup_domain = NULL WHERE id = ?')->execute([$pid]);   // unlinked: no supplier domains
                 if ($f['sup']) {
@@ -174,8 +183,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 go('products', $f['sup'] ? 'Product saved and linked to bulkmail.shop.' : 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $f['sd']]);
+                $so = $f['sort'] ?? ((int)$pdo->query('SELECT COALESCE(MAX(sort_order), 0) FROM products')->fetchColumn() + 10);   // blank = show last
+                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, auto_delivery, icon, discount_pct, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['auto'], $f['icon'], $f['disc'], $f['sup'], $f['an'], $f['ad'], $f['sd'], $so]);
                 $newId = (int)$pdo->lastInsertId();
                 if ($f['auto']) stock_sync($pdo, $newId);
                 if ($f['sup']) {
@@ -212,8 +222,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $page = 'categories';
             $isEdit = isset($_POST['update_category']);
             $f = category_fields();
-            if ($f['name'] === '' || mb_strlen($f['name']) > 40) {
-                $catErr = 'Enter a category name (max 40 chars).';
+            if ($f['name'] === '' || mb_strlen($f['name']) > 40 || $f['icon_err'] !== '') {
+                $catErr = ($f['name'] === '' || mb_strlen($f['name']) > 40) ? 'Enter a category name (max 40 chars).' : $f['icon_err'];
                 $reopen = ['t' => 'category', 'id' => $isEdit ? (int)$_POST['update_category'] : 0, 'v' => ['name' => $f['name'], 'icon' => $f['icon'], 'sort' => $f['sort']]];
             } elseif ($isEdit) {
                 $pdo->prepare('UPDATE categories SET name=?, icon=?, sort_order=? WHERE id=?')->execute([$f['name'], $f['icon'], $f['sort'], (int)$_POST['update_category']]);
@@ -255,6 +265,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 stock_sync_if_auto($pdo, $pid);
             });
             go('products', 'Unsold items removed.');
+
+        } elseif (isset($_POST['move_up']) || isset($_POST['move_down'])) {
+            // Move one product up / down inside its category. The category is renumbered 10, 20, 30... first so equal numbers can never get stuck.
+            $pid = (int)($_POST['move_up'] ?? $_POST['move_down']); $up = isset($_POST['move_up']);
+            with_tx($pdo, function (PDO $pdo) use ($pid, $up) {
+                $st = $pdo->prepare('SELECT category_id FROM products WHERE id = ?'); $st->execute([$pid]);
+                $row = $st->fetch(); if (!$row) return;
+                $st = $pdo->prepare('SELECT id FROM products WHERE category_id <=> ? ORDER BY (sort_order = 0), sort_order, popular DESC, id DESC FOR UPDATE'); $st->execute([$row['category_id']]);
+                $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+                $i = array_search($pid, $ids, true); $j = $up ? $i - 1 : $i + 1;
+                if ($i === false || !isset($ids[$j])) return;
+                [$ids[$i], $ids[$j]] = [$ids[$j], $ids[$i]];
+                $u = $pdo->prepare('UPDATE products SET sort_order = ? WHERE id = ?');
+                foreach ($ids as $n => $id) $u->execute([($n + 1) * 10, $id]);
+            });
+            go('products', null, '#p' . $pid);
 
         } elseif (isset($_POST['toggle_product'])) {
             $pdo->prepare('UPDATE products SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_product']]);
@@ -478,13 +504,13 @@ $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $pendOrders = $pdo->query("SELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
-$products = $pdo->query('SELECT p.*, (SELECT COUNT(*) FROM stock_items si WHERE si.product_id = p.id AND si.order_id IS NULL) AS local_stock FROM products p ORDER BY p.id DESC')->fetchAll();
+$products = $pdo->query('SELECT p.*, (SELECT COUNT(*) FROM stock_items si WHERE si.product_id = p.id AND si.order_id IS NULL) AS local_stock FROM products p LEFT JOIN categories c ON c.id = p.category_id ORDER BY (c.id IS NULL), c.sort_order, c.id, (p.sort_order = 0), p.sort_order, p.popular DESC, p.id DESC')->fetchAll();   // same order the shop shows
 $cats = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS n FROM categories c ORDER BY c.sort_order, c.id')->fetchAll();
 $catById = []; foreach ($cats as $k) $catById[(int)$k['id']] = $k;
 $catOpts = function ($sel) use ($cats) {
     $h = '<option value="">— No category —</option>';
     foreach ($cats as $k) {
-        $h .= '<option value="' . (int)$k['id'] . '"' . ((int)$sel === (int)$k['id'] ? ' selected' : '') . '>' . e(trim(cat_icon_text($k['icon']) . ' ' . $k['name'])) . '</option>';
+        $h .= '<option value="' . (int)$k['id'] . '"' . ((int)$sel === (int)$k['id'] ? ' selected' : '') . '>' . e(trim(ico_text((string)$k['icon']) . ' ' . $k['name'])) . '</option>';
     }
     return $h;
 };
@@ -539,6 +565,7 @@ function icon_picker_html(string $pre, string $field, string $initial, bool $aut
       <div class="ipk-none" id="<?= e($pre) ?>None">No icon found. Use an emoji below.</div>
     </div>
     <div class="ipk-em"><label for="<?= e($pre) ?>Emoji">Or type an emoji <small>(optional)</small></label><input type="text" id="<?= e($pre) ?>Emoji" maxlength="8" placeholder="📧"></div>
+    <div class="ipk-up"><label for="<?= e($pre) ?>File">Or upload your own image <small>(PNG / JPG / WEBP, up to 1 MB · resized to a square icon automatically)</small></label><input type="file" name="<?= e($field) ?>_file" id="<?= e($pre) ?>File" accept="image/png,image/jpeg,image/webp,image/gif"></div>
   </div>
   <input type="hidden" name="<?= e($field) ?>" id="<?= e($pre) ?>Val" value="<?= e($initial) ?>">
 </div>
@@ -586,7 +613,16 @@ $lg = media_url('logo');
 <title><?= e($titles[$page][0]) ?> - Admin - <?= e(site_name()) ?></title>
 <link rel="stylesheet" href="/admin.css?v=<?= is_file(__DIR__ . '/admin.css') ? filemtime(__DIR__ . '/admin.css') : 1 ?>">
 <?= icon_tags() ?>
-<style>*{-webkit-tap-highlight-color:transparent}a:focus,button:focus,summary:focus{outline:0}</style>
+<style>*{-webkit-tap-highlight-color:transparent}a:focus,button:focus,summary:focus{outline:0}
+.ico-img{display:block;width:100%;height:100%;object-fit:contain;border-radius:inherit}
+.ipk-up{margin-top:12px;padding-top:12px;border-top:1px dashed #e5e2f3}.ipk-up input[type=file]{width:100%;margin-top:4px}
+.mvf{display:inline-flex;gap:4px;margin:0}
+.mvb{width:30px;height:30px;padding:0;border:1px solid #e5e2f3;border-radius:8px;background:#fff;color:#475569;font-size:11px;line-height:1;cursor:pointer}
+.mvb:hover:not(:disabled){border-color:#c7d2fe;background:#eef2ff;color:#3730a3}.mvb:disabled{opacity:.3;cursor:not-allowed}
+#ptable tbody tr{scroll-margin-top:80px}
+@keyframes mvhl{from{background:#eef2ff}to{background:transparent}}
+#ptable tbody tr.mvhl{animation:mvhl 1.8s ease-out}
+</style>
 </head><body class="adm">
 <?= app_icon_sprite() ?>
 <div class="shell">
@@ -677,20 +713,22 @@ $lg = media_url('logo');
   <div class="tb">
     <div class="srch grow"><?= ai('search') ?><input type="search" id="pq" placeholder="Search by name or ID" autocomplete="off"></div>
     <select id="pcat" style="width:auto;min-width:170px"><option value="">All categories</option><option value="0">Uncategorised</option>
-      <?php foreach ($cats as $k): ?><option value="<?= (int)$k['id'] ?>"><?= e(trim(cat_icon_text($k['icon']) . ' ' . $k['name'])) ?></option><?php endforeach; ?></select>
+      <?php foreach ($cats as $k): ?><option value="<?= (int)$k['id'] ?>"><?= e(trim(ico_text((string)$k['icon']) . ' ' . $k['name'])) ?></option><?php endforeach; ?></select>
   </div>
   <div class="tw"><table id="ptable" class="rt"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
-  <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
+  <?php $pcPrev = []; $pcLast = []; foreach ($products as $i0 => $p0) { $ck = (int)$p0['category_id']; $pcLast[$ck] = $p0['id']; }   // first / last product of each category (arrows are disabled there)
+  foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null; $ck = (int)$p['category_id']; $isFirst = !isset($pcPrev[$ck]); $pcPrev[$ck] = true; $isLast = $pcLast[$ck] === $p['id'];
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id'], 'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1)];
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'auto' => (int)$p['auto_delivery'], 'icon' => (string)($p['icon'] ?? ''), 'sort' => (int)$p['sort_order'], 'disc' => (float)$p['discount_pct'], 'sup' => $p['supplier_id'] === null ? '' : (int)$p['supplier_id'], 'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1)];
     $sj = ['id' => (int)$p['id'], 'name' => $p['name'], 'left' => (int)$p['local_stock']]; ?>
-  <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+  <tr id="p<?= (int)$p['id'] ?>" data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
+    <td><div class="pn"><span class="ci"><?= ico_html(product_icon_value($p, $k), '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if ($p['auto_delivery']): ?><span class="tag auto">&#9889; Instant</span><?php endif; ?><?php if ($p['supplier_id'] !== null): ?><span class="tag auto">&#128279; bulkmail #<?= (int)$p['supplier_id'] ?></span><?php endif; ?><small>ID <?= (int)$p['id'] ?> · order <?= (int)$p['sort_order'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?php if ((float)$p['discount_pct'] > 0): ?><s style="color:var(--mute);font-weight:500;font-size:.85em"><?= money($p['price']) ?></s> <?= money(final_price((float)$p['price'], (float)$p['discount_pct'])) ?> <span class="tag">-<?= pct_fmt((float)$p['discount_pct']) ?>%</span><?php else: ?><?= money($p['price']) ?><?php endif; ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) . ($p['supplier_id'] !== null ? ' <small>API ' . number_format((int)$p['sup_stock']) . ' + local ' . number_format((int)$p['local_stock']) . '</small>' : ($p['auto_delivery'] ? ' <small>unsold</small>' : '')) ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
+      <form method="post" class="inl mvf"><?= csrf_field() ?><button class="mvb" name="move_up" value="<?= (int)$p['id'] ?>" title="Move up (inside its category)" aria-label="Move up"<?= $isFirst ? ' disabled' : '' ?>>&#9650;</button><button class="mvb" name="move_down" value="<?= (int)$p['id'] ?>" title="Move down (inside its category)" aria-label="Move down"<?= $isLast ? ' disabled' : '' ?>>&#9660;</button></form>
       <button type="button" class="btn sm ghost" data-stock="<?= e(json_encode($sj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('plus') ?>Stock</button>
       <button type="button" class="btn sm ghost" data-edit-p="<?= e(json_encode($pj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('pencil') ?>Edit</button>
       <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="toggle_product" value="<?= (int)$p['id'] ?>"><?= $p['active'] ? 'Hide' : 'Show' ?></button></form>
@@ -701,7 +739,7 @@ $lg = media_url('logo');
   <div class="empty" id="pnone" <?= $products ? 'style="display:none"' : '' ?>>No products yet. Click “Add product” to create the first one.</div>
 </div>
 
-<dialog id="pdlg"><form method="post" class="dlg"><?= csrf_field() ?>
+<dialog id="pdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
   <div class="dlg-h"><h3 id="pTitle">Add product</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($prodErr): ?><div class="err" style="margin-top:12px"><?= e($prodErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="pname" id="p_name" maxlength="80" required>
@@ -723,7 +761,9 @@ $lg = media_url('logo');
   <label>Discount % <small>(optional, shown to everyone as a sale · 0 = none)</small></label><input type="number" name="pdisc" id="p_disc" min="0" max="99" step="0.01" inputmode="decimal" placeholder="e.g. 20">
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
-  <label>App icon <small>(pick one, or leave Automatic - it follows the product name)</small></label>
+  <label>Display order <small>(smaller number shows first inside its category · blank on a new product = last · or use the ▲▼ buttons in the list)</small></label>
+  <input type="number" name="psort" id="p_sort" step="1" inputmode="numeric" placeholder="e.g. 10">
+  <label>Icon <small>(pick an app icon, type an emoji, upload your own image, or leave Automatic - it follows the product name)</small></label>
   <style>
     .ipk-q{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
     .ipk-qb{width:46px;height:46px;padding:0;border:1.5px solid #e5e2f3;border-radius:12px;background:#fff;cursor:pointer;display:grid;place-items:center}
@@ -768,7 +808,7 @@ $lg = media_url('logo');
   <?php foreach ($cats as $k):
     $cj = ['id' => (int)$k['id'], 'name' => $k['name'], 'icon' => $k['icon'], 'sort' => (int)$k['sort_order']]; ?>
   <tr>
-    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'], '1em') ?></span><div><b><?= e($k['name']) ?></b><small><?= e(cat_icon_label($k['icon'])) ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= ico_html((string)$k['icon'], '1em') ?></span><div><b><?= e($k['name']) ?></b><small><?= e(ico_label((string)$k['icon'])) ?></small></div></div></td>
     <td class="hm"><?= (int)$k['n'] ?></td><td class="hm"><?= (int)$k['sort_order'] ?></td>
     <td><span class="badge <?= $k['active'] ? 'on' : 'off' ?>"><?= $k['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><form method="post" class="acts"><?= csrf_field() ?>
@@ -780,11 +820,11 @@ $lg = media_url('logo');
   <?php endforeach; if (!$cats): ?><tr><td colspan="5">No categories yet. Click “Add category”, then assign products to it.</td></tr><?php endif; ?></tbody></table></div>
 </div>
 
-<dialog id="cdlg"><form method="post" class="dlg"><?= csrf_field() ?>
+<dialog id="cdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
   <div class="dlg-h"><h3 id="cTitle">Add category</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($catErr): ?><div class="err" style="margin-top:12px"><?= e($catErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="cname" id="c_name" maxlength="40" required placeholder="e.g. Gmail Account">
-  <label>Icon</label>
+  <label>Icon <small>(pick an app icon, type an emoji, or upload your own image)</small></label>
   <?= icon_picker_html('ipk', 'cicon', 'app:shop', false) ?>
   <label>Sort order <small>(smaller shows first)</small></label><input type="number" name="csort" id="c_sort" value="0">
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="cSave" name="add_category" value="1">Save category</button></div>
@@ -1066,13 +1106,16 @@ $lg = media_url('logo');
   function picker(pre,defVal,guess){
     var hid=$('#'+pre+'Val'), cur=$('#'+pre+'Cur'), nm=$('#'+pre+'Name'), pop=$('#'+pre+'Pop'), btn=$('#'+pre+'Btn'), em=$('#'+pre+'Emoji'),
         q=$('#'+pre+'Q'), list=$('#'+pre+'List'), none=$('#'+pre+'None'), auto=$('#'+pre+'Auto'), opts=$$('.ipk-o',list);
+    var fi=$('#'+pre+'File'), IMG='width:32px;height:32px;object-fit:contain;border-radius:8px;display:block';
     function setIcon(v){
       v=(v===undefined||v===null)?defVal:String(v); hid.value=v;
+      if(fi) fi.value='';   // choosing anything else drops a picked file
       opts.forEach(function(o){ o.classList.toggle('sel',o.dataset.v===v); });
       function show(opt){
         cur.innerHTML=opt.querySelector('svg').outerHTML.replace(/ai[0-9a-f]+_\d+[gs]/g,function(m){return m+pre;});
         var sv=cur.firstChild; sv.setAttribute('width','32'); sv.setAttribute('height','32');
       }
+      if(/^img:[a-f0-9]{12}$/.test(v)){ cur.innerHTML='<img alt="" src="/icon.php?k=ic_'+v.slice(4)+'" style="'+IMG+'">'; nm.textContent='Custom image'; em.value=''; return; }
       if(v===''){
         em.value='';
         var g=guess?guess():'', go=g?opts.filter(function(o){return o.dataset.v==='app:'+g;})[0]:null;
@@ -1097,8 +1140,14 @@ $lg = media_url('logo');
     opts.forEach(function(o){ o.addEventListener('click',function(){ setIcon(o.dataset.v); toggle(false); }); });
     if(auto) auto.addEventListener('click',function(){ setIcon(''); toggle(false); });
     em.addEventListener('input',function(){ var v=em.value.trim(); setIcon(v?v:defVal); });
+    if(fi) fi.addEventListener('change',function(){
+      var f=fi.files&&fi.files[0]; if(!f) return;
+      if(f.size>1048576){ alert('That image is larger than 1 MB. Please choose a smaller one.'); fi.value=''; return; }
+      cur.innerHTML='<img alt="" src="'+URL.createObjectURL(f)+'" style="'+IMG+'">'; nm.textContent='New image'; em.value='';
+      opts.forEach(function(o){ o.classList.remove('sel'); }); toggle(false);
+    });
     setIcon(hid.value===''?defVal:hid.value);
-    return {set:setIcon, close:function(){ toggle(false); }, refresh:function(){ if(hid.value==='') setIcon(''); }};
+    return {set:setIcon, close:function(){ toggle(false); }, refresh:function(){ if(hid.value==='' && !(fi&&fi.files&&fi.files.length)) setIcon(''); }};
   }
 
   /* ---------- products ---------- */
@@ -1159,6 +1208,7 @@ $lg = media_url('logo');
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_disc').value=+v.disc>0?v.disc:'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
+      $('#p_sort').value=(v.sort===null||v.sort===undefined)?'':v.sort;
       $('#p_sup').value=v.sup||''; origSup=String(v.sup||''); supNote.innerHTML=supNote0;
       $('#p_an').checked = (v.an===undefined||v.an===null) ? !id : !!+v.an; $('#p_ad').checked = (v.ad===undefined||v.ad===null) ? !id : !!+v.ad; $('#p_sd').checked = (v.sd===undefined||v.sd===null) ? true : !!+v.sd;   // new product: auto-sync on by default; old products keep what they had
       $('#p_auto').checked=!!+v.auto; autoSync(); pp.set(v.icon||''); pp.close(); quickSync(); renderDescPrev();
@@ -1166,7 +1216,7 @@ $lg = media_url('logo');
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup,an:v.an,ad:v.ad,sd:v.sd}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,sort:v.sort,pop:v.pop,auto:v.auto,icon:v.icon,disc:v.disc,sup:v.sup,an:v.an,ad:v.ad,sd:v.sd}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     /* stock upload dialog */
@@ -1187,7 +1237,12 @@ $lg = media_url('logo');
       rows.forEach(function(r){ var ok=(!t||r.dataset.s.indexOf(t)>-1)&&(cv===''||r.dataset.c===cv); r.style.display=ok?'':'none'; if(ok)n++; });
       none.textContent='No products match your search.'; none.style.display = (rows.length && !n) ? '' : 'none';
     };
-    q.addEventListener('input',filt); c.addEventListener('change',filt);
+    q.addEventListener('input',function(){ filt(); try{ sessionStorage.setItem('adm_pq',q.value); }catch(e){} });
+    c.addEventListener('change',function(){ filt(); try{ sessionStorage.setItem('adm_pcat',c.value); }catch(e){} });
+    // After moving a product (page reloads) keep the same category / search and jump back to the moved row.
+    try{ var sc=sessionStorage.getItem('adm_pcat'), sq=sessionStorage.getItem('adm_pq'); if(sc!==null && $$('option',c).some(function(o){return o.value===sc;})) c.value=sc; if(sq) q.value=sq; }catch(e){}
+    filt();
+    if(location.hash && /^#p\d+$/.test(location.hash)){ var mt=$(location.hash); if(mt){ mt.scrollIntoView({block:'center'}); mt.classList.add('mvhl'); } }
   }
 
   /* ---------- notice preview ---------- */

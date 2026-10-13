@@ -1,15 +1,16 @@
 <?php
-/* Serves an icon image uploaded from Admin > Products / Categories (stored in the media table). */
+// Serves the custom icon images uploaded in Admin > Products / Categories. Keys are content hashes, so they can be cached forever.
 require __DIR__ . '/lib.php';
-session_write_close();                        // no session lock / cookie needed for an image
+session_write_close();
 $k = (string)($_GET['k'] ?? '');
-if (!preg_match('/^ic[a-f0-9]{8}$/', $k)) { http_response_code(404); exit; }
+if (!preg_match('/^ic_[a-f0-9]{12}$/', $k)) { http_response_code(404); exit; }
 $st = db()->prepare('SELECT mime, data FROM media WHERE k = ?');
 $st->execute([$k]);
 $r = $st->fetch();
-if (!$r) { http_response_code(404); exit; }
+if (!$r || !in_array($r['mime'], ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) { http_response_code(404); exit; }
 header_remove('Set-Cookie'); header_remove('Pragma'); header_remove('Expires');
 header('Content-Type: ' . $r['mime']);
+header('Cache-Control: public, max-age=31536000, immutable');
 header('X-Content-Type-Options: nosniff');
-header('Cache-Control: public, max-age=31536000, immutable');   // every upload gets a new id, so it can be cached forever
+header('Content-Length: ' . strlen($r['data']));
 echo $r['data'];

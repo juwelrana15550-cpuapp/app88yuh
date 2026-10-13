@@ -16,7 +16,7 @@ if (isset($_GET['cur']) && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && in
 require_once __DIR__ . '/app_icons.php';
 
 const SITE_NAME = 'MySite';
-const SCHEMA_VERSION = '15';
+const SCHEMA_VERSION = '16';
 require_once __DIR__ . '/supplier.php';   // supplier API (Admin > API Management)
 maintenance_gate();   // shows the maintenance page to visitors while the admin has maintenance mode ON (admin.php is never blocked)
 
@@ -173,6 +173,11 @@ function migrate(PDO $pdo): void {
         try { $pdo->exec($sql); }
         catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
     }
+    // Product display order (smaller shows first). Added once; existing products start in id order so nothing jumps around.
+    try {
+        $pdo->exec("ALTER TABLE products ADD COLUMN sort_order INT NOT NULL DEFAULT 0");
+        $pdo->exec("UPDATE products SET sort_order = id * 10");
+    } catch (PDOException $ex) { if ((int)($ex->errorInfo[1] ?? 0) !== 1060) throw $ex; }
     // One-time: linked products used to keep the API number in `stock`; copy it to sup_stock (no local items exist yet at this point).
     try { $pdo->exec('UPDATE products SET sup_stock = stock WHERE supplier_id IS NOT NULL AND sup_stock = 0 AND stock > 0'); } catch (Throwable $ex) {}
     // One-time default categories, added only if the shop has none yet. Rename / hide / delete them any time in Admin > Categories.
@@ -289,6 +294,57 @@ function logo_html(string $fallback): string {
 
 function e($s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
+/* ---------- custom image icons (categories / products) ----------
+ * Stored in the `media` table under the key "ic_<12 hex>" and referenced as "img:<12 hex>" (16 chars, fits the icon columns).
+ * Served by /icon.php. Every upload is re-drawn as a 128x128 PNG (when GD is available) so all custom icons look the same size. */
+const ICON_PX = 128;
+function icon_is_img(string $v): bool { return (bool)preg_match('/^img:[a-f0-9]{12}$/', $v); }
+function icon_img_exists(string $v): bool {
+    if (!icon_is_img($v)) return false;
+    $st = db()->prepare('SELECT 1 FROM media WHERE k = ?'); $st->execute(['ic_' . substr($v, 4)]);
+    return (bool)$st->fetchColumn();
+}
+/** Takes one $_FILES entry. Returns [icon value or '' when nothing was uploaded, error message or '']. */
+function icon_save_upload(?array $f): array {
+    if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) return ['', ''];
+    if ($f['error'] !== UPLOAD_ERR_OK || $f['size'] > 1048576) return ['', 'Icon image is too large (max 1 MB).'];
+    $info = @getimagesize($f['tmp_name']);
+    if (!$info || !in_array($info['mime'], ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true)) return ['', 'Icon must be a PNG, JPG, WEBP or GIF image.'];
+    if ($info[0] * $info[1] > 25000000) return ['', 'Icon image has too many pixels. Please use a smaller image.'];
+    $bin = file_get_contents($f['tmp_name']); $mime = $info['mime'];
+    if (function_exists('imagecreatefromstring') && function_exists('imagepng') && ($src = @imagecreatefromstring($bin))) {
+        $w = imagesx($src); $h = imagesy($src); $s = ICON_PX;
+        $dst = imagecreatetruecolor($s, $s);
+        imagealphablending($dst, false); imagesavealpha($dst, true);
+        imagefill($dst, 0, 0, imagecolorallocatealpha($dst, 0, 0, 0, 127));
+        $r = min($s / $w, $s / $h); $nw = max(1, (int)round($w * $r)); $nh = max(1, (int)round($h * $r));
+        imagecopyresampled($dst, $src, (int)(($s - $nw) / 2), (int)(($s - $nh) / 2), 0, 0, $nw, $nh, $w, $h);   // whole image kept, centred on a transparent square
+        ob_start(); imagepng($dst, null, 6); $png = ob_get_clean();
+        if ($png) { $bin = $png; $mime = 'image/png'; }
+    }
+    $h12 = substr(sha1($bin), 0, 12);
+    $st = db()->prepare('REPLACE INTO media (k, mime, data) VALUES (?,?,?)');
+    $st->bindValue(1, 'ic_' . $h12); $st->bindValue(2, $mime); $st->bindValue(3, $bin, PDO::PARAM_LOB);
+    $st->execute();
+    return ['img:' . $h12, ''];
+}
+/** Removes uploaded icon images that no product or category uses any more. */
+function icon_gc(PDO $pdo): void {
+    try {
+        $pdo->exec("DELETE FROM media WHERE k LIKE 'ic\\_%' AND CONCAT('img:', SUBSTRING(k, 4)) NOT IN (SELECT icon FROM products) AND CONCAT('img:', SUBSTRING(k, 4)) NOT IN (SELECT icon FROM categories)");
+    } catch (Throwable $ex) { error_log('icon_gc: ' . $ex->getMessage()); }
+}
+/** Icon markup: custom image, app icon (SVG) or emoji. $size = CSS size such as '14px'; null = fill the parent / default size. */
+function ico_html(string $v, ?string $size = null): string {
+    if (icon_is_img($v)) {
+        $st = $size !== null ? ' style="width:' . e($size) . ';height:' . e($size) . '"' : '';
+        return '<img class="ico-img" src="/icon.php?k=ic_' . substr($v, 4) . '" alt="" loading="lazy" decoding="async"' . $st . '>';
+    }
+    return $size === null ? cat_icon($v) : cat_icon($v, $size);
+}
+function ico_text(string $v): string { return icon_is_img($v) ? '🖼️' : cat_icon_text($v); }
+function ico_label(string $v): string { return icon_is_img($v) ? 'Custom image' : cat_icon_label($v); }
+
 /** style.css link with a version, so browsers never keep serving an old stylesheet. */
 function css_link(): string {
     $f = __DIR__ . '/style.css';
@@ -314,7 +370,7 @@ function maintenance_gate(): void {
     if (PHP_SAPI === 'cli') return;
     $script = basename((string)($_SERVER['SCRIPT_NAME'] ?? ''));
     // Add any endpoint that must keep working during maintenance (e.g. an OTP / payment webhook) to this list.
-    if (in_array($script, ['admin.php', 'media.php', 'manifest.php'], true)) return;
+    if (in_array($script, ['admin.php', 'media.php', 'icon.php', 'manifest.php'], true)) return;
     if (!empty($_SESSION['admin'])) return;
     if (setting('maintenance_on', '0') !== '1') return;
     $msg = setting('maintenance_msg', 'We are doing some scheduled maintenance. Please check back soon.');
@@ -623,9 +679,20 @@ function catalog_url(array $x): string {
 /** Product list (search-result line + groups of cards). Also returned on its own to the page's AJAX category switcher. */
 function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
     $byId = []; foreach ($cats as $k) $byId[(int)$k['id']] = $k;
-    $groups = []; foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
+    // Order comes from dashboard.php's query: category order, then the admin's product order (Admin > Products).
+    $rows = array_values($rows);
+    $groups = []; foreach ($cats as $k) $groups[(int)$k['id']] = [];
+    foreach ($rows as $p) $groups[(int)($p['category_id'] ?? 0)][] = $p;
+    $groups = array_filter($groups);
+    if (isset($groups[0])) { $z = $groups[0]; unset($groups[0]); $groups[0] = $z; }   // uncategorised last
+    // Slots that only exist when at least one card needs them, so every card in the list keeps exactly the same layout.
+    $anyBody = false; $anyInst = false;
+    foreach ($rows as $p) {
+        if (trim((string)$p['description']) !== '' || (!empty($p['sup_domain']) && (int)($p['sup_show_dom'] ?? 1) === 1)) $anyBody = true;
+        if (!empty($p['auto_delivery'])) $anyInst = true;
+    }
     $ud = user_disc_map((int)($_SESSION['uid'] ?? 0));
-    $card = function (array $p) use ($byId, $c, $q, $ud) {
+    $card = function (array $p) use ($byId, $c, $q, $ud, $anyBody, $anyInst) {
         $k = $byId[(int)($p['category_id'] ?? 0)] ?? null;
         $icon = product_icon_value($p, $k);
         $stock = $p['stock'] === null ? null : (int)$p['stock'];
@@ -635,32 +702,36 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
         else { $sl = 'In Stock · ' . number_format($stock) . ' pcs'; $sc = ''; }
         $out = $stock !== null && $stock <= 0;
         $pct = discount_pct($p, $ud); $fin = final_price((float)$p['price'], $pct);
-        $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied ?>
+        $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied
+        $domOn = !empty($p['sup_domain']) && (int)($p['sup_show_dom'] ?? 1) === 1;
+        // One line = one bullet. 2+ non-empty lines render as a checklist; a single line stays plain text.
+        $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', (string)$p['description'])), function ($l) { return $l !== ''; })); ?>
     <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
-      <div class="pc-h"><span class="pc-ic"><?= cat_icon($icon) ?></span><div class="pc-t"><h4><?= e($p['name']) ?></h4><?php if ($k): ?><span class="pc-c"><?= e($k['name']) ?></span><?php endif; ?></div></div>
-      <?php if ($p['description']):
-          // One line = one bullet. 2+ non-empty lines render as a checklist (matches the plans section on the homepage); a single line stays plain text.
-          $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $p['description'])), function ($l) { return $l !== ''; }));
-      ?>
+      <div class="pc-h"><span class="pc-ic"><?= ico_html($icon) ?></span><div class="pc-t"><h4 title="<?= e($p['name']) ?>"><?= e($p['name']) ?></h4><span class="pc-c"><?= $k ? e($k['name']) : '&nbsp;' ?></span></div></div>
+      <?php if ($anyBody): ?>
+      <div class="pc-bd<?= $domOn ? ' hd' : '' ?>">
         <?php if (count($descLines) > 1): ?>
-          <ul class="pc-dl"><?php foreach (array_slice($descLines, 0, 6) as $dl): ?><li><?= e($dl) ?></li><?php endforeach; ?></ul>
-        <?php else: ?>
-          <p class="pc-d"><?= e($descLines[0] ?? $p['description']) ?></p>
+          <ul class="pc-dl"><?php foreach (array_slice($descLines, 0, $domOn ? 3 : 4) as $dl): ?><li title="<?= e($dl) ?>"><?= e($dl) ?></li><?php endforeach; ?></ul>
+        <?php elseif ($descLines): ?>
+          <p class="pc-d" title="<?= e($descLines[0]) ?>"><?= e($descLines[0]) ?></p>
         <?php endif; ?>
+        <?php if ($domOn): ?><div class="pc-dom" title="<?= e($p['sup_domain']) ?>">Possible Domain (<?= e($p['sup_domain']) ?>)</div><?php endif; ?>
+      </div>
       <?php endif; ?>
-      <?php if (!empty($p['sup_domain']) && (int)($p['sup_show_dom'] ?? 1) === 1): ?><div class="pc-dom" style="margin:0 0 8px;font:600 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b45309;word-break:break-all">Possible Domain (<?= e($p['sup_domain']) ?>)</div><?php endif; ?>
+      <div class="pc-ft">
       <div class="pc-price"><?php if ($pct > 0): ?><span class="pc-old"><?= money($p['price']) ?></span><?= money($fin) ?><?php else: ?><?= money($p['price']) ?><?php endif; ?><?php if ($p['unit'] !== ''): ?><small> /<?= e($p['unit']) ?></small><?php endif; ?><?php if ($pct > 0): ?><em class="pc-off<?= $mine ? ' mine' : '' ?>">-<?= pct_fmt($pct) ?>%<?= $mine ? ' for you' : '' ?></em><?php endif; ?></div>
       <div class="sx-meta"><span class="sx-stk <?= $sc ?>"><?= e($sl) ?></span><span class="sx-pid">ID: <?= (int)$p['id'] ?></span></div>
-      <?php if (!empty($p['auto_delivery'])): ?><div class="inst" style="margin:0 0 8px;color:#0f9d6b;font-weight:600;font-size:12.5px">&#9889; Instant delivery</div><?php endif; ?>
+      <?php if (!empty($p['auto_delivery'])): ?><div class="inst">&#9889; Instant delivery</div><?php elseif ($anyInst): ?><div class="inst ph" aria-hidden="true">&nbsp;</div><?php endif; ?>
       <form method="post" action="/dashboard.php" class="pc-buy" style="margin:0"><?= csrf_field() ?><input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>"><input type="hidden" name="qty" value="1"><input type="hidden" name="c" value="<?= $c ?: '' ?>"><input type="hidden" name="q" value="<?= e($q) ?>">
         <button class="btn buy" <?= $out ? 'disabled' : '' ?> onclick="return window.sxBuy ? sxBuy(this,event) : true" data-buy data-id="<?= (int)$p['id'] ?>" data-name="<?= e($p['name']) ?>" data-price="<?= e(number_format($fin, 2, '.', '')) ?>" data-old="<?= $pct > 0 ? e(number_format((float)$p['price'], 2, '.', '')) : '' ?>" data-unit="<?= e($p['unit']) ?>" data-stock="<?= $stock === null ? '' : $stock ?>" data-auto="<?= !empty($p['auto_delivery']) ? 1 : 0 ?>"><?= icon('cart') ?><span><?= $out ? 'Sold out' : 'Buy Now' ?></span></button>
       </form>
+      </div>
     </div>
 <?php }; ?>
 <?php if ($q !== ''): ?><p class="res"><?= count($rows) ?> result<?= count($rows) === 1 ? '' : 's' ?> for “<?= e($q) ?>” <a href="<?= e(catalog_url(['c' => $c])) ?>">Clear</a></p><?php endif; ?>
 <?php foreach ($groups as $cid => $list): $k = $byId[$cid] ?? null; ?>
-  <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= cat_icon($k['icon'] ?? '') ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
+  <?php if (!$c): ?><div class="sec-h"><span class="ci"><?= ico_html((string)($k['icon'] ?? '')) ?></span><b><?= e($k['name'] ?? 'Other') ?></b><em><?= count($list) ?></em></div><?php endif; ?>
   <div class="catalog"><?php foreach ($list as $p) $card($p); ?></div>
 <?php endforeach; ?>
 <?php if (!$rows): ?><div class="card empty"><div class="ei">🔎</div><b>No products found</b><p><?= $q !== '' ? 'Try a different search or category.' : 'Products will appear here once they are added.' ?></p></div><?php endif; ?>
@@ -726,6 +797,32 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 #cat-res{scroll-margin-top:72px}
 #cat-res{transition:opacity .2s ease}
 #cat-res.busy{opacity:.8;pointer-events:none}
+/* ---- Uniform product cards: every card has the same structure and the same height ---- */
+.catalog{--rh:22px;align-items:stretch}
+@media(max-width:699px){.catalog{--rh:20px}}
+.catalog .pc{display:flex;flex-direction:column;height:100%;min-width:0;box-sizing:border-box}
+.catalog .pc-h{flex:none;display:flex;align-items:center;min-width:0}
+.catalog .pc-ic{flex:none;overflow:hidden}
+.catalog .pc-t{min-width:0;flex:1}
+.catalog .pc h4{margin:0;line-height:1.28!important;min-height:2.56em;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+.catalog .pc-c{display:block;min-height:1.4em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.catalog .pc-bd{flex:none;height:calc(var(--rh)*4);overflow:hidden;min-width:0}
+.catalog .pc-d{margin:0!important;line-height:1.5!important;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;overflow-wrap:anywhere}
+.catalog .pc-bd.hd .pc-d{-webkit-line-clamp:3}
+.catalog .pc-dl{margin:0!important;padding:0;list-style:none}
+.catalog .pc-dl li{position:relative;box-sizing:border-box;height:var(--rh);line-height:calc(var(--rh) - 1px)!important;padding:0 0 0 18px!important;border-bottom:1px solid #eef0f4!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.catalog .pc-dl li:last-child{border-bottom:0!important}
+.catalog .pc-dl li:before{top:0!important;line-height:calc(var(--rh) - 1px)!important}
+.catalog .pc-dom{margin:0!important;height:var(--rh);line-height:var(--rh)!important;font:600 12px/var(--rh) ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b45309;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.catalog .pc-ft{margin-top:auto;display:flex;flex-direction:column;gap:8px;min-width:0}
+.catalog .pc-price{display:flex;align-items:center;flex-wrap:wrap;gap:0 6px;min-height:34px;line-height:1.2}
+.catalog .sx-meta{margin:0!important}
+.catalog .inst{margin:0!important;min-height:1.3em;color:#0f9d6b;font-weight:600;font-size:12.5px}
+.catalog .inst.ph{visibility:hidden}
+.catalog .pc .btn.buy{width:100%;min-height:40px;display:flex;align-items:center;justify-content:center}
+/* Custom (uploaded) image icons */
+.ico-img{display:block;width:100%;height:100%;object-fit:contain;border-radius:inherit}
+.bx-ic .ico-img{width:36px;height:36px;border-radius:9px}
 /* Buy Now: the icon and text inside the button never catch the tap themselves - every tap lands on the button, so the label works exactly like the rest of it */
 .btn.buy>*{pointer-events:none}
 /* Product card: stock badge + ID */
@@ -786,7 +883,7 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 <div class="sx-cats" id="catRow">
   <a class="sx-cat sx-all <?= $c ? '' : 'on' ?>" data-c="0" title="All (<?= (int)$total ?>)" href="<?= e(catalog_url(['q' => $q])) ?>"><b>All</b></a>
   <?php foreach ($cats as $k): ?>
-  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= cat_icon($k['icon'], '14px') ?></span><b><?= e($k['name']) ?></b></a>
+  <a class="sx-cat <?= $c === (int)$k['id'] ? 'on' : '' ?>" data-c="<?= (int)$k['id'] ?>" title="<?= e($k['name']) ?> (<?= (int)$k['n'] ?>)" href="<?= e(catalog_url(['c' => (int)$k['id'], 'q' => $q])) ?>"><span class="sx-ci"><?= ico_html((string)$k['icon'], '14px') ?></span><b><?= e($k['name']) ?></b></a>
   <?php endforeach; ?>
 </div>
 <div id="cat-res" aria-live="polite"><?php catalog_list_html($cats, $rows, $c, $q); ?></div>
