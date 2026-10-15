@@ -1,14 +1,16 @@
 <?php require __DIR__ . '/lib.php';
 require __DIR__ . '/stock_import.php';
+require __DIR__ . '/payment_methods.php';
 $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever currency the browser picked on the shop
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
 $err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $noticeErr = ''; $apiErr = '';
+$pmErr = ''; $pmDlgErr = ''; $pmReopen = null;   // payment methods page: settings error / dialog error / dialog values to re-open
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'api', 'announce', 'settings'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'api', 'announce', 'settings', 'payments'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null, string $extra = ''): void {
@@ -442,6 +444,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
             go('users', 'User deleted.');
 
+        } elseif (isset($_POST['save_dep_settings'])) {
+            $page = 'payments';
+            $dMin = (float)str_replace(',', '', (string)($_POST['dep_min'] ?? ''));
+            $dMax = (float)str_replace(',', '', (string)($_POST['dep_max'] ?? ''));
+            $dPend = (int)($_POST['dep_pending'] ?? 0);
+            $dChips = [];
+            foreach (explode(',', (string)($_POST['dep_chips'] ?? '')) as $c) { $c = (int)trim($c); if ($c >= 1 && $c <= 10000000 && !in_array($c, $dChips, true)) $dChips[] = $c; }
+            if ($dMin < 1 || $dMin > 10000000) $pmErr = 'Minimum deposit must be at least 1.';
+            elseif ($dMax < $dMin || $dMax > 100000000) $pmErr = 'Maximum deposit must be bigger than the minimum.';
+            elseif ($dPend < 1 || $dPend > 50) $pmErr = 'Pending requests per user must be between 1 and 50.';
+            else {
+                save_setting('dep_on', empty($_POST['dep_on']) ? '0' : '1');
+                save_setting('dep_off_msg', mb_substr(trim((string)($_POST['dep_off_msg'] ?? '')), 0, 200));
+                save_setting('dep_min', (string)$dMin);
+                save_setting('dep_max', (string)$dMax);
+                save_setting('dep_max_pending', (string)$dPend);
+                save_setting('dep_chips', implode(',', array_slice($dChips, 0, 8)));
+                save_setting('dep_notice', mb_substr(trim((string)($_POST['dep_notice'] ?? '')), 0, 300));
+                go('payments', 'Deposit settings saved.');
+            }
+
+        } elseif (isset($_POST['pm_toggle'])) {
+            pm_toggle((string)$_POST['pm_toggle']);
+            go('payments');
+
+        } elseif (isset($_POST['pm_move'])) {
+            pm_move((string)$_POST['pm_move'], ($_POST['dir'] ?? '') === 'up' ? -1 : 1);
+            go('payments');
+
+        } elseif (isset($_POST['pm_delete'])) {
+            pm_delete((string)$_POST['pm_delete']);
+            go('payments', 'Payment method deleted. Old deposits stay in the history.');
+
+        } elseif (isset($_POST['pm_save'])) {
+            $page = 'payments';
+            $editId = trim((string)($_POST['pm_id'] ?? '')); $editId = $editId === '' ? null : $editId;
+            if ($editId !== null && !isset(pm_all()[$editId])) { flash('err', 'That payment method no longer exists.'); go('payments'); }
+            [$pf, $perr] = pm_fields_from_post($editId);
+            if ($perr === '') {
+                $pid = pm_store($editId, $pf);
+                if (!empty($_POST['pm_remove_logo'])) pm_remove_logo($pid);
+                $lerr = pm_save_logo($pid, $_FILES['pm_logo'] ?? null);
+                if ($lerr !== '') { flash('err', 'Saved, but the logo was not updated: ' . $lerr); go('payments'); }
+                go('payments', $editId === null ? 'Payment method added.' : 'Payment method saved.');
+            }
+            $pmDlgErr = $perr;
+            $pmReopen = [
+                'id' => (string)$editId, 'name' => (string)($_POST['pm_name'] ?? ''), 'acct' => (string)($_POST['pm_acct'] ?? ''), 'acct_label' => (string)($_POST['pm_acct_label'] ?? ''),
+                'sub' => (string)($_POST['pm_sub'] ?? ''), 'ussd' => (string)($_POST['pm_ussd'] ?? ''), 'tid_label' => (string)($_POST['pm_tid_label'] ?? ''),
+                'color' => (string)($_POST['pm_color'] ?? '#5b4bff'), 'usd' => empty($_POST['pm_usd']) ? 0 : 1, 'enabled' => empty($_POST['pm_enabled']) ? 0 : 1,
+                'notice' => (string)($_POST['pm_notice'] ?? ''), 'min' => (string)($_POST['pm_min'] ?? ''), 'max' => (string)($_POST['pm_max'] ?? ''),
+                'fee' => (string)($_POST['pm_fee'] ?? ''), 'bonus' => (string)($_POST['pm_bonus'] ?? ''), 'steps' => (string)($_POST['pm_steps'] ?? ''),
+            ];
+
         } elseif (isset($_POST['id'], $_POST['action'])) {
             with_tx($pdo, function (PDO $pdo) use ($bonus) {
                 $st = $pdo->prepare("SELECT * FROM deposits WHERE id = ? AND status = 'pending' FOR UPDATE");
@@ -548,6 +604,43 @@ if ($page === 'users') {
 }
 $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status <> 'pending' ORDER BY d.id DESC LIMIT 30")->fetchAll();
 
+/* ---- payment methods / deposits page data ---- */
+$pmAll = in_array($page, ['deposits', 'payments'], true) ? pm_all() : [];
+$pmNone = ['id' => '', 'name' => '', 'color' => '#7a7f99'];
+$pmOf = function (string $note) use ($pmAll) { foreach ($pmAll as $m) if (strpos($note, $m['name'] . ' |') === 0) return $m; return null; };
+$trxOf = function (string $note): string { $p = explode(' | ', $note); return isset($p[1]) ? preg_replace('/^[^:]+:\s*/', '', $p[1]) : ''; };
+$dStats = null; $dq = ''; $dst = ''; $dm = '';
+if ($page === 'deposits') {
+    $dq = mb_substr(trim((string)($_GET['q'] ?? '')), 0, 80);
+    $dst = in_array($_GET['st'] ?? '', ['approved', 'rejected'], true) ? $_GET['st'] : '';
+    $dmq = $_GET['m'] ?? ''; $dm = (is_string($dmq) && isset($pmAll[$dmq])) ? $dmq : '';
+    $conds = ["d.status <> 'pending'"]; $args = [];
+    if ($dst !== '') { $conds[] = 'd.status = ?'; $args[] = $dst; }
+    if ($dm !== '') { $conds[] = 'd.note LIKE ?'; $args[] = addcslashes($pmAll[$dm]['name'], '%_\\') . ' |%'; }
+    if ($dq !== '') { $like = '%' . addcslashes($dq, '%_\\') . '%'; $conds[] = '(u.email LIKE ? OR d.note LIKE ? OR d.id = ?)'; array_push($args, $like, $like, (int)$dq); }
+    $st = $pdo->prepare('SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE ' . implode(' AND ', $conds) . ' ORDER BY d.id DESC LIMIT 100');
+    $st->execute($args); $hist = $st->fetchAll();
+    $dStats = [
+        'pend_n'   => count($rows),
+        'pend_sum' => (float)array_sum(array_column($rows, 'amount')),
+        'today'    => (float)$pdo->query("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status='approved' AND created_at >= CURDATE()")->fetchColumn(),
+        'month'    => (float)$pdo->query("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status='approved' AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01')")->fetchColumn(),
+    ];
+}
+$pmStats = [];
+if ($page === 'payments') {
+    $stq = $pdo->prepare('SELECT status, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deposits WHERE note LIKE ? GROUP BY status');
+    foreach ($pmAll as $k => $m) {
+        $x = ['ok_n' => 0, 'ok_sum' => 0.0, 'pend' => 0];
+        $stq->execute([addcslashes($m['name'], '%_\\') . ' |%']);
+        foreach ($stq->fetchAll() as $r) {
+            if ($r['status'] === 'approved') { $x['ok_n'] = (int)$r['n']; $x['ok_sum'] = (float)$r['s']; }
+            if ($r['status'] === 'pending') $x['pend'] = (int)$r['n'];
+        }
+        $pmStats[$k] = $x;
+    }
+}
+
 /** Icon picker (searchable app icons + emoji). $auto adds an "Automatic" choice (stored as an empty value). */
 function icon_picker_html(string $pre, string $field, string $initial, bool $auto): string {
     ob_start(); ?>
@@ -581,6 +674,7 @@ function ai(string $n): string {
         'pencil'  => '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
         'trash'   => '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
         'chev'    => '<path d="m6 9 6 6 6-6"/>',
+        'card'    => '<rect width="20" height="14" x="2" y="5" rx="2"/><path d="M2 10h20"/>',
         'ext'     => '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     ];
     return isset($x[$n]) ? '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . $x[$n] . '</svg>' : icon($n);
@@ -588,7 +682,7 @@ function ai(string $n): string {
 
 $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
-    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
+    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']], ['payments', 'Payment methods', 'card', 0]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
     'Manage'  => [['users', 'Users', 'users', 0], ['api', 'API Management', 'key', 0], ['announce', 'Notice & Maintenance', 'bell', 0], ['settings', 'Site settings', 'sliders', 0]],
 ];
@@ -596,6 +690,7 @@ $titles = [
     'overview'   => ['Overview', 'Store activity at a glance'],
     'orders'     => ['Orders', 'Deliver or cancel pending orders'],
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
+    'payments'   => ['Payment methods', 'Numbers, logos, limits, fees and the deposit on/off switch'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Search, top up, ban and manage accounts'],
@@ -622,7 +717,19 @@ $lg = media_url('logo');
 #ptable tbody tr{scroll-margin-top:80px}
 @keyframes mvhl{from{background:#eef2ff}to{background:transparent}}
 #ptable tbody tr.mvhl{animation:mvhl 1.8s ease-out}
+.pm-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid #eceaf6}.pm-row:last-child{border:0}.pm-row.off .pm-lg,.pm-row.off .pm-info{opacity:.55}
+.pm-info{flex:1;min-width:0}.pm-info b{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:15px}.pm-info small{display:block;color:#64748b;margin-top:3px;overflow-wrap:anywhere;font-weight:400}
+.pm-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pm-act form{margin:0;display:inline-flex}
+.pm-g2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.pm-warn{background:#fff4d6;color:#8a5a00}
+.pm-pre{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.pm-pre button{border:1px solid #e5e2f3;background:#fff;border-radius:999px;padding:5px 12px;font-size:12.5px;cursor:pointer;color:#334155}.pm-pre button:hover{background:#eef2ff;border-color:#c7d2fe}
+.pm-logo-edit{display:flex;align-items:center;gap:14px;margin-top:6px}.pm-logo-edit input[type=file]{flex:1;min-width:0}
+.pm-cell{display:flex;align-items:center;gap:10px;min-width:0}.pm-cell>div{min-width:0}.pm-cell small{display:block;color:#64748b;font-weight:400;overflow-wrap:anywhere}
+.pm-trx{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#f4f3fb;color:#1e293b;padding:2px 7px;border-radius:6px}
+.pm-cp{border:1px solid #e5e2f3;background:#fff;border-radius:8px;font-size:11.5px;padding:3px 9px;cursor:pointer;margin-left:6px;color:#475569}.pm-cp:hover{background:#eef2ff}
+.pm-sub{display:block;color:#64748b;font-size:11.5px;font-weight:400;margin-top:2px}
+@media(max-width:620px){.pm-row{flex-wrap:wrap}.pm-act{width:100%;justify-content:flex-start}.pm-g2{grid-template-columns:1fr}}
 </style>
+<?= pm_css() ?>
 </head><body class="adm">
 <?= app_icon_sprite() ?>
 <div class="shell">
@@ -654,6 +761,7 @@ $lg = media_url('logo');
   <div><h1><?= e($titles[$page][0]) ?></h1><p><?= e($titles[$page][1]) ?></p></div>
   <?php if ($page === 'products'): ?><button type="button" class="btn" id="addProduct"><?= ai('plus') ?>Add product</button><?php endif; ?>
   <?php if ($page === 'categories'): ?><button type="button" class="btn" id="addCategory"><?= ai('plus') ?>Add category</button><?php endif; ?>
+  <?php if ($page === 'payments'): ?><button type="button" class="btn" id="pmAdd"><?= ai('plus') ?>Add method</button><?php endif; ?>
   <?php if ($page === 'users' && $userView): ?><a class="btn ghost" href="/admin.php?p=users"><?= ai('back') ?>All users</a><?php endif; ?>
 </div>
 <?php flash_html(); ?>
@@ -694,19 +802,39 @@ $lg = media_url('logo');
 <?php endforeach; if (!$pendOrders): ?><div class="card"><div class="empty">No pending orders. 🎉</div></div><?php endif; ?>
 
 <?php /* ============================ DEPOSITS ============================ */ elseif ($page === 'deposits'): ?>
-<div class="card"><h3>Pending deposits</h3>
-<div class="tw"><table><thead><tr><th>User</th><th>Amount</th><th class="hm">Note</th><th class="hm">Date</th><th></th></tr></thead><tbody>
-<?php foreach ($rows as $r): ?>
-<tr><td><?= e($r['email']) ?></td><td class="money"><?= money($r['amount']) ?></td><td class="hm"><?= e($r['note']) ?></td><td class="hm"><?= e($r['created_at']) ?></td>
-<td class="ra"><form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
-<button class="btn sm ok-b" name="action" value="approve">Approve</button>
-<button class="btn sm red" name="action" value="reject">Reject</button></form></td></tr>
-<?php endforeach; if (!$rows): ?><tr><td colspan="5">Nothing pending.</td></tr><?php endif; ?></tbody></table></div></div>
-<div class="card"><h3>Recent decisions</h3>
-<div class="tw"><table><thead><tr><th>User</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead><tbody>
-<?php foreach ($hist as $h): ?>
-<tr><td><?= e($h['email']) ?></td><td class="money"><?= money($h['amount']) ?></td><td><span class="badge <?= e($h['status']) ?>"><?= e($h['status']) ?></span></td><td><?= e($h['created_at']) ?></td></tr>
-<?php endforeach; if (!$hist): ?><tr><td colspan="4">No history yet.</td></tr><?php endif; ?></tbody></table></div></div>
+<div class="stats">
+  <div class="stat <?= $dStats['pend_n'] ? 'alert' : '' ?>"><span>Pending requests</span><b><?= (int)$dStats['pend_n'] ?></b></div>
+  <div class="stat"><span>Pending amount</span><b><?= money($dStats['pend_sum']) ?></b></div>
+  <div class="stat"><span>Approved today</span><b><?= money($dStats['today']) ?></b></div>
+  <div class="stat"><span>Approved this month</span><b><?= money($dStats['month']) ?></b></div>
+</div>
+<?php if (!dep_cfg()['on']): ?><div class="err">Deposits are switched OFF, so users cannot send new requests. <a href="/admin.php?p=payments">Turn them on</a></div><?php endif; ?>
+<div class="card"><div class="card-h"><h3>Pending deposits</h3><a href="/admin.php?p=payments">Payment methods</a></div>
+<div class="tw"><table><thead><tr><th>Method / user</th><th>Amount</th><th class="hm">Date</th><th></th></tr></thead><tbody>
+<?php foreach ($rows as $r): $pm = $pmOf((string)$r['note']); $trx = $trxOf((string)$r['note']); $np = explode(' | ', (string)$r['note']); ?>
+<tr>
+  <td><div class="pm-cell"><?= pm_logo_html($pm ?? $pmNone, 38) ?><div><b><?= e($pm['name'] ?? 'Deposit') ?></b><small><?= e($r['email']) ?></small>
+    <?php if ($trx !== ''): ?><small><code class="pm-trx"><?= e($trx) ?></code><button type="button" class="pm-cp" data-c="<?= e($trx) ?>">Copy</button></small><?php endif; ?></div></div></td>
+  <td class="money"><?= money($r['amount']) ?><?php if (count($np) > 2): ?><span class="pm-sub"><?= e(implode(' · ', array_slice($np, 2))) ?></span><?php endif; ?></td>
+  <td class="hm"><?= e($r['created_at']) ?></td>
+  <td class="ra"><form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+    <button class="btn sm ok-b" name="action" value="approve" onclick="return confirm('Approve this deposit and add the balance?')">Approve</button>
+    <button class="btn sm red" name="action" value="reject" onclick="return confirm('Reject this deposit?')">Reject</button></form></td></tr>
+<?php endforeach; if (!$rows): ?><tr><td colspan="4">Nothing pending.</td></tr><?php endif; ?></tbody></table></div></div>
+
+<div class="card"><div class="card-h"><h3>Decisions</h3><span class="hint" style="margin:0">Latest <?= count($hist) ?> (max 100)</span></div>
+<form method="get" class="tb"><input type="hidden" name="p" value="deposits">
+  <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($dq) ?>" placeholder="Email, transaction ID or deposit #" autocomplete="off"></div>
+  <select name="st" style="width:auto"><option value="">All status</option><option value="approved"<?= $dst === 'approved' ? ' selected' : '' ?>>Approved</option><option value="rejected"<?= $dst === 'rejected' ? ' selected' : '' ?>>Rejected</option></select>
+  <select name="m" style="width:auto"><option value="">All methods</option><?php foreach ($pmAll as $k => $m): ?><option value="<?= e($k) ?>"<?= $dm === $k ? ' selected' : '' ?>><?= e($m['name']) ?></option><?php endforeach; ?></select>
+  <button class="btn">Filter</button><?php if ($dq !== '' || $dst !== '' || $dm !== ''): ?><a class="btn ghost" href="/admin.php?p=deposits">Clear</a><?php endif; ?>
+</form>
+<div class="tw"><table><thead><tr><th>Method / user</th><th>Amount</th><th>Status</th><th class="hm">Date</th></tr></thead><tbody>
+<?php foreach ($hist as $h): $pm = $pmOf((string)$h['note']); $trx = $trxOf((string)$h['note']); ?>
+<tr><td><div class="pm-cell"><?= pm_logo_html($pm ?? $pmNone, 34) ?><div><b><?= e($pm['name'] ?? 'Deposit') ?> <span style="font-weight:400;color:#64748b">#<?= (int)$h['id'] ?></span></b><small><?= e($h['email']) ?><?= $trx !== '' ? ' · ' . e($trx) : '' ?></small></div></div></td>
+<td class="money"><?= money($h['amount']) ?></td><td><span class="badge <?= e($h['status']) ?>"><?= e($h['status']) ?></span></td><td class="hm"><?= e($h['created_at']) ?></td></tr>
+<?php endforeach; if (!$hist): ?><tr><td colspan="4">No matching deposits.</td></tr><?php endif; ?></tbody></table></div></div>
+<script>document.addEventListener('click',function(e){var b=e.target.closest('.pm-cp');if(!b)return;var t=b.dataset.c,done=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1200)};if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,done)}else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();try{document.execCommand('copy')}catch(_){}x.remove();done()}});</script>
 
 <?php /* ============================ PRODUCTS ============================ */ elseif ($page === 'products'): ?>
 <div class="card">
@@ -968,6 +1096,151 @@ $lg = media_url('logo');
   <?php endforeach; if (!$uOrders): ?><tr><td colspan="5">No orders yet.</td></tr><?php endif; ?></tbody></table></div></div>
 <?php endif; ?>
 <?php endif; ?>
+
+<?php /* ============================ PAYMENT METHODS ============================ */ elseif ($page === 'payments'):
+  $cfg = dep_cfg(); $usdR = function_exists('usd_rate') ? (float)usd_rate() : 0.0;
+  $posted = isset($_POST['save_dep_settings']);
+  $vOn    = $posted ? !empty($_POST['dep_on']) : $cfg['on'];
+  $vOff   = $posted ? (string)($_POST['dep_off_msg'] ?? '') : $cfg['off_msg'];
+  $vMin   = $posted ? (string)($_POST['dep_min'] ?? '') : (string)$cfg['min'];
+  $vMax   = $posted ? (string)($_POST['dep_max'] ?? '') : (string)$cfg['max'];
+  $vPend  = $posted ? (string)($_POST['dep_pending'] ?? '') : (string)$cfg['pending'];
+  $vChips = $posted ? (string)($_POST['dep_chips'] ?? '') : implode(', ', $cfg['chips']);
+  $vNote  = $posted ? (string)($_POST['dep_notice'] ?? '') : $cfg['notice'];
+  $live = 0; foreach ($pmAll as $m0) if (pm_usable($m0, $usdR)) $live++;
+  $tk = fn(float $n): string => '৳' . number_format($n, floor($n) == $n ? 0 : 2); ?>
+<div class="stats s3">
+  <div class="stat <?= $cfg['on'] ? '' : 'alert' ?>"><span>Deposits</span><b><?= $cfg['on'] ? 'ON' : 'OFF' ?></b></div>
+  <div class="stat"><span>Methods live</span><b><?= $live ?> / <?= count($pmAll) ?></b></div>
+  <a class="stat <?= (int)$pend['c'] ? 'alert' : '' ?>" href="/admin.php?p=deposits"><span>Pending deposits</span><b><?= (int)$pend['c'] ?></b></a>
+</div>
+
+<?php if ($pmErr): ?><div class="err"><?= e($pmErr) ?></div><?php endif; ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><div class="card-h"><h3>Deposit settings</h3><span class="badge <?= $cfg['on'] ? 'on' : 'off' ?>"><?= $cfg['on'] ? 'Open' : 'Paused' ?></span></div>
+  <label class="sw"><input type="checkbox" name="dep_on" value="1"<?= $vOn ? ' checked' : '' ?>><span class="tg"></span><span>Accept new deposit requests</span></label>
+  <label style="margin-top:0">Message when paused <small>(optional)</small></label>
+  <input type="text" name="dep_off_msg" maxlength="200" value="<?= e($vOff) ?>" placeholder="Deposits are paused for maintenance. Back soon.">
+  <div class="pm-g2">
+    <div><label>Minimum deposit <small>(BDT)</small></label><input type="number" name="dep_min" min="1" step="0.01" inputmode="decimal" value="<?= e($vMin) ?>"></div>
+    <div><label>Maximum deposit <small>(BDT)</small></label><input type="number" name="dep_max" min="1" step="0.01" inputmode="decimal" value="<?= e($vMax) ?>"></div>
+  </div>
+  <label>Pending requests allowed per user</label>
+  <input type="number" name="dep_pending" min="1" max="50" value="<?= e($vPend) ?>">
+  <label>Quick amount buttons <small>(comma separated, up to 8)</small></label>
+  <input type="text" name="dep_chips" value="<?= e($vChips) ?>" placeholder="100, 200, 500, 1000, 2000, 5000">
+  <label>Notice on the deposit page <small>(optional, shown above the form)</small></label>
+  <textarea name="dep_notice" rows="2" maxlength="300" placeholder="e.g. Send money only from a personal account. Deposits are approved within 30 minutes."><?= e($vNote) ?></textarea>
+  <small class="hint">Each method can set its own limits too, but they can only narrow this range.</small>
+  <div class="savebar"><button class="btn" name="save_dep_settings" value="1">Save deposit settings</button></div>
+</div>
+</form>
+
+<div class="card"><div class="card-h"><h3>Payment methods</h3><span class="hint" style="margin:0"><?= count($pmAll) ?> total</span></div>
+<?php $i = 0; $nPm = count($pmAll); foreach ($pmAll as $k => $m): $i++;
+  $isOn = (int)$m['enabled'] === 1; $isLive = pm_usable($m, $usdR); [$lo, $hi] = pm_limits($m, $cfg); $sx = $pmStats[$k];
+  $pj = ['id' => $k, 'name' => $m['name'], 'acct' => $m['acct'], 'acct_label' => $m['acct_label'], 'sub' => $m['sub'], 'ussd' => $m['ussd'], 'tid_label' => $m['tid_label'],
+         'color' => $m['color'], 'usd' => (int)$m['is_usd'], 'enabled' => (int)$m['enabled'], 'notice' => $m['notice'],
+         'min' => $m['min_amt'] === null ? '' : (float)$m['min_amt'], 'max' => $m['max_amt'] === null ? '' : (float)$m['max_amt'],
+         'fee' => (float)$m['fee_pct'], 'bonus' => (float)$m['bonus_pct'], 'steps' => (string)$m['steps'], 'has_logo' => (int)$m['has_logo']]; ?>
+<div class="pm-row<?= $isOn ? '' : ' off' ?>">
+  <?= pm_logo_html($m, 50) ?>
+  <div class="pm-info">
+    <b><?= e($m['name']) ?>
+      <span class="badge <?= $isOn ? 'on' : 'off' ?>"><?= $isOn ? 'On' : 'Off' ?></span>
+      <?php if ($isOn && !$isLive): ?><span class="badge pm-warn"><?= pm_acct_ok((string)$m['acct']) ? 'Needs dollar rate' : 'Needs a real number' ?></span><?php endif; ?>
+      <?php if ((int)$m['is_usd']): ?><span class="badge" style="background:#e0f2fe;color:#075985">USD</span><?php endif; ?></b>
+    <small><?= pm_acct_ok((string)$m['acct']) ? e($m['acct']) : 'No number set, users cannot pay yet' ?><?= $m['sub'] !== '' ? ' · ' . e($m['sub']) : '' ?></small>
+    <small>Limit <?= $tk($lo) ?> – <?= $tk($hi) ?><?= (float)$m['fee_pct'] > 0 ? ' · Fee ' . (float)$m['fee_pct'] . '%' : '' ?><?= (float)$m['bonus_pct'] > 0 ? ' · Bonus ' . (float)$m['bonus_pct'] . '%' : '' ?></small>
+    <small>Approved <?= money($sx['ok_sum']) ?> (<?= (int)$sx['ok_n'] ?>)<?= $sx['pend'] ? ' · <b>' . (int)$sx['pend'] . ' pending</b>' : '' ?></small>
+  </div>
+  <div class="pm-act">
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="pm_toggle" value="<?= e($k) ?>">
+      <label class="sw" title="<?= $isOn ? 'Turn off' : 'Turn on' ?>"><input type="checkbox"<?= $isOn ? ' checked' : '' ?> onchange="this.form.submit()" aria-label="Turn <?= e($m['name']) ?> on or off"><span class="tg"></span></label></form>
+    <form method="post" class="mvf"><?= csrf_field() ?><input type="hidden" name="pm_move" value="<?= e($k) ?>">
+      <button class="mvb" name="dir" value="up" aria-label="Move up"<?= $i === 1 ? ' disabled' : '' ?>>▲</button>
+      <button class="mvb" name="dir" value="down" aria-label="Move down"<?= $i === $nPm ? ' disabled' : '' ?>>▼</button></form>
+    <button type="button" class="btn sm ghost" data-pm-edit="<?= e(json_encode($pj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('pencil') ?>Edit</button>
+    <form method="post"><?= csrf_field() ?><button class="btn sm red" name="pm_delete" value="<?= e($k) ?>" onclick="return confirm('Delete <?= e(addslashes($m['name'])) ?>? Users will no longer see it. Old deposits stay in the history.')" aria-label="Delete"><?= ai('trash') ?></button></form>
+  </div>
+</div>
+<?php endforeach; if (!$pmAll): ?><div class="empty">No payment methods. Click “Add method”.</div><?php endif; ?>
+</div>
+
+<dialog id="pmdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?>
+  <input type="hidden" name="pm_id" id="pm_id" value="">
+  <div class="dlg-h"><h3 id="pmTitle">Add payment method</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
+  <?php if ($pmDlgErr): ?><div class="err" style="margin-top:12px"><?= e($pmDlgErr) ?></div><?php endif; ?>
+  <div id="pmPre" class="pm-pre"><span class="hint" style="margin:0;align-self:center">Quick fill:</span>
+    <button type="button" data-pre="upay">Upay</button><button type="button" data-pre="bank">Bank transfer</button><button type="button" data-pre="usdt">USDT (TRC20)</button></div>
+  <label class="sw" style="margin-top:14px"><input type="checkbox" name="pm_enabled" id="pm_enabled" value="1" checked><span class="tg"></span><span>Show this method to users</span></label>
+  <div class="pm-g2">
+    <div><label style="margin-top:0">Name</label><input type="text" name="pm_name" id="pm_name" maxlength="40" required placeholder="e.g. bKash"></div>
+    <div><label style="margin-top:0">Brand colour</label><input type="color" name="pm_color" id="pm_color" value="#5b4bff" style="height:42px;padding:3px"></div>
+  </div>
+  <label>Logo <small>(PNG / JPG / WEBP, up to 1 MB · shown on the deposit page; leave empty to keep the current one)</small></label>
+  <div class="pm-logo-edit"><span id="pmLogoCur"></span><input type="file" name="pm_logo" id="pm_logo" accept="image/png,image/jpeg,image/webp,image/gif"></div>
+  <label class="chk" style="display:flex;align-items:center;gap:10px;font-weight:500" id="pmRmWrap"><input type="checkbox" name="pm_remove_logo" id="pm_remove_logo" value="1"> Remove uploaded logo (use the built-in one)</label>
+  <div class="pm-g2">
+    <div><label>Account number / ID</label><input type="text" name="pm_acct" id="pm_acct" maxlength="80" placeholder="01XXXXXXXXX"></div>
+    <div><label>Label above the number</label><input type="text" name="pm_acct_label" id="pm_acct_label" maxlength="40" placeholder="Send money to"></div>
+    <div><label>Subtitle <small>(on the method button)</small></label><input type="text" name="pm_sub" id="pm_sub" maxlength="60" placeholder="Send Money · Personal"></div>
+    <div><label>USSD code <small>(optional)</small></label><input type="text" name="pm_ussd" id="pm_ussd" maxlength="20" placeholder="*247#"></div>
+    <div><label>Transaction ID name</label><input type="text" name="pm_tid_label" id="pm_tid_label" maxlength="30" placeholder="TrxID"></div>
+    <div><label>Fee <small>(% taken from each deposit)</small></label><input type="number" name="pm_fee" id="pm_fee" min="0" max="50" step="0.01" inputmode="decimal" placeholder="0"></div>
+    <div><label>Minimum <small>(BDT, optional)</small></label><input type="number" name="pm_min" id="pm_min" min="0" step="0.01" inputmode="decimal"></div>
+    <div><label>Maximum <small>(BDT, optional)</small></label><input type="number" name="pm_max" id="pm_max" min="0" step="0.01" inputmode="decimal"></div>
+    <div><label>Bonus <small>(% added to each deposit)</small></label><input type="number" name="pm_bonus" id="pm_bonus" min="0" max="100" step="0.01" inputmode="decimal" placeholder="0"></div>
+  </div>
+  <label class="chk" style="display:flex;align-items:center;gap:10px;font-weight:500"><input type="checkbox" name="pm_usd" id="pm_usd" value="1"> Dollar method <small>(user pays in USD, converted with the dollar rate from Site settings)</small></label>
+  <label>Note shown on this method <small>(optional, e.g. “Send Money only, not Cash Out”)</small></label>
+  <input type="text" name="pm_notice" id="pm_notice" maxlength="200">
+  <label>Custom steps <small>(optional, one per line, up to 8. Use {number} {amount} {ussd} {name} and **bold**. Empty = automatic steps)</small></label>
+  <textarea name="pm_steps" id="pm_steps" rows="4" placeholder="Open the {name} app&#10;Send {amount} to {number}&#10;Copy the TrxID and paste it on the next screen"></textarea>
+  <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" name="pm_save" value="1">Save method</button></div>
+</form></dialog>
+
+<script>
+(function(){
+  var dlg = document.getElementById('pmdlg'); if (!dlg) return;
+  var F = function(id){ return document.getElementById(id); };
+  var PRE = {
+    upay: {name:'Upay', color:'#fdb913', sub:'Send Money · Personal', ussd:'*268#', acct_label:'Send money to', tid_label:'TrxID', usd:0},
+    bank: {name:'Bank Transfer', color:'#0f766e', sub:'Bank deposit', ussd:'', acct_label:'Account number', tid_label:'Reference', usd:0},
+    usdt: {name:'USDT (TRC20)', color:'#26a17b', sub:'Crypto · USD', ussd:'', acct_label:'Wallet address', tid_label:'TxID', usd:1}
+  };
+  function fill(d, logoHtml){
+    F('pm_id').value = d.id || ''; F('pm_name').value = d.name || ''; F('pm_acct').value = d.acct || '';
+    F('pm_acct_label').value = d.acct_label || 'Send money to'; F('pm_sub').value = d.sub || ''; F('pm_ussd').value = d.ussd || '';
+    F('pm_tid_label').value = d.tid_label || 'TrxID'; F('pm_color').value = /^#[0-9a-f]{6}$/i.test(d.color || '') ? d.color : '#5b4bff';
+    F('pm_usd').checked = !!+d.usd; F('pm_enabled').checked = d.enabled === undefined ? true : !!+d.enabled;
+    F('pm_notice').value = d.notice || ''; F('pm_min').value = d.min === undefined ? '' : d.min; F('pm_max').value = d.max === undefined ? '' : d.max;
+    F('pm_fee').value = +d.fee ? d.fee : ''; F('pm_bonus').value = +d.bonus ? d.bonus : ''; F('pm_steps').value = d.steps || '';
+    F('pm_logo').value = ''; F('pm_remove_logo').checked = false;
+    F('pmLogoCur').innerHTML = logoHtml || '';
+    F('pmRmWrap').style.display = +d.has_logo ? 'flex' : 'none';
+    F('pmPre').style.display = d.id ? 'none' : 'flex';
+    F('pmTitle').textContent = d.id ? 'Edit ' + (d.name || 'payment method') : 'Add payment method';
+  }
+  F('pmAdd').addEventListener('click', function(){ fill({}, ''); dlg.showModal(); });
+  document.addEventListener('click', function(e){
+    var b = e.target.closest('[data-pm-edit]');
+    if (b) {
+      var row = b.closest('.pm-row'), lg = row ? row.querySelector('.pm-lg') : null;
+      var d = JSON.parse(b.getAttribute('data-pm-edit'));
+      fill(d, lg ? lg.outerHTML.replace(/width:\d+px;height:\d+px/, 'width:56px;height:56px') : '');
+      dlg.showModal(); return;
+    }
+    var p = e.target.closest('[data-pre]');
+    if (p && PRE[p.dataset.pre]) {
+      var x = PRE[p.dataset.pre]; F('pm_name').value = x.name; F('pm_color').value = x.color; F('pm_sub').value = x.sub; F('pm_ussd').value = x.ussd;
+      F('pm_acct_label').value = x.acct_label; F('pm_tid_label').value = x.tid_label; F('pm_usd').checked = !!x.usd;
+    }
+  });
+  var RE = <?= json_encode($pmReopen, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+  if (RE) { fill(RE, ''); dlg.showModal(); }
+})();
+</script>
 
 <?php /* ============================ SETTINGS ============================ */ elseif ($page === 'settings'): ?>
 <?php if ($setErr): ?><div class="err"><?= e($setErr) ?></div><?php endif; ?>

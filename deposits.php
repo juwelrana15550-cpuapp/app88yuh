@@ -1,26 +1,19 @@
 <?php require __DIR__ . '/lib.php';
+require __DIR__ . '/payment_methods.php';
 $u = require_login();
 
-/* ============================== Settings ==============================
- * Put YOUR receiving accounts here (or set them in the settings table with the keys pay_bkash, pay_nagad,
- * pay_rocket, pay_binance - a saved setting wins over this list). A method whose value still contains "X"
- * is shown as "Unavailable" so users never send money to a placeholder. */
-const MIN_DEPOSIT = 10;
-const MAX_DEPOSIT = 100000;
-const MAX_PENDING = 5;     // a user can have at most this many unreviewed requests
-$METHODS = [
-    'bkash'   => ['name' => 'bKash',   'sub' => 'Send Money · Personal', 'color' => '#e2136e', 'ussd' => '*247#', 'acct' => '01XXXXXXXXX', 'key' => 'pay_bkash',   'usd' => false, 'tid' => 'TrxID'],
-    'nagad'   => ['name' => 'Nagad',   'sub' => 'Send Money · Personal', 'color' => '#f26a21', 'ussd' => '*167#', 'acct' => '01XXXXXXXXX', 'key' => 'pay_nagad',   'usd' => false, 'tid' => 'TrxID'],
-    'rocket'  => ['name' => 'Rocket',  'sub' => 'Send Money · Personal', 'color' => '#8c3494', 'ussd' => '*322#', 'acct' => '01XXXXXXXXX', 'key' => 'pay_rocket',  'usd' => false, 'tid' => 'TrxID'],
-    'binance' => ['name' => 'Binance', 'sub' => 'Binance Pay · USD',      'color' => '#e0a800', 'ussd' => '',      'acct' => 'XXXXXXXXX',   'key' => 'pay_binance', 'usd' => true,  'tid' => 'Order ID'],
-];
+/* Payment methods, limits, fees and the on/off switch are all managed in Admin > Payment methods. */
+$CFG = dep_cfg();
 $usdRate = function_exists('usd_rate') ? (float)usd_rate() : 0.0;   // BDT per 1 USD (Admin > Settings)
-foreach ($METHODS as $k => &$m) {
-    $v = function_exists('setting') ? trim((string)setting($m['key'], '')) : '';
-    if ($v !== '') $m['acct'] = $v;
-    $m['ok'] = stripos($m['acct'], 'X') === false && (!$m['usd'] || $usdRate > 0);
+$ALL = pm_all();                 // every method (used to recognise old deposits)
+$METHODS = [];                   // methods the admin has switched ON
+foreach ($ALL as $k => $m) {
+    if (!(int)$m['enabled']) continue;
+    $m['ok'] = pm_usable($m, $usdRate);
+    [$m['lmin'], $m['lmax']] = pm_limits($m, $CFG);
+    $METHODS[$k] = $m;
 }
-unset($m);
+$nf = function (float $n): string { return number_format($n, floor($n) == $n ? 0 : 2); };
 
 /* ============================== Submit ============================== */
 $err = '';
@@ -29,21 +22,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $amt = round((float)($_POST['amount'] ?? 0), 2);
     $mk  = (string)($_POST['method'] ?? '');
     $trx = strtoupper(preg_replace('/\s+/', '', (string)($_POST['trx'] ?? '')));
-    if (!isset($METHODS[$mk]) || !$METHODS[$mk]['ok']) $err = 'Please choose a payment method.';
-    elseif ($amt < MIN_DEPOSIT || $amt > MAX_DEPOSIT) $err = 'Amount must be between ' . MIN_DEPOSIT . ' and ' . number_format(MAX_DEPOSIT) . '.';
-    elseif (!preg_match('/^[A-Z0-9]{6,40}$/', $trx)) $err = 'Enter a valid ' . $METHODS[$mk]['tid'] . ' (letters and numbers only, 6-40 characters).';
+    if (!$CFG['on']) $err = 'Deposits are paused right now. Please try again later.';
+    elseif (!isset($METHODS[$mk]) || !$METHODS[$mk]['ok']) $err = 'Please choose a payment method.';
+    elseif ($amt < $METHODS[$mk]['lmin'] || $amt > $METHODS[$mk]['lmax']) $err = 'Amount for ' . $METHODS[$mk]['name'] . ' must be between ' . $nf($METHODS[$mk]['lmin']) . ' and ' . $nf($METHODS[$mk]['lmax']) . '.';
+    elseif (!preg_match('/^[A-Z0-9]{6,40}$/', $trx)) $err = 'Enter a valid ' . $METHODS[$mk]['tid_label'] . ' (letters and numbers only, 6-40 characters).';
     else {
+        $M = $METHODS[$mk];
         $pdo = db();
         $st = $pdo->prepare("SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'"); $st->execute([$u['id']]);
-        if ((int)$st->fetchColumn() >= MAX_PENDING) {
-            $err = 'You already have ' . MAX_PENDING . ' requests waiting for review. Please wait until they are approved.';
+        if ((int)$st->fetchColumn() >= $CFG['pending']) {
+            $err = 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.';
         } else {
             $st = $pdo->prepare('SELECT COUNT(*) FROM deposits WHERE note LIKE ?'); $st->execute(['%TrxID: ' . $trx . ' |%']);
-            if ((int)$st->fetchColumn() > 0) $err = 'This ' . $METHODS[$mk]['tid'] . ' was already submitted.';
+            if ((int)$st->fetchColumn() > 0) $err = 'This ' . $M['tid_label'] . ' was already submitted.';
             else {
-                $paid = $METHODS[$mk]['usd'] ? '$' . number_format($amt / $usdRate, 2) : 'BDT ' . number_format($amt, 2);
-                $note = $METHODS[$mk]['name'] . ' | TrxID: ' . $trx . ' | ' . $paid;   // shown to the admin as the deposit note
-                $pdo->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')->execute([$u['id'], $amt, substr($note, 0, 255)]);
+                $paid = $M['is_usd'] ? '$' . number_format($amt / $usdRate, 2) : 'BDT ' . number_format($amt, 2);
+                $credit = pm_credit($M, $amt);   // amount minus the method fee, plus the method bonus
+                $note = $M['name'] . ' | TrxID: ' . $trx . ' | ' . $paid;   // shown to the admin as the deposit note
+                if ((float)$M['fee_pct'] > 0)   $note .= ' | Fee ' . (float)$M['fee_pct'] . '%';
+                if ((float)$M['bonus_pct'] > 0) $note .= ' | Bonus ' . (float)$M['bonus_pct'] . '%';
+                $pdo->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')->execute([$u['id'], $credit, substr($note, 0, 255)]);
                 flash('ok', 'Request received. Your balance is credited as soon as we confirm the payment.');
                 header('Location: /deposits.php'); exit;
             }
@@ -58,14 +56,21 @@ foreach ($deps as $d) {
     if ($d['status'] === 'approved') { $tot['approved'] += (float)$d['amount']; $tot['n']++; }
     if ($d['status'] === 'pending') $tot['pending']++;
 }
-$methodOf = function (string $note) use ($METHODS) {
-    foreach ($METHODS as $k => $m) if (strpos($note, $m['name'] . ' |') === 0) return $k;
+$methodOf = function (string $note) use ($ALL) {
+    foreach ($ALL as $k => $m) if (strpos($note, $m['name'] . ' |') === 0) return $k;
     return null;
 };
 $jsMethods = [];
-foreach ($METHODS as $k => $m) $jsMethods[$k] = ['name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => $m['usd'], 'tid' => $m['tid'], 'color' => $m['color']];
+foreach ($METHODS as $k => $m) $jsMethods[$k] = [
+    'name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => (bool)$m['is_usd'],
+    'tid' => $m['tid_label'], 'label' => $m['acct_label'], 'sub' => $m['sub'], 'note' => $m['notice'], 'color' => $m['color'],
+    'steps' => $m['steps'] !== null && $m['steps'] !== '' ? explode("\n", $m['steps']) : [],
+    'min' => (float)$m['lmin'], 'max' => (float)$m['lmax'], 'fee' => (float)$m['fee_pct'], 'bonus' => (float)$m['bonus_pct'],
+    'logo' => pm_logo_html($m, 44),
+];
 
 user_start('Deposits', $u, 'deposits'); ?>
+<?= pm_css() ?>
 <style>
 .dp{--bg:#fff;--bg2:#f5f6fb;--ink:#12142a;--mute:#6b7089;--line:#e6e8f2;--acc:#5b4bff;--acc2:#8b5cf6;--ok:#12a36b;--warn:#d98a00;--bad:#e5484d;--sh:0 1px 2px rgba(18,20,42,.05),0 8px 24px rgba(18,20,42,.06);
   color:var(--ink);max-width:1040px;margin:0 auto;font-family:inherit}
@@ -144,6 +149,10 @@ user_start('Deposits', $u, 'deposits'); ?>
 .dp .dp-hi .dp-rt{text-align:right}.dp .dp-hi .dp-rt b{display:block;font-size:15px}
 .dp .dp-bd{display:inline-block;margin-top:4px;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:800;text-transform:capitalize}
 .dp .dp-bd.pending{background:rgba(217,138,0,.14);color:var(--warn)}.dp .dp-bd.approved{background:rgba(18,163,107,.14);color:var(--ok)}.dp .dp-bd.rejected{background:rgba(229,72,77,.12);color:var(--bad)}
+.dp .dp-alert.inf{background:rgba(91,75,255,.08);color:var(--ink);border:1px solid rgba(91,75,255,.25);font-weight:500;line-height:1.5}
+.dp .dp-tag{display:inline-block;margin-top:3px;font-size:11px;font-weight:800;padding:1px 8px;border-radius:999px}
+.dp .dp-tag.fee{background:rgba(217,138,0,.14);color:var(--warn)}.dp .dp-tag.bonus{background:rgba(18,163,107,.14);color:var(--ok)}
+.dp .dp-t3{display:flex;align-items:center;gap:14px;margin-bottom:14px}.dp .dp-t3 h3{margin:0 0 2px}.dp .dp-t3 .dp-lead{margin:0}
 .dp .dp-empty{text-align:center;color:var(--mute);padding:34px 0;font-size:14px}
 </style>
 
@@ -159,9 +168,14 @@ user_start('Deposits', $u, 'deposits'); ?>
   </div>
 
   <div class="dp-grid">
+    <?php if (!$CFG['on']): ?>
+    <div class="dp-box"><div class="dp-alert er">⏸ <?= e($CFG['off_msg'] !== '' ? $CFG['off_msg'] : 'Deposits are paused right now. Please check back soon.') ?></div>
+      <p class="dp-lead" style="margin:0">Your balance and deposit history are still available below.</p></div>
+    <?php else: ?>
     <form method="post" class="dp-box" id="dpForm" autocomplete="off"><?= csrf_field() ?>
       <?php if ($err): ?><div class="dp-alert er">! <?= e($err) ?></div><?php endif; ?>
 
+      <?php if ($CFG['notice'] !== ''): ?><div class="dp-alert inf">ℹ️ <span><?= e($CFG['notice']) ?></span></div><?php endif; ?>
       <div class="dp-steps">
         <div class="dp-stp on" data-s="1"><i>1</i><span>Amount</span></div><div class="dp-bar"></div>
         <div class="dp-stp" data-s="2"><i>2</i><span>Method</span></div><div class="dp-bar"></div>
@@ -170,10 +184,10 @@ user_start('Deposits', $u, 'deposits'); ?>
 
       <div class="dp-pane on" data-p="1">
         <h3>How much do you want to add?</h3>
-        <p class="dp-lead">Minimum <?= (int)MIN_DEPOSIT ?> · Maximum <?= number_format(MAX_DEPOSIT) ?></p>
+        <p class="dp-lead">Minimum <?= $nf($CFG['min']) ?> · Maximum <?= $nf($CFG['max']) ?></p>
         <label class="dp-l" for="dpAmt">Amount</label>
-        <div class="dp-amt"><span>৳</span><input type="number" inputmode="decimal" id="dpAmt" name="amount" min="<?= (int)MIN_DEPOSIT ?>" max="<?= (int)MAX_DEPOSIT ?>" step="0.01" placeholder="0" value="<?= $err ? e($_POST['amount'] ?? '') : '' ?>"></div>
-        <div class="dp-chips"><?php foreach ([100, 200, 500, 1000, 2000, 5000] as $c): ?><button type="button" class="dp-chip" data-v="<?= $c ?>">+<?= number_format($c) ?></button><?php endforeach; ?></div>
+        <div class="dp-amt"><span>৳</span><input type="number" inputmode="decimal" id="dpAmt" name="amount" min="<?= e((string)$CFG['min']) ?>" max="<?= e((string)$CFG['max']) ?>" step="0.01" placeholder="0" value="<?= $err ? e($_POST['amount'] ?? '') : '' ?>"></div>
+        <div class="dp-chips"><?php foreach ($CFG['chips'] as $c): ?><button type="button" class="dp-chip" data-v="<?= $c ?>">+<?= number_format($c) ?></button><?php endforeach; ?></div>
         <div class="dp-hint" id="dpAmtHint"></div>
         <div class="dp-acts"><button type="button" class="dp-b p" data-next="2" id="n1" disabled>Continue</button></div>
       </div>
@@ -185,18 +199,20 @@ user_start('Deposits', $u, 'deposits'); ?>
         <div class="dp-methods">
         <?php foreach ($METHODS as $k => $m): ?>
           <button type="button" class="dp-mth" data-m="<?= e($k) ?>" style="--c:<?= e($m['color']) ?>" <?= $m['ok'] ? '' : 'disabled' ?>>
-            <span class="dp-lg"><?= e(mb_substr($m['name'], 0, 1)) ?></span>
-            <span><b><?= e($m['name']) ?></b><small><?= $m['ok'] ? e($m['sub']) : 'Unavailable right now' ?></small></span>
+            <?= pm_logo_html($m, 44) ?>
+            <span><b><?= e($m['name']) ?></b><small data-sub><?= $m['ok'] ? e($m['sub']) : 'Unavailable right now' ?></small>
+              <?php if ($m['ok'] && (float)$m['fee_pct'] > 0): ?><small class="dp-tag fee"><?= e((string)(float)$m['fee_pct']) ?>% fee</small><?php endif; ?>
+              <?php if ($m['ok'] && (float)$m['bonus_pct'] > 0): ?><small class="dp-tag bonus">+<?= e((string)(float)$m['bonus_pct']) ?>% bonus</small><?php endif; ?></span>
             <span class="dp-tick">✓</span>
           </button>
-        <?php endforeach; ?>
+        <?php endforeach; if (!$METHODS): ?><div class="dp-empty" style="grid-column:1/-1">No payment method is available right now. Please check back soon.</div><?php endif; ?>
         </div>
         <div class="dp-acts"><button type="button" class="dp-b g" data-next="1">Back</button><button type="button" class="dp-b p" data-next="3" id="n2" disabled>Continue</button></div>
       </div>
 
       <div class="dp-pane" data-p="3">
-        <h3 id="dpTitle">Send the payment</h3>
-        <p class="dp-lead" id="dpLead"></p>
+        <div class="dp-t3"><span id="dpLogoBox"></span><div><h3 id="dpTitle">Send the payment</h3><p class="dp-lead" id="dpLead"></p></div></div>
+        <div class="dp-alert inf" id="dpMNote" hidden></div>
         <div class="dp-pay" id="dpPay"></div>
         <ol class="dp-how" id="dpHow"></ol>
         <label class="dp-l" for="dpTrx" id="dpTrxL">Transaction ID</label>
@@ -205,6 +221,7 @@ user_start('Deposits', $u, 'deposits'); ?>
         <div class="dp-acts"><button type="button" class="dp-b g" data-next="2">Back</button><button class="dp-b p" id="dpSubmit" disabled>Submit deposit</button></div>
       </div>
     </form>
+    <?php endif; ?>
 
     <aside class="dp-side">
       <div class="dp-box">
@@ -212,7 +229,8 @@ user_start('Deposits', $u, 'deposits'); ?>
         <div class="dp-sum"><span>Amount</span><b id="sAmt">—</b></div>
         <div class="dp-sum"><span>Method</span><b id="sMth">—</b></div>
         <div class="dp-sum" id="sUsdRow" hidden><span>You pay</span><b id="sUsd"></b></div>
-        <div class="dp-sum"><span>Fee</span><b>Free</b></div>
+        <div class="dp-sum"><span>Fee</span><b id="sFee">Free</b></div>
+        <div class="dp-sum" id="sBonusRow" hidden><span>Bonus</span><b id="sBonus" style="color:var(--ok)"></b></div>
         <div class="dp-sum dp-tt"><span style="color:inherit">You receive</span><b id="sTot">—</b></div>
         <div class="dp-note"><span>🔒</span><span>Every request is checked by our team before your balance is credited. Most are approved within minutes.</span></div>
       </div>
@@ -225,7 +243,7 @@ user_start('Deposits', $u, 'deposits'); ?>
     <?php foreach ($deps as $d): $mk = $methodOf((string)$d['note']); $mm = $mk ? $METHODS[$mk] : null;
       $parts = explode(' | ', (string)$d['note']); $ref = isset($parts[1]) ? preg_replace('/^[^:]+:\s*/', '', $parts[1]) : (string)$d['note']; ?>
     <div class="dp-hi">
-      <span class="dp-lg" style="--c:<?= e($mm['color'] ?? '#7a7f99') ?>"><?= e($mm ? mb_substr($mm['name'], 0, 1) : '৳') ?></span>
+      <?= pm_logo_html($mm ?? ['id' => '', 'name' => '', 'color' => '#7a7f99'], 42) ?>
       <div class="dp-mid"><b><?= e($mm['name'] ?? 'Deposit') ?> <span style="color:var(--mute);font-weight:500">#<?= (int)$d['id'] ?></span></b>
         <small><?= e($ref) ?> · <?= e(date('d M Y, h:i A', strtotime($d['created_at']))) ?></small></div>
       <div class="dp-rt"><b><?= money((float)$d['amount']) ?></b><span class="dp-bd <?= e($d['status']) ?>"><?= e($d['status']) ?></span></div>
@@ -236,14 +254,15 @@ user_start('Deposits', $u, 'deposits'); ?>
 
 <script>
 (function(){
+  if (!document.getElementById('dpForm')) return;   // deposits are switched off
   var M = <?= json_encode($jsMethods, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>,
-      MIN = <?= (int)MIN_DEPOSIT ?>, MAX = <?= (int)MAX_DEPOSIT ?>, RATE = <?= json_encode($usdRate) ?>,
+      MIN = <?= json_encode((float)$CFG['min']) ?>, MAX = <?= json_encode((float)$CFG['max']) ?>, RATE = <?= json_encode($usdRate) ?>,
       $ = function(s){return document.querySelector(s)}, $$ = function(s){return [].slice.call(document.querySelectorAll(s))};
   var amt = $('#dpAmt'), meth = $('#dpMethod'), trx = $('#dpTrx'), cur = 1;
   function fmt(n){return '৳' + Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
   function a(){var v = parseFloat(amt.value); return isFinite(v) ? v : 0}
   function okAmt(){var v = a(); return v >= MIN && v <= MAX}
-  function esc(s){var d = document.createElement('div'); d.textContent = s; return d.innerHTML}
+  function esc(s){var d = document.createElement('div'); d.textContent = s; return d.innerHTML.replace(/"/g, '&quot;')}
   function show(n){
     cur = n;
     $$('.dp-pane').forEach(function(p){p.classList.toggle('on', +p.dataset.p === n)});
@@ -251,10 +270,23 @@ user_start('Deposits', $u, 'deposits'); ?>
     if (n === 3) build();
   }
   function sum(){
-    var v = a(), m = M[meth.value];
+    var v = a();
+    // methods whose min/max does not fit the amount are greyed out (and deselected)
+    $$('.dp-mth').forEach(function(b){
+      var mm = M[b.dataset.m]; if (!mm) return;
+      var bad = mm.ok && v > 0 && (v < mm.min || v > mm.max), sm = b.querySelector('[data-sub]');
+      b.disabled = !mm.ok || bad;
+      if (sm) sm.textContent = !mm.ok ? 'Unavailable right now' : bad ? (v < mm.min ? 'Minimum ' + fmt(mm.min) : 'Maximum ' + fmt(mm.max)) : mm.sub;
+      if (b.disabled && b.classList.contains('on')) { b.classList.remove('on'); meth.value = ''; }
+    });
+    var m = M[meth.value];
+    var fee = m ? v * m.fee / 100 : 0, bonus = m ? v * m.bonus / 100 : 0, got = v ? v - fee + bonus : 0;
     $('#sAmt').textContent = v ? fmt(v) : '—';
-    $('#sTot').textContent = v ? fmt(v) : '—';
+    $('#sTot').textContent = v ? fmt(got) : '—';
     $('#sMth').textContent = m ? m.name : '—';
+    $('#sFee').textContent = fee > 0 ? '− ' + fmt(fee) + ' (' + m.fee + '%)' : 'Free';
+    $('#sBonusRow').hidden = !(bonus > 0);
+    if (bonus > 0) $('#sBonus').textContent = '+ ' + fmt(bonus) + ' (' + m.bonus + '%)';
     var u = m && m.usd && RATE > 0 && v;
     $('#sUsdRow').hidden = !u;
     if (u) $('#sUsd').textContent = '$' + (v / RATE).toFixed(2);
@@ -265,26 +297,31 @@ user_start('Deposits', $u, 'deposits'); ?>
     $('#dpSubmit').disabled = !(okAmt() && m && /^[A-Za-z0-9]{6,40}$/.test(trx.value.replace(/\s+/g,'')));
   }
   function row(label, val, copy){
-    return '<div class="dp-row"><div><span>' + label + '</span><br><b>' + esc(val) + '</b></div>' +
+    return '<div class="dp-row"><div><span>' + esc(label) + '</span><br><b>' + esc(val) + '</b></div>' +
       (copy ? '<button type="button" class="dp-cp" data-c="' + esc(copy) + '">Copy</button>' : '') + '</div>';
+  }
+  // admin-written steps: {number} {amount} {ussd} {name} are filled in, **text** becomes bold
+  function tpl(s, m, v, usd){
+    var map = {number: m.acct, amount: m.usd ? '$' + usd : fmt(v), ussd: m.ussd, name: m.name};
+    return esc(s).replace(/\{(number|amount|ussd|name)\}/g, function(_, k){ return '<b>' + esc(map[k]) + '</b>'; }).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   }
   function build(){
     var m = M[meth.value], v = a(); if (!m) return;
-    var pay = '', how = [];
+    var usd = m.usd && RATE > 0 ? (v / RATE).toFixed(2) : '', pay = '', how = [];
+    $('#dpLogoBox').innerHTML = m.logo;
+    $('#dpTitle').textContent = 'Pay with ' + m.name;
+    var n = $('#dpMNote'); n.textContent = m.note || ''; n.hidden = !m.note;
     if (m.usd) {
-      var usd = (v / RATE).toFixed(2);
-      $('#dpTitle').textContent = 'Pay with Binance';
-      $('#dpLead').textContent = 'Send exactly the amount below using Binance Pay.';
-      pay = row('Binance Pay ID', m.acct, m.acct) + row('Amount to send', '$' + usd, usd);
-      how = ['Open the Binance app → <b>Pay</b> → <b>Send</b>.', 'Enter the Pay ID above and the exact USD amount.', 'Confirm the payment, then copy the <b>Order ID</b> from the receipt.', 'Paste the Order ID below and submit.'];
-      $('#dpTrxL').textContent = 'Order ID';
+      $('#dpLead').textContent = 'Send exactly the amount below using ' + m.name + '.';
+      pay = row(m.label, m.acct, m.acct) + row('Amount to send', '$' + usd, usd);
+      how = ['Open the ' + esc(m.name) + ' app → <b>Pay</b> → <b>Send</b>.', 'Enter the ID above and the exact USD amount.', 'Confirm the payment, then copy the <b>' + esc(m.tid) + '</b> from the receipt.', 'Paste it below and submit.'];
     } else {
-      $('#dpTitle').textContent = 'Pay with ' + m.name;
-      $('#dpLead').textContent = 'Use Send Money from your personal ' + m.name + ' account.';
-      pay = row('Send money to', m.acct, m.acct) + row('Amount', fmt(v), String(v));
-      how = ['Dial <b>' + m.ussd + '</b> or open the ' + m.name + ' app.', 'Choose <b>Send Money</b>.', 'Enter the number and amount above, then confirm with your PIN.', 'Copy the <b>TrxID</b> from the confirmation SMS and paste it below.'];
-      $('#dpTrxL').textContent = 'Transaction ID (TrxID)';
+      $('#dpLead').textContent = 'Pay from your ' + m.name + ' account using the details below.';
+      pay = row(m.label, m.acct, m.acct) + row('Amount', fmt(v), String(v));
+      how = [(m.ussd ? 'Dial <b>' + esc(m.ussd) + '</b> or open' : 'Open') + ' the ' + esc(m.name) + ' app.', 'Choose <b>Send Money</b>.', 'Enter the number and amount above, then confirm with your PIN.', 'Copy the <b>' + esc(m.tid) + '</b> from the confirmation message and paste it below.'];
     }
+    if (m.steps && m.steps.length) how = m.steps.map(function(s){ return tpl(s, m, v, usd); });
+    $('#dpTrxL').textContent = m.tid === 'TrxID' ? 'Transaction ID (TrxID)' : m.tid;
     $('#dpPay').innerHTML = pay;
     $('#dpHow').innerHTML = how.map(function(h){return '<li>' + h + '</li>'}).join('');
     sum();
