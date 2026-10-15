@@ -179,16 +179,88 @@ user_start('Deposits', $u, 'deposits'); ?>
 .dp .dp-bd.pending{background:rgba(217,138,0,.14);color:var(--warn)}.dp .dp-bd.approved{background:rgba(18,163,107,.14);color:var(--ok)}.dp .dp-bd.rejected{background:rgba(229,72,77,.12);color:var(--bad)}
 .dp .dp-empty{text-align:center;color:var(--mute);padding:22px 0;font-size:13px;grid-column:1/-1}
 
-@media(max-width:380px){
-  .dp .dp-box{padding:14px}.dp .dp-bal{font-size:25px}
-  .dp .dp-mth{padding:9px 8px;gap:7px}.dp .dp-stat{padding:7px 8px}
+/* History toggle */
+.dp details.dp-box>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;-webkit-tap-highlight-color:transparent}
+.dp details.dp-box>summary::-webkit-details-marker{display:none}
+.dp details.dp-box>summary:after{content:"▾";color:var(--mute);font-size:16px;transition:.2s}
+.dp details.dp-box[open]>summary:after{transform:rotate(180deg)}
+.dp details.dp-box[open]>summary{margin-bottom:6px}
+.dp .dp-sum.dp-x{display:flex}
+
+/* ===== Mobile: compact so the whole deposit flow fits one screen ===== */
+@media(max-width:600px){
+  .dp{font-size:13px;max-width:none}
+  .dp .dp-hero{border-radius:14px;padding:10px 12px;box-shadow:0 6px 16px rgba(91,75,255,.22)}
+  .dp .dp-hero:before{width:120px;height:120px;right:-40px;top:-60px}
+  .dp .dp-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .dp .dp-hero small{font-size:9.5px}
+  .dp .dp-bal{font-size:22px;margin:0}
+  .dp .dp-stats{gap:6px}
+  .dp .dp-stat{padding:5px 8px;border-radius:9px}
+  .dp .dp-stat b{font-size:12.5px}
+  .dp .dp-stat span{font-size:9.5px}
+  .dp .dp-box{padding:10px 12px;margin-top:8px;border-radius:14px}
+  .dp .dp-steps{margin-bottom:8px;gap:6px}
+  .dp .dp-stp{font-size:11px;gap:5px}
+  .dp .dp-stp i{width:18px;height:18px;font-size:10px}
+  .dp .dp-sec{margin-top:8px}
+  .dp label.dp-l{font-size:10px;margin-bottom:4px}
+  .dp .dp-amt{padding:0 10px;border-radius:11px}
+  .dp .dp-amt span{font-size:18px}
+  .dp .dp-amt input{font-size:20px;padding:6px 0}
+  .dp .dp-chips{flex-wrap:nowrap;overflow-x:auto;gap:5px;margin-top:6px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .dp .dp-chips::-webkit-scrollbar{display:none}
+  .dp .dp-chip{padding:4px 10px;font-size:12px;flex:none}
+  .dp .dp-hint{font-size:11px;margin-top:4px}
+  .dp .dp-methods{gap:6px}
+  .dp .dp-mth{padding:7px 8px;gap:7px;border-radius:11px}
+  .dp .dp-mth b{font-size:12.5px}
+  .dp .dp-mth small{font-size:10px}
+  .dp .dp-mth .dp-tags{margin-top:1px}
+  .dp .dp-tag{font-size:9px;padding:0 5px}
+  .dp .dp-summary{margin-top:8px;padding:2px 12px;border-radius:11px}
+  .dp .dp-sum{padding:4px 0;font-size:12px}
+  .dp .dp-sum:not(.dp-tt){display:none}   /* fee/bonus already shown as tags on the method cards */
+  .dp .dp-sum.dp-tt{padding:5px 0;font-size:13px}
+  .dp .dp-sum.dp-tt b{font-size:15px}
+  .dp .dp-acts{margin-top:8px;gap:6px}
+  .dp .dp-b{padding:10px 14px;font-size:14px;border-radius:10px}
+  .dp .dp-note{display:none}
+  .dp .dp-alert{padding:6px 10px;margin-bottom:8px;font-size:12px;border-radius:10px}
+  .dp h3{font-size:14px}
+  .dp .dp-lead{font-size:11.5px;margin:0}
+  /* step 2: hide balance card + history, tighten everything */
+  .dp.s2 .dp-hero,.dp.s2 .dp-hist{display:none}
+  .dp .dp-t2{margin-bottom:6px;gap:8px}
+  .dp .dp-pay{padding:0 12px;margin-bottom:8px;border-radius:11px}
+  .dp .dp-row{padding:6px 0}
+  .dp .dp-row span{font-size:10.5px}
+  .dp .dp-row b{font-size:14px}
+  .dp .dp-cp{padding:4px 10px;font-size:11.5px}
+  .dp ol.dp-how{margin-bottom:8px}
+  .dp ol.dp-how li{padding:2px 0 2px 26px;font-size:12px;line-height:1.3}
+  .dp ol.dp-how li:before{width:18px;height:18px;font-size:10px;top:2px}
+  .dp input.dp-t{padding:9px 12px;font-size:15px;border-radius:10px}
+  .dp .dp-hi{padding:7px 0}
+}
+/* short phones: squeeze a bit more */
+@media(max-width:600px) and (max-height:700px){
+  .dp .dp-hero{padding:8px 10px}
+  .dp .dp-bal{font-size:20px}
+  .dp .dp-top{margin-bottom:6px}
+  .dp .dp-stat{padding:4px 7px}
+  .dp .dp-box{padding:8px 10px;margin-top:6px}
+  .dp .dp-steps{margin-bottom:6px}
+  .dp .dp-amt input{padding:4px 0}
+  .dp .dp-mth{padding:5px 8px}
+  .dp .dp-b{padding:8px 12px}
 }
 </style>
 
 <div class="dp" id="dp">
   <div class="dp-hero">
-    <small>AVAILABLE BALANCE</small>
-    <div class="dp-bal"><?= money((float)($u['coins'] ?? 0)) ?></div>
+    <div class="dp-top"><small>AVAILABLE BALANCE</small>
+    <div class="dp-bal"><?= money((float)($u['coins'] ?? 0)) ?></div></div>
     <div class="dp-stats">
       <div class="dp-stat"><b><?= money($tot['approved']) ?></b><span>Total added</span></div>
       <div class="dp-stat"><b><?= (int)$tot['pending'] ?></b><span>Awaiting review</span></div>
@@ -222,7 +294,7 @@ user_start('Deposits', $u, 'deposits'); ?>
         <div class="dp-methods">
         <?php foreach ($METHODS as $k => $m): ?>
           <button type="button" class="dp-mth" data-m="<?= e($k) ?>" style="--c:<?= e($m['color']) ?>" <?= $m['ok'] ? '' : 'disabled' ?>>
-            <?= pm_logo_html($m, 36) ?>
+            <?= pm_logo_html($m, 30) ?>
             <span><b><?= e($m['name']) ?></b><small data-sub><?= $m['ok'] ? e($m['sub']) : 'Unavailable' ?></small>
               <?php if ($m['ok'] && ((float)$m['fee_pct'] > 0 || (float)$m['bonus_pct'] > 0)): ?><span class="dp-tags">
                 <?php if ((float)$m['fee_pct'] > 0): ?><span class="dp-tag fee"><?= e((string)(float)$m['fee_pct']) ?>% fee</span><?php endif; ?>
@@ -234,8 +306,8 @@ user_start('Deposits', $u, 'deposits'); ?>
       </div>
 
       <div class="dp-summary" id="dpSummary" hidden>
-        <div class="dp-sum"><span>Amount</span><b id="sAmt">—</b></div>
-        <div class="dp-sum"><span>Method</span><b id="sMth">—</b></div>
+        <div class="dp-sum dp-x"><span>Amount</span><b id="sAmt">—</b></div>
+        <div class="dp-sum dp-x"><span>Method</span><b id="sMth">—</b></div>
         <div class="dp-sum" id="sUsdRow" hidden><span>You pay</span><b id="sUsd"></b></div>
         <div class="dp-sum"><span>Fee</span><b id="sFee">Free</b></div>
         <div class="dp-sum" id="sBonusRow" hidden><span>Bonus</span><b id="sBonus" style="color:var(--ok)"></b></div>
@@ -260,9 +332,9 @@ user_start('Deposits', $u, 'deposits'); ?>
   </form>
   <?php endif; ?>
 
-  <div class="dp-box">
-    <h3>Deposit history</h3>
-    <p class="dp-lead" style="margin-bottom:6px">Your latest 30 requests</p>
+  <details class="dp-box dp-hist" id="dpHist" open>
+    <summary><div><h3>Deposit history</h3>
+    <p class="dp-lead">Your latest 30 requests</p></div></summary>
     <?php foreach ($deps as $d): $mk = $methodOf((string)$d['note']); $mm = $mk ? ($METHODS[$mk] ?? $ALL[$mk]) : null;
       $parts = explode(' | ', (string)$d['note']); $ref = isset($parts[1]) ? preg_replace('/^[^:]+:\s*/', '', $parts[1]) : (string)$d['note']; ?>
     <div class="dp-hi">
@@ -272,7 +344,7 @@ user_start('Deposits', $u, 'deposits'); ?>
       <div class="dp-rt"><b><?= money((float)$d['amount']) ?></b><span class="dp-bd <?= e($d['status']) ?>"><?= e($d['status']) ?></span></div>
     </div>
     <?php endforeach; if (!$deps): ?><div class="dp-empty">No deposits yet — your first one takes under a minute.</div><?php endif; ?>
-  </div>
+  </details>
 </div>
 
 <script>
@@ -288,6 +360,7 @@ user_start('Deposits', $u, 'deposits'); ?>
   function esc(s){var d = document.createElement('div'); d.textContent = s; return d.innerHTML.replace(/"/g, '&quot;')}
   function show(n, scroll){
     cur = n;
+    $('#dp').classList.toggle('s2', n === 2);
     $$('.dp-pane').forEach(function(p){p.classList.toggle('on', +p.dataset.p === n)});
     $$('.dp-stp').forEach(function(s){var i = +s.dataset.s; s.classList.toggle('on', i === n); s.classList.toggle('done', i < n); s.firstChild.textContent = i < n ? '✓' : i});
     if (n === 2) build();
@@ -372,5 +445,9 @@ user_start('Deposits', $u, 'deposits'); ?>
   sum();
   <?php if ($err): ?>if (okAmt() && M[meth.value]) show(2, false);<?php endif; ?>
 })();
+</script>
+<script>
+// on phones the deposit history starts collapsed so the page fits one screen
+(function(){var h=document.getElementById('dpHist');if(h&&window.matchMedia&&window.matchMedia('(max-width:600px)').matches)h.removeAttribute('open')})();
 </script>
 <?php user_end();
