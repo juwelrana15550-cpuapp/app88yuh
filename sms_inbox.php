@@ -29,7 +29,7 @@ const SMS_SENDER_CODES = ['16216' => 'rocket'];
 /** Who sent the SMS: 'bKash' / 'NAGAD' / '16216' / '+88016216' ...  ->  provider key or ''. */
 function sms_sender_provider(string $sender): string {
     $digits = preg_replace('/\D+/', '', $sender);
-    foreach (SMS_SENDER_CODES as $code => $p) if ($digits === $code) return $p;
+    foreach (SMS_SENDER_CODES as $code => $p) if ($digits === (string)$code) return $p;   // PHP turns the numeric array key into an int, so compare as text
     return sms_slug($sender);
 }
 
