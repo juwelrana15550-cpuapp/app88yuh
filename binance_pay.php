@@ -28,8 +28,15 @@ function bn_mask(string $s): string { return $s === '' ? '' : str_repeat('•', 
 /** 'pay' | 'bsc' | null — is this payment method one of the auto-verified ones? */
 function bn_kind(string $methodId): ?string {
     if ($methodId === '') return null;
-    if ($methodId === (string)setting('bn_pay_method', '')) return 'pay';
-    if ($methodId === (string)setting('bn_bsc_method', '')) return 'bsc';
+    $pay = (string)setting('bn_pay_method', ''); $bsc = (string)setting('bn_bsc_method', '');
+    if ($pay !== '' && $methodId === $pay) return 'pay';
+    if ($bsc !== '' && $methodId === $bsc) return 'bsc';
+    // Not chosen in the admin card yet: recognise the method by its name so a missed dropdown never silently turns auto-verify off.
+    static $names = null;
+    if ($names === null) { $names = []; foreach (pm_all() as $k => $m) $names[(string)$k] = (string)($m['name'] ?? ''); }
+    $n = $names[$methodId] ?? '';
+    if ($bsc === '' && preg_match('/bep-?\s?20|\bbsc\b|bnb\s*smart|binance\s*smart/i', $n)) return 'bsc';
+    if ($pay === '' && preg_match('/binance/i', $n) && !preg_match('/bep|bsc|smart|chain/i', $n)) return 'pay';
     return null;
 }
 /** Is auto-verification usable for this kind right now? (otherwise deposits fall back to manual review) */
