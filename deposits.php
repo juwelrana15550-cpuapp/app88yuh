@@ -342,6 +342,16 @@ user_start('Deposits', $u, 'deposits'); ?>
 .dp-ok .lock{margin-top:12px;font-size:11.5px;color:#9aa0b8}
 @keyframes dpspin{to{transform:rotate(360deg)}}
 @keyframes dppulse{0%,100%{opacity:.55}50%{opacity:1}}
+/* Animated halo around the result icons */
+.dp-ok .chk{--c:#12a36b;position:relative}
+.dp-ok .chk.warn{--c:#d98a00}
+.dp-ok .chk.bad{--c:#e5484d}
+.dp-ok .chk,.dp-ok .chk.warn,.dp-ok .chk.bad{animation:dpglow 2.4s ease-in-out infinite}
+.dp-ok .chk:before,.dp-ok .chk:after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--c);opacity:0;pointer-events:none;animation:dpripple 2.4s ease-out infinite}
+.dp-ok .chk:after{animation-delay:1.2s}
+@keyframes dpglow{0%,100%{box-shadow:0 0 0 8px color-mix(in srgb,var(--c) 18%,transparent),0 0 18px color-mix(in srgb,var(--c) 25%,transparent)}50%{box-shadow:0 0 0 14px color-mix(in srgb,var(--c) 8%,transparent),0 0 30px color-mix(in srgb,var(--c) 38%,transparent)}}
+@keyframes dpripple{0%{transform:scale(1);opacity:.5}100%{transform:scale(1.85);opacity:0}}
+@media (prefers-reduced-motion:reduce){.dp-ok .chk,.dp-ok .chk:before,.dp-ok .chk:after{animation:none}}
 @keyframes dpfade{from{opacity:0}to{opacity:1}}
 @keyframes dppop{from{opacity:0;transform:scale(.8) translateY(14px)}to{opacity:1;transform:none}}
 @keyframes dpdraw{to{stroke-dashoffset:0}}
