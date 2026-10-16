@@ -119,7 +119,7 @@ function sms_parse(string $sender, string $contact, string $body): array {
     $trx = null;
     if (preg_match('/(?:Trx\s*ID|Txn\s*ID|Tnx\s*ID|Trnx\s*ID|Transaction\s*ID)\s*[:\-]?\s*([A-Za-z0-9]{6,30})/i', $t, $m)) $trx = strtoupper($m[1]);
     $kind = ($provider !== '' && $incoming && $amount !== null && $amount > 0 && $trx !== null) ? 'in' : 'other';
-    return ['provider' => $provider, 'kind' => $kind, 'amount' => $amount, 'trx' => $trx];
+    return ['provider' => $provider, 'kind' => $kind, 'amount' => $amount, 'trx' => $trx, 'incoming' => $incoming];
 }
 
 /** Save one parsed SMS. Returns [id|0, isNew]. Same provider+TrxID twice is ignored (the app may retry). */
@@ -223,4 +223,27 @@ function sms_take_notice(PDO $pdo, int $uid): ?array {
     $p = explode(' | ', (string)$d['note']);
     $trx = isset($p[1]) ? trim(preg_replace('/^[^:]+:\s*/', '', $p[1])) : '';
     return ['amt' => (float)$d['amount'], 'method' => $p[0] ?? 'Deposit', 'trx' => $trx, 'paid' => $p[2] ?? '', 'at' => time()];
+}
+
+/** Plain-words reason why one stored SMS did not credit a deposit (shown after the admin presses Re-check). */
+function sms_diagnose(PDO $pdo, int $smsId): string {
+    $st = $pdo->prepare('SELECT * FROM sms_inbox WHERE id = ?'); $st->execute([$smsId]);
+    if (!($s = $st->fetch())) return 'SMS not found.';
+    if ($s['used']) return 'This SMS was already used for deposit #' . (int)$s['deposit_id'] . '.';
+    $p = sms_parse((string)$s['sender'], (string)$s['contact'], (string)$s['body']);
+    if ($p['provider'] === '') return 'Sender "' . $s['sender'] . '" is not recognised (expected 16216, bKash, Nagad or Upay).';
+    if (!$p['incoming']) return 'The text does not look like an incoming payment (it must say "received" and must not contain words like sent / paid / bill).';
+    if ($p['amount'] === null) return 'No amount (Tk ...) found in the text.';
+    if ($p['trx'] === null) return 'No transaction ID found (expected "TrxID" or "TxnID" followed by the ID).';
+    $q = $pdo->prepare("SELECT id, note, amount FROM deposits WHERE status = 'pending' AND note LIKE ? ORDER BY id LIMIT 5");
+    $q->execute(['%| TrxID: ' . $p['trx'] . ' |%']);
+    $rows = $q->fetchAll();
+    if (!$rows) return 'SMS read OK (' . ucfirst($p['provider']) . ', Tk ' . $p['amount'] . ', ' . $p['trx'] . ') but no WAITING deposit request has this transaction ID. The user must submit exactly ' . $p['trx'] . '.';
+    foreach ($rows as $d) {
+        [$mname, $trx, $amt] = sms_note_parts((string)$d['note']);
+        if (sms_slug($mname) !== $p['provider']) return 'Deposit #' . $d['id'] . ' is for method "' . $mname . '" but the SMS is from ' . ucfirst($p['provider']) . '.';
+        if ($amt === null) return 'Deposit #' . $d['id'] . ' has no BDT amount in its note, so it cannot be matched automatically.';
+        if (abs($amt - (float)$p['amount']) > 0.009) return 'Deposit #' . $d['id'] . ' asks for Tk ' . $amt . ' but the SMS says Tk ' . $p['amount'] . '.';
+    }
+    return 'Everything looks right (' . ucfirst($p['provider']) . ', Tk ' . $p['amount'] . ', ' . $p['trx'] . '). Press Re-check once more.';
 }

@@ -536,7 +536,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 go('transactions', $n->rowCount() ? 'SMS deleted.' : 'This SMS was already used for a deposit, so it is kept for your records.');
             } elseif ($_POST['sms_act'] === 'recheck') {
                 $dep = sms_match_pending($pdo, $sid, $bonus);
-                go('transactions', $dep ? 'Matched with deposit #' . $dep . ' and the balance was added.' : 'No waiting request matches this SMS (method, amount and transaction ID must all be the same).');
+                go('transactions', $dep ? 'Matched with deposit #' . $dep . ' and the balance was added.' : 'Not matched: ' . sms_diagnose($pdo, $sid));
             }
             go('transactions');
 
