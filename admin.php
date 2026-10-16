@@ -1,6 +1,7 @@
 <?php require __DIR__ . '/lib.php';
 require __DIR__ . '/stock_import.php';
 require __DIR__ . '/payment_methods.php';
+require __DIR__ . '/binance_pay.php';   // Binance Pay + BSC USDT auto-verification
 $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever currency the browser picked on the shop
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
@@ -463,6 +464,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 save_setting('dep_chips', implode(',', array_slice($dChips, 0, 8)));
                 save_setting('dep_notice', mb_substr(trim((string)($_POST['dep_notice'] ?? '')), 0, 300));
                 go('payments', 'Deposit settings saved.');
+            }
+
+        } elseif (isset($_POST['save_binance']) || isset($_POST['bn_test']) || isset($_POST['bn_clear'])) {
+            $page = 'payments';
+            if (isset($_POST['bn_clear'])) {
+                save_setting('bn_api_key', ''); save_setting('bn_api_secret', '');
+                go('payments', 'Binance API key and secret removed.');
+            } elseif (isset($_POST['bn_test'])) {
+                [$okT, $msgT] = bn_test();
+                flash($okT ? 'ok' : 'err', $msgT); go('payments');
+            }
+            $k1 = trim((string)($_POST['bn_api_key'] ?? '')); $k2 = trim((string)($_POST['bn_api_secret'] ?? ''));
+            $ids = array_keys(pm_all());
+            $mp = (string)($_POST['bn_pay_method'] ?? ''); $mb = (string)($_POST['bn_bsc_method'] ?? '');
+            $cf = (int)($_POST['bn_bsc_conf'] ?? 15); $rpc = trim((string)($_POST['bn_bsc_rpc'] ?? ''));
+            if (($k1 !== '' && !preg_match('/^[A-Za-z0-9]{20,128}$/', $k1)) || ($k2 !== '' && !preg_match('/^[A-Za-z0-9]{20,128}$/', $k2))) $pmErr = 'API key / secret look wrong. Copy them again from Binance (letters and numbers only).';
+            elseif (($mp !== '' && !in_array($mp, $ids, true)) || ($mb !== '' && !in_array($mb, $ids, true))) $pmErr = 'Choose existing payment methods.';
+            elseif ($mp !== '' && $mp === $mb) $pmErr = 'Binance Pay and BSC must be two different payment methods.';
+            elseif ($cf < 1 || $cf > 200) $pmErr = 'Confirmations must be between 1 and 200.';
+            elseif ($rpc !== '' && !preg_match('#^https://\S+$#i', $rpc)) $pmErr = 'RPC URL must start with https://';
+            else {
+                if ($k1 !== '') save_setting('bn_api_key', $k1);        // empty field = keep the saved value
+                if ($k2 !== '') save_setting('bn_api_secret', $k2);
+                save_setting('bn_pay_method', $mp); save_setting('bn_bsc_method', $mb);
+                save_setting('bn_bsc_conf', (string)$cf); save_setting('bn_bsc_rpc', $rpc);
+                go('payments', 'Binance auto-verification settings saved.');
             }
 
         } elseif (isset($_POST['pm_toggle'])) {
@@ -1133,6 +1160,33 @@ $lg = media_url('logo');
   <textarea name="dep_notice" rows="2" maxlength="300" placeholder="e.g. Send money only from a personal account. Deposits are approved within 30 minutes."><?= e($vNote) ?></textarea>
   <small class="hint">Each method can set its own limits too, but they can only narrow this range.</small>
   <div class="savebar"><button class="btn" name="save_dep_settings" value="1">Save deposit settings</button></div>
+</div>
+</form>
+
+<form method="post" autocomplete="off"><?= csrf_field() ?>
+<?php $bnK = bn_key(); $bnS = bn_secret(); $bnOk = $bnK !== '' && $bnS !== '';
+  $bv = fn(string $k, string $d = '') => e(isset($_POST['save_binance']) ? (string)($_POST[$k] ?? $d) : (string)setting($k, $d)); ?>
+<div class="card"><div class="card-h"><h3>Binance auto-verification</h3><span class="badge <?= $bnOk ? 'on' : 'off' ?>"><?= $bnOk ? 'Keys saved' : 'No keys' ?></span></div>
+  <small class="hint" style="margin:0 0 6px">Deposits made with the two methods chosen below are checked automatically and the balance is added instantly. If the check is unavailable, the request goes to manual review.</small>
+  <div class="pm-g2">
+    <div><label style="margin-top:0">Binance API key</label><input type="password" name="bn_api_key" autocomplete="new-password" placeholder="<?= $bnK !== '' ? e(bn_mask($bnK)) . '  (leave empty to keep)' : 'Paste API key' ?>"></div>
+    <div><label style="margin-top:0">Binance API secret</label><input type="password" name="bn_api_secret" autocomplete="new-password" placeholder="<?= $bnS !== '' ? e(bn_mask($bnS)) . '  (leave empty to keep)' : 'Paste secret key' ?>"></div>
+  </div>
+  <small class="hint">Create the key in Binance &rarr; API Management with <b>Enable Reading</b> only (no trading / withdrawal). Used for Binance Pay. The secret is never shown again. Environment variables BINANCE_API_KEY / BINANCE_API_SECRET also work.</small>
+  <div class="pm-g2">
+    <div><label>Binance Pay method</label><select name="bn_pay_method"><option value="">— not automatic —</option>
+      <?php foreach ($pmAll as $k => $m): ?><option value="<?= e($k) ?>"<?= $bv('bn_pay_method') === e($k) ? ' selected' : '' ?>><?= e($m['name']) ?></option><?php endforeach; ?></select></div>
+    <div><label>USDT BEP-20 (BSC) method</label><select name="bn_bsc_method"><option value="">— not automatic —</option>
+      <?php foreach ($pmAll as $k => $m): ?><option value="<?= e($k) ?>"<?= $bv('bn_bsc_method') === e($k) ? ' selected' : '' ?>><?= e($m['name']) ?></option><?php endforeach; ?></select></div>
+  </div>
+  <small class="hint">First create both methods above (Add method). For Binance Pay put your <b>Pay ID</b> in the account field; for BSC put your <b>receiving wallet address (0x…)</b> there. Deposits are converted with the dollar rate in Settings.</small>
+  <div class="pm-g2">
+    <div><label>BSC confirmations required</label><input type="number" name="bn_bsc_conf" min="1" max="200" value="<?= $bv('bn_bsc_conf', '15') ?>"></div>
+    <div><label>Own BSC RPC URL <small>(optional)</small></label><input type="text" name="bn_bsc_rpc" value="<?= $bv('bn_bsc_rpc') ?>" placeholder="https://bsc-dataseed.binance.org/"></div>
+  </div>
+  <div class="savebar"><button class="btn" name="save_binance" value="1">Save</button>
+    <button class="btn ghost" name="bn_test" value="1"<?= $bnOk ? '' : ' disabled' ?>>Test connection</button>
+    <?php if ($bnOk && setting('bn_api_key', '') !== ''): ?><button class="btn sm red" name="bn_clear" value="1" onclick="return confirm('Remove the saved API key and secret?')">Remove keys</button><?php endif; ?></div>
 </div>
 </form>
 

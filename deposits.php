@@ -1,5 +1,6 @@
 <?php require __DIR__ . '/lib.php';
 require __DIR__ . '/payment_methods.php';
+require __DIR__ . '/binance_pay.php';   // Binance Pay + BSC USDT automatic verification
 $u = require_login();
 
 /* Payment methods, limits, fees and the on/off switch are all managed in Admin > Payment methods. */
@@ -19,36 +20,68 @@ $nf = function (float $n): string { return number_format($n, floor($n) == $n ? 0
 $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $amt = round((float)($_POST['amount'] ?? 0), 2);
-    $mk  = (string)($_POST['method'] ?? '');
-    $trx = strtoupper(preg_replace('/\s+/', '', (string)($_POST['trx'] ?? '')));
+    $amt  = round((float)($_POST['amount'] ?? 0), 2);
+    $mk   = (string)($_POST['method'] ?? '');
+    $kind = isset($METHODS[$mk]) ? bn_kind($mk) : null;              // 'pay' | 'bsc' | null (manual method)
+    $raw  = preg_replace('/\s+/', '', (string)($_POST['trx'] ?? ''));
+    $trx  = $kind === 'bsc' ? strtolower($raw) : strtoupper($raw);   // a BSC hash is 0x + 64 hex characters
+    $validTrx = $kind === 'bsc' ? (bool)preg_match('/^0x[a-f0-9]{64}$/', $trx) : (bool)preg_match('/^[A-Z0-9]{6,40}$/', $trx);
     if (!$CFG['on']) $err = 'Deposits are paused right now. Please try again later.';
     elseif (!isset($METHODS[$mk]) || !$METHODS[$mk]['ok']) $err = 'Please choose a payment method.';
     elseif ($amt < $METHODS[$mk]['lmin'] || $amt > $METHODS[$mk]['lmax']) $err = 'Amount for ' . $METHODS[$mk]['name'] . ' must be between ' . $nf($METHODS[$mk]['lmin']) . ' and ' . $nf($METHODS[$mk]['lmax']) . '.';
-    elseif (!preg_match('/^[A-Z0-9]{6,40}$/', $trx)) $err = 'Enter a valid ' . $METHODS[$mk]['tid_label'] . ' (letters and numbers only, 6-40 characters).';
+    elseif (!$validTrx) $err = $kind === 'bsc' ? 'Enter the full transaction hash (starts with 0x, 66 characters).' : 'Enter a valid ' . $METHODS[$mk]['tid_label'] . ' (letters and numbers only, 6-40 characters).';
     else {
         $M = $METHODS[$mk];
         $pdo = db();
+        $auto = $kind !== null && bn_ready($kind) && $usdRate > 0;   // automatic check possible? otherwise the normal manual review below
         $st = $pdo->prepare("SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'"); $st->execute([$u['id']]);
-        if ((int)$st->fetchColumn() >= $CFG['pending']) {
-            $err = 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.';
-        } else {
-            $st = $pdo->prepare('SELECT COUNT(*) FROM deposits WHERE note LIKE ?'); $st->execute(['%TrxID: ' . $trx . ' |%']);
-            if ((int)$st->fetchColumn() > 0) $err = 'This ' . $M['tid_label'] . ' was already submitted.';
-            else {
-                $paid = $M['is_usd'] ? '$' . number_format($amt / $usdRate, 2) : 'BDT ' . number_format($amt, 2);
-                $credit = pm_credit($M, $amt);   // amount minus the method fee, plus the method bonus
-                $note = $M['name'] . ' | TrxID: ' . $trx . ' | ' . $paid;   // shown to the admin as the deposit note
-                if ((float)$M['fee_pct'] > 0)   $note .= ' | Fee ' . (float)$M['fee_pct'] . '%';
-                if ((float)$M['bonus_pct'] > 0) $note .= ' | Bonus ' . (float)$M['bonus_pct'] . '%';
+        $st2 = $pdo->prepare('SELECT COUNT(*) FROM deposits WHERE note LIKE ?'); $st2->execute(['%TrxID: ' . $trx . ' |%']);
+        $tries = array_values(array_filter($_SESSION['bn_try'] ?? [], fn($t) => $t > time() - 600));   // max 10 automatic checks / 10 min / session
+        if ((int)$st2->fetchColumn() > 0) $err = 'This ' . $M['tid_label'] . ' was already submitted.';
+        elseif (!$auto && (int)$st->fetchColumn() >= $CFG['pending']) $err = 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.';
+        elseif ($auto && count($tries) >= 10) $err = 'Too many attempts. Please wait a few minutes and try again.';
+        else {
+            $credit  = pm_credit($M, $amt);   // amount minus the method fee, plus the method bonus
+            $usdAmt  = number_format(round($amt / max($usdRate, 0.0001), 2), 2, '.', '');
+            $paid    = ($M['is_usd'] || $kind) && $usdRate > 0 ? '$' . number_format((float)$usdAmt, 2) : 'BDT ' . number_format($amt, 2);
+            $note    = $M['name'] . ' | TrxID: ' . $trx . ' | ' . $paid;   // shown to the admin as the deposit note
+            if ((float)$M['fee_pct'] > 0)   $note .= ' | Fee ' . (float)$M['fee_pct'] . '%';
+            if ((float)$M['bonus_pct'] > 0) $note .= ' | Bonus ' . (float)$M['bonus_pct'] . '%';
+            $manual = !$auto;   // true = create a pending request for the admin
+
+            if ($auto) {
+                $tries[] = time(); $_SESSION['bn_try'] = $tries;
+                try {
+                    $r = $kind === 'bsc' ? bn_verify_bsc($trx, (string)$M['acct'], $usdAmt) : bn_verify_pay($trx, $usdAmt);
+                } catch (Throwable $ex) {
+                    error_log('[binance-auto] ' . $kind . ': ' . $ex->getMessage());   // the API secret is never part of this message
+                    $r = ['state' => 'ERROR'];
+                }
+                switch ($r['state']) {
+                    case 'SUCCESS':
+                        if (bn_credit($pdo, (int)$u['id'], $kind, $trx, (float)$credit, $note, (float)(getenv('REFERRAL_BONUS') ?: 10))) {
+                            $_SESSION['dep_success'] = ['amt' => (float)$credit, 'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'at' => time()];   // shown once as a success popup
+                            header('Location: /deposits.php'); exit;
+                        }
+                        $err = 'This ' . $M['tid_label'] . ' was already used.'; break;
+                    case 'NOT_FOUND':   $err = 'We could not find this payment yet. Check the ID and try again in a minute.'; break;
+                    case 'CONFIRMING':  $err = 'Payment found, but it is still being confirmed on the network. Please try again in a minute.'; break;
+                    case 'WRONG_AMOUNT':$err = 'The amount does not match. You must send exactly $' . $usdAmt . ' (USDT).'; break;
+                    case 'WRONG_TOKEN': $err = $kind === 'bsc' ? 'No USDT (BEP-20) transfer to our address was found in this transaction.' : 'This payment was not made in USDT.'; break;
+                    case 'FAILED':      $err = 'This transaction failed or was not completed.'; break;
+                    default:            $manual = true; $note .= ' | auto-check unavailable';   // temporary error: never reject a payment because of it
+                }
+            }
+            if ($err === '' && $manual) {
                 $pdo->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')->execute([$u['id'], $credit, substr($note, 0, 255)]);
-                flash('ok', 'Request received. Your balance is credited as soon as we confirm the payment.');
+                flash('ok', $auto ? 'Automatic check is unavailable right now. Your request was saved and will be credited after review.' : 'Request received. Your balance is credited as soon as we confirm the payment.');
                 header('Location: /deposits.php'); exit;
             }
         }
     }
 }
 
+$ok = $_SESSION['dep_success'] ?? null; unset($_SESSION['dep_success']);   // success popup data (set after an automatic credit)
 $s = db()->prepare('SELECT * FROM deposits WHERE user_id = ? ORDER BY id DESC LIMIT 30'); $s->execute([$u['id']]);
 $deps = $s->fetchAll();
 $tot = ['approved' => 0.0, 'pending' => 0, 'n' => 0];
@@ -62,7 +95,7 @@ $methodOf = function (string $note) use ($ALL) {
 };
 $jsMethods = [];
 foreach ($METHODS as $k => $m) $jsMethods[$k] = [
-    'name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => (bool)$m['is_usd'],
+    'name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => (bool)$m['is_usd'] || bn_kind((string)$k) !== null, 'auto' => bn_kind((string)$k) ?? '',
     'tid' => $m['tid_label'], 'label' => $m['acct_label'], 'sub' => $m['sub'], 'note' => $m['notice'], 'color' => $m['color'],
     'steps' => $m['steps'] !== null && $m['steps'] !== '' ? explode("\n", $m['steps']) : [],
     'min' => (float)$m['lmin'], 'max' => (float)$m['lmax'], 'fee' => (float)$m['fee_pct'], 'bonus' => (float)$m['bonus_pct'],
@@ -255,7 +288,47 @@ user_start('Deposits', $u, 'deposits'); ?>
   .dp .dp-mth{padding:5px 8px}
   .dp .dp-b{padding:8px 12px}
 }
+
+/* Success popup */
+.dp-ov{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(18,20,42,.55);backdrop-filter:blur(3px);animation:dpfade .25s ease}
+.dp-ov[hidden]{display:none}
+.dp-ok{width:100%;max-width:380px;background:#fff;color:#12142a;border-radius:22px;padding:26px 22px 20px;text-align:center;box-shadow:0 24px 60px rgba(18,20,42,.35);animation:dppop .45s cubic-bezier(.2,1.3,.4,1);font-family:inherit}
+.dp-ok .chk{width:76px;height:76px;margin:0 auto 14px;border-radius:50%;background:#12a36b;display:grid;place-items:center;box-shadow:0 0 0 10px rgba(18,163,107,.14);animation:dpring 1.6s ease-out .3s 2}
+.dp-ok .chk svg{width:40px;height:40px;stroke:#fff;stroke-width:4;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:48;stroke-dashoffset:48;animation:dpdraw .5s ease .35s forwards}
+.dp-ok h2{margin:0;font-size:20px;font-weight:800}
+.dp-ok .sub{margin:4px 0 14px;color:#6b7089;font-size:13px}
+.dp-ok .big{font-size:32px;font-weight:800;color:#12a36b;letter-spacing:-.02em;margin-bottom:14px}
+.dp-ok .rows{background:#f5f6fb;border:1px solid #e6e8f2;border-radius:14px;padding:2px 14px;text-align:left}
+.dp-ok .rows div{display:flex;justify-content:space-between;gap:12px;padding:8px 0;font-size:13px;border-bottom:1px dashed #e6e8f2}
+.dp-ok .rows div:last-child{border:0}
+.dp-ok .rows span{color:#6b7089;flex:none}.dp-ok .rows b{text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dp-ok button{margin-top:16px;width:100%;border:0;border-radius:12px;padding:13px;font-size:15px;font-weight:800;color:#fff;cursor:pointer;background:linear-gradient(135deg,#12a36b,#0e8a5a);box-shadow:0 6px 14px rgba(18,163,107,.3)}
+@keyframes dpfade{from{opacity:0}to{opacity:1}}
+@keyframes dppop{from{opacity:0;transform:scale(.8) translateY(14px)}to{opacity:1;transform:none}}
+@keyframes dpdraw{to{stroke-dashoffset:0}}
+@keyframes dpring{0%{box-shadow:0 0 0 0 rgba(18,163,107,.45)}100%{box-shadow:0 0 0 22px rgba(18,163,107,0)}}
 </style>
+
+<?php if ($ok): ?>
+<div class="dp-ov" id="dpOk" role="dialog" aria-modal="true" aria-labelledby="dpOkT">
+  <div class="dp-ok">
+    <div class="chk"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+    <h2 id="dpOkT">Payment Successful</h2>
+    <p class="sub">Your balance was added successfully.</p>
+    <div class="big">+ <?= money($ok['amt']) ?></div>
+    <div class="rows">
+      <div><span>Method</span><b><?= e($ok['method']) ?></b></div>
+      <div><span>You paid</span><b><?= e($ok['paid']) ?></b></div>
+      <div><span>Transaction</span><b title="<?= e($ok['trx']) ?>"><?= e(strlen($ok['trx']) > 18 ? substr($ok['trx'], 0, 8) . '…' . substr($ok['trx'], -6) : $ok['trx']) ?></b></div>
+      <div><span>New balance</span><b><?= money((float)($u['coins'] ?? 0)) ?></b></div>
+      <div><span>Time</span><b><?= e(date('d M Y, h:i A', $ok['at'])) ?></b></div>
+    </div>
+    <button type="button" id="dpOkBtn">Done</button>
+  </div>
+</div>
+<script>(function(){var o=document.getElementById('dpOk');function c(){o.hidden=true}document.getElementById('dpOkBtn').onclick=c;o.addEventListener('click',function(e){if(e.target===o)c()});document.addEventListener('keydown',function(e){if(e.key==='Escape')c()});})();</script>
+<?php endif; ?>
+
 
 <div class="dp" id="dp">
   <div class="dp-hero">
@@ -326,7 +399,7 @@ user_start('Deposits', $u, 'deposits'); ?>
       <ol class="dp-how" id="dpHow"></ol>
       <label class="dp-l" for="dpTrx" id="dpTrxL">Transaction ID</label>
       <input class="dp-t" type="text" id="dpTrx" name="trx" maxlength="40" placeholder="e.g. 9K4M2X7Q1A" autocapitalize="characters" spellcheck="false" value="<?= $err ? e($_POST['trx'] ?? '') : '' ?>">
-      <div class="dp-hint">Letters and numbers only. Copy it from the confirmation message of your payment app.</div>
+      <div class="dp-hint" id="dpTrxHint">Letters and numbers only. Copy it from the confirmation message of your payment app.</div>
       <div class="dp-acts"><button type="button" class="dp-b g" data-next="1">Back</button><button class="dp-b p" id="dpSubmit" disabled>Submit deposit</button></div>
     </div>
   </form>
@@ -392,7 +465,11 @@ user_start('Deposits', $u, 'deposits'); ?>
     var h = $('#dpAmtHint'), msg = !amt.value ? '' : (v < MIN ? 'Minimum deposit is ' + fmt(MIN) : v > MAX ? 'Maximum deposit is ' + fmt(MAX) : '');
     h.textContent = msg || ('Min ' + fmt(MIN) + ' · Max ' + fmt(MAX)); h.classList.toggle('bad', !!msg);
     $$('.dp-chip').forEach(function(c){c.classList.toggle('on', +c.dataset.v === v)});
-    $('#dpSubmit').disabled = !(okAmt() && m && /^[A-Za-z0-9]{6,40}$/.test(trx.value.replace(/\s+/g,'')));
+    $('#dpSubmit').disabled = !(okAmt() && m && trxOk());
+  }
+  function trxOk(){
+    var m = M[meth.value], t = trx.value.replace(/\s+/g,'');
+    return m && m.auto === 'bsc' ? /^0x[A-Fa-f0-9]{64}$/.test(t) : /^[A-Za-z0-9]{6,40}$/.test(t);
   }
   function row(label, val, copy){
     return '<div class="dp-row"><div><span>' + esc(label) + '</span><b>' + esc(val) + '</b></div>' +
@@ -420,6 +497,11 @@ user_start('Deposits', $u, 'deposits'); ?>
     }
     if (m.steps && m.steps.length) how = m.steps.map(function(s){ return tpl(s, m, v, usd); });
     $('#dpTrxL').textContent = m.tid === 'TrxID' ? 'Transaction ID (TrxID)' : m.tid;
+    var bsc = m.auto === 'bsc';
+    trx.maxLength = bsc ? 66 : 40; trx.style.textTransform = bsc ? 'none' : '';
+    trx.placeholder = bsc ? '0x…  (66 characters)' : 'e.g. 9K4M2X7Q1A';
+    $('#dpTrxHint').textContent = bsc ? 'Paste the full transaction hash (TxID) from your wallet or BscScan.' : m.auto === 'pay' ? 'Paste the Binance Pay Order / Transaction ID. Your balance is added automatically.' : 'Letters and numbers only. Copy it from the confirmation message of your payment app.';
+    $('#dpSubmit').textContent = m.auto ? 'Verify & add balance' : 'Submit deposit';
     $('#dpPay').innerHTML = pay;
     $('#dpHow').innerHTML = how.map(function(h){return '<li>' + h + '</li>'}).join('');
     sum();
