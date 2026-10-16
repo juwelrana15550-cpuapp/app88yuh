@@ -1,7 +1,18 @@
 <?php require __DIR__ . '/lib.php';
 require __DIR__ . '/payment_methods.php';
 require __DIR__ . '/binance_pay.php';   // Binance Pay + BSC USDT automatic verification
+require __DIR__ . '/sms_inbox.php';     // bKash / Nagad / Rocket / Upay: automatic verification from the forwarded SMS
 $u = require_login();
+sms_schema(db());
+if (isset($_GET['poll'])) {   // the page asks every few seconds: was my waiting request credited by a late SMS?
+    header('Content-Type: application/json; charset=utf-8'); header('Cache-Control: no-store');
+    $n = sms_take_notice(db(), (int)$u['id']);
+    if (!$n) { echo json_encode(['type' => 'none']); exit; }
+    $q = db()->prepare('SELECT coins FROM users WHERE id = ?'); $q->execute([$u['id']]);
+    echo json_encode(['type' => 'success', 'amt' => $n['amt'], 'amt_html' => money($n['amt']), 'bal_html' => money((float)$q->fetchColumn()), 'method' => $n['method'], 'trx' => $n['trx'],
+        'paid' => $n['paid'], 'at_txt' => date('d M Y, h:i A')], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG);
+    exit;
+}
 
 /* Payment methods, limits, fees and the on/off switch are all managed in Admin > Payment methods. */
 $CFG = dep_cfg();
@@ -36,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     else {
         $M = $METHODS[$mk];
         $pdo = db();
+        $sms  = $kind === null && !(int)$M['is_usd'] && sms_slug((string)$M['name']) !== '';   // bKash / Nagad / Rocket / Upay: checked against the forwarded SMS
         $auto = $kind !== null && bn_ready($kind) && $usdRate > 0;   // automatic check possible? otherwise the normal manual review below
         if ($kind !== null && !$auto) bn_note_error($usdRate <= 0 ? 'Auto-verify skipped: dollar rate is not set (Admin > Settings).' : 'Auto-verify skipped: Binance API key / secret are not saved (Admin > Payment methods).');
         $st = $pdo->prepare("SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'"); $st->execute([$u['id']]);
@@ -43,7 +55,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tries = array_values(array_filter($_SESSION['bn_try'] ?? [], fn($t) => $t > time() - 600));   // max 10 automatic checks / 10 min / session
         if ((int)$st2->fetchColumn() > 0) $res = $bad('Already submitted', 'This ' . $M['tid_label'] . ' was already submitted.');
         elseif (!$auto && (int)$st->fetchColumn() >= $CFG['pending']) $res = $bad('Too many pending', 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.');
-        elseif ($auto && count($tries) >= 10) $res = $bad('Too many attempts', 'Please wait a few minutes and try again.');
+        elseif (($auto || $sms) && count($tries) >= 10) $res = $bad('Too many attempts', 'Please wait a few minutes and try again.');
         else {
             $credit  = pm_credit($M, $amt);   // amount minus the method fee, plus the method bonus
             $usdAmt  = number_format(round($amt / max($usdRate, 0.0001), 2), 2, '.', '');
@@ -52,7 +64,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((float)$M['fee_pct'] > 0)   $note .= ' | Fee ' . (float)$M['fee_pct'] . '%';
             if ((float)$M['bonus_pct'] > 0) $note .= ' | Bonus ' . (float)$M['bonus_pct'] . '%';
             $manual = !$auto;   // true = create a pending request for the admin
-            $autoDown = false;
+            $autoDown = false; $waiting = false;
 
             if ($auto) {
                 $tries[] = time(); $_SESSION['bn_try'] = $tries;
@@ -79,10 +91,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     default:            $manual = true; $autoDown = true; $note .= ' | auto-check unavailable';   // temporary error: never reject a payment because of it
                 }
             }
+            if ($sms) {
+                $tries[] = time(); $_SESSION['bn_try'] = $tries;
+                try {
+                    $r = sms_submit($pdo, (int)$u['id'], sms_slug((string)$M['name']), $trx, (float)$amt, (float)$credit, $note, (float)(getenv('REFERRAL_BONUS') ?: 10));
+                } catch (Throwable $ex) {
+                    error_log('[sms-verify] ' . $ex->getMessage());
+                    $r = ['state' => 'ERROR'];
+                }
+                switch ($r['state']) {
+                    case 'SUCCESS':
+                        $q = $pdo->prepare('SELECT coins FROM users WHERE id = ?'); $q->execute([$u['id']]);
+                        $res = ['type' => 'success', 'amt' => (float)$credit, 'amt_html' => money((float)$credit), 'bal_html' => money((float)$q->fetchColumn()),
+                                'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'at' => time(), 'at_txt' => date('d M Y, h:i A')];
+                        break;
+                    case 'WRONG_AMOUNT':
+                        $res = $bad('Amount does not match', 'The amount you entered does not match the payment we received for this ' . $M['tid_label'] . '. Please check the amount and try again.');
+                        break;
+                    case 'NOT_FOUND':   // no SMS yet: keep the request, it is credited automatically the moment the SMS arrives
+                        $waiting = true; $manual = true;
+                        break;
+                    default:            // temporary error: never reject a payment because of it
+                        $manual = true; $autoDown = true; $note .= ' | auto-check unavailable';
+                }
+            }
             if ($res === null && $manual) {
                 $pdo->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')->execute([$u['id'], $credit, substr($note, 0, 255)]);
-                $res = ['type' => 'pending', 'auto_down' => $autoDown, 'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'amt_html' => money((float)$credit), 'at_txt' => date('d M Y, h:i A'),
-                        'msg' => $autoDown ? 'Automatic verification is unavailable right now. Your request is saved and our team will confirm it shortly.' : 'Your request was received. Your balance is credited as soon as we confirm the payment.'];
+                $res = ['type' => 'pending', 'auto_down' => $autoDown, 'waiting' => $waiting, 'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'amt_html' => money((float)$credit), 'at_txt' => date('d M Y, h:i A'),
+                        'msg' => $waiting ? 'We have not received this payment yet. Your request is saved and your balance is added automatically as soon as the payment arrives. You can keep this page open.'
+                               : ($autoDown ? 'Automatic verification is unavailable right now. Your request is saved and our team will confirm it shortly.' : 'Your request was received. Your balance is credited as soon as we confirm the payment.')];
             }
         }
     }
@@ -92,7 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $err = $res['msg'];
 }
 
-$ok = $_SESSION['dep_success'] ?? null; unset($_SESSION['dep_success']);   // success popup data (set after an automatic credit)
+$ok = $_SESSION['dep_success'] ?? null; unset($_SESSION['dep_success']);
+if (!$ok) $ok = sms_take_notice(db(), (int)$u['id']);   // a waiting request was credited by a late SMS: tell the user   // success popup data (set after an automatic credit)
 $s = db()->prepare('SELECT * FROM deposits WHERE user_id = ? ORDER BY id DESC LIMIT 30'); $s->execute([$u['id']]);
 $deps = $s->fetchAll();
 $tot = ['approved' => 0.0, 'pending' => 0, 'n' => 0];
@@ -106,7 +144,7 @@ $methodOf = function (string $note) use ($ALL) {
 };
 $jsMethods = [];
 foreach ($METHODS as $k => $m) $jsMethods[$k] = [
-    'name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => (bool)$m['is_usd'] || bn_kind((string)$k) !== null, 'auto' => bn_kind((string)$k) ?? '',
+    'name' => $m['name'], 'ok' => $m['ok'], 'acct' => $m['ok'] ? $m['acct'] : '', 'ussd' => $m['ussd'], 'usd' => (bool)$m['is_usd'] || bn_kind((string)$k) !== null, 'auto' => bn_kind((string)$k) ?? '', 'sms' => bn_kind((string)$k) === null && !(int)$m['is_usd'] && sms_slug((string)$m['name']) !== '',
     'tid' => $m['tid_label'], 'label' => $m['acct_label'], 'sub' => $m['sub'], 'note' => $m['notice'], 'color' => $m['color'],
     'steps' => $m['steps'] !== null && $m['steps'] !== '' ? explode("\n", $m['steps']) : [],
     'min' => (float)$m['lmin'], 'max' => (float)$m['lmax'], 'fee' => (float)$m['fee_pct'], 'bonus' => (float)$m['bonus_pct'],
@@ -556,7 +594,7 @@ user_start('Deposits', $u, 'deposits'); ?>
     trx.maxLength = bsc ? 66 : 40; trx.style.textTransform = bsc ? 'none' : '';
     trx.placeholder = bsc ? '0x…  (66 characters)' : 'e.g. 9K4M2X7Q1A';
     $('#dpTrxHint').textContent = bsc ? 'Paste the full transaction hash (TxID) from your wallet or BscScan.' : m.auto === 'pay' ? 'Paste the Binance Pay Order / Transaction ID. Your balance is added automatically.' : 'Letters and numbers only. Copy it from the confirmation message of your payment app.';
-    $('#dpSubmit').textContent = m.auto ? 'Verify & add balance' : 'Submit deposit';
+    $('#dpSubmit').textContent = (m.auto || m.sms) ? 'Verify & add balance' : 'Submit deposit';
     $('#dpPay').innerHTML = pay;
     $('#dpHow').innerHTML = how.map(function(h){return '<li>' + h + '</li>'}).join('');
     sum();
@@ -591,7 +629,7 @@ user_start('Deposits', $u, 'deposits'); ?>
   function procHtml(m){
     var st = m.auto
       ? ['Connecting to ' + (m.auto === 'bsc' ? 'BNB Smart Chain' : 'Binance'), 'Finding your transaction', 'Checking amount and token', 'Adding balance to your account']
-      : ['Connecting to ' + m.name, 'Finding your transaction', 'Checking amount and method', 'Confirming your deposit'];
+      : ['Connecting to ' + m.name, 'Finding your transaction', 'Checking amount and method', m.sms ? 'Adding balance to your account' : 'Confirming your deposit'];
     return '<div class="spin-wrap"><div class="spin"></div><div class="spin-ic">' + IC.shield + '</div></div>' +
       '<h2>Verifying your payment</h2><p class="sub">This takes a few seconds. Please do not close or refresh this page.</p>' +
       '<ul class="stp">' + st.map(function(t){ return '<li><i></i><span>' + t + '</span></li>'; }).join('') + '</ul><div class="lock">🔒 Secure automatic verification</div>';
@@ -599,7 +637,7 @@ user_start('Deposits', $u, 'deposits'); ?>
   function resHtml(d){
     if (d.type === 'success') return '<div class="chk">' + IC.ok + '</div><h2>Payment Successful</h2><p class="sub">Your balance was added successfully.</p><div class="big">+ ' + d.amt_html + '</div>' +
       rowsHtml([['Method', esc(d.method)], ['You paid', esc(d.paid)], ['Transaction', esc(shortT(d.trx))], ['New balance', d.bal_html], ['Time', esc(d.at_txt)]]) + '<button type="button" data-act="reload">Done</button>';
-    if (d.type === 'pending') return '<div class="chk warn">' + IC.clock + '</div><h2>' + (d.auto_down ? 'Verification delayed' : 'Request received') + '</h2><p class="sub">' + esc(d.msg) + '</p><span class="badge2">Pending review</span>' +
+    if (d.type === 'pending') return '<div class="chk warn">' + IC.clock + '</div><h2>' + (d.waiting ? 'Waiting for your payment' : d.auto_down ? 'Verification delayed' : 'Request received') + '</h2><p class="sub">' + esc(d.msg) + '</p><span class="badge2">' + (d.waiting ? 'Waiting for payment' : 'Pending review') + '</span>' +
       rowsHtml([['Method', esc(d.method)], ['Amount', d.amt_html], ['Transaction', esc(shortT(d.trx))], ['Time', esc(d.at_txt)]]) + '<button type="button" class="pri" data-act="reload">OK, got it</button>';
     return '<div class="chk bad">' + IC.x + '</div><h2>' + esc(d.title || 'Could not verify') + '</h2><p class="sub">' + esc(d.msg || 'Something went wrong.') + '</p>' +
       '<button type="button" class="pri" data-act="close">Try again</button>' + (d.reload ? '<button type="button" class="ghost" data-act="reload">Check deposit history</button>' : '');
@@ -609,11 +647,23 @@ user_start('Deposits', $u, 'deposits'); ?>
     if (b.dataset.act === 'reload') location.href = location.pathname;
     else if (b.dataset.act === 'close') RES.hidden = true;
   });
+  /* a request that was sent before the SMS arrived: ask the server every few seconds, show "Payment Successful" as soon as it is credited */
+  var pollT = null, pollN = 0;
+  function startPoll(){
+    if (pollT || !window.fetch) return;
+    pollT = setInterval(function(){
+      if (++pollN > 200) { clearInterval(pollT); pollT = null; return; }   // ~25 minutes, after that the deposit history / popup on the next visit tells the user
+      fetch(location.pathname + '?poll=1', {credentials: 'same-origin', headers: {'X-Requested-With': 'fetch'}})
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if (d && d.type === 'success') { clearInterval(pollT); pollT = null; openRes(resHtml(d)); } })
+        .catch(function(){});
+    }, 7500);
+  }
   function runAuto(m){
     var t0 = Date.now(), step = 0;
     openRes(procHtml(m)); setStep(0);
     var iv = setInterval(function(){ if (step < 2) setStep(++step); }, 900);
-    var fin = function(d){ setTimeout(function(){ clearInterval(iv); if (d.type === 'success') setStep(4); else if (d.type === 'pending') setStep(2); openRes(resHtml(d)); }, Math.max(0, 2600 - (Date.now() - t0))); };
+    var fin = function(d){ setTimeout(function(){ clearInterval(iv); if (d.type === 'success') setStep(4); else if (d.type === 'pending') setStep(2); openRes(resHtml(d)); if (d.type === 'pending' && d.waiting) startPoll(); }, Math.max(0, 2600 - (Date.now() - t0))); };
     fetch(location.pathname, {method: 'POST', body: new FormData($('#dpForm')), credentials: 'same-origin', headers: {'X-Requested-With': 'fetch'}})
       .then(function(r){ return r.json(); })
       .then(fin, function(){ fin({type: 'error', title: 'Connection problem', msg: 'We could not get an answer from the server. Your deposit may already have been processed, so check your deposit history before trying again.', reload: 1}); });
@@ -626,6 +676,7 @@ user_start('Deposits', $u, 'deposits'); ?>
   // restore state after a server-side error, otherwise start fresh
   if (meth.value && M[meth.value]) { var b = document.querySelector('.dp-mth[data-m="' + meth.value + '"]'); if (b) b.classList.add('on'); }
   sum();
+  <?php if ($tot['pending'] > 0): ?>startPoll();<?php endif; ?>
   <?php if ($err): ?>if (okAmt() && M[meth.value]) show(2, false);<?php endif; ?>
 })();
 </script>

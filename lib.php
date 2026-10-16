@@ -370,7 +370,7 @@ function maintenance_gate(): void {
     if (PHP_SAPI === 'cli') return;
     $script = basename((string)($_SERVER['SCRIPT_NAME'] ?? ''));
     // Add any endpoint that must keep working during maintenance (e.g. an OTP / payment webhook) to this list.
-    if (in_array($script, ['admin.php', 'media.php', 'icon.php', 'manifest.php'], true)) return;
+    if (in_array($script, ['admin.php', 'media.php', 'icon.php', 'manifest.php', 'sms.php'], true)) return;
     if (!empty($_SESSION['admin'])) return;
     if (setting('maintenance_on', '0') !== '1') return;
     $msg = setting('maintenance_msg', 'We are doing some scheduled maintenance. Please check back soon.');

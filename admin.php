@@ -2,6 +2,7 @@
 require __DIR__ . '/stock_import.php';
 require __DIR__ . '/payment_methods.php';
 require __DIR__ . '/binance_pay.php';   // Binance Pay + BSC USDT auto-verification
+require __DIR__ . '/sms_inbox.php';     // SMS forwarder: bKash / Nagad / Rocket / Upay auto-verification
 $GLOBALS['__bdt_only'] = true;   // admin always sees real BDT amounts, whatever currency the browser picked on the shop
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
@@ -11,7 +12,7 @@ $pmErr = ''; $pmDlgErr = ''; $pmReopen = null;   // payment methods page: settin
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'api', 'announce', 'settings', 'payments'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'api', 'announce', 'settings', 'payments', 'transactions'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null, string $extra = ''): void {
@@ -527,6 +528,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'fee' => (string)($_POST['pm_fee'] ?? ''), 'bonus' => (string)($_POST['pm_bonus'] ?? ''), 'steps' => (string)($_POST['pm_steps'] ?? ''),
             ];
 
+        } elseif (isset($_POST['sms_act'])) {   // Transactions page: delete a stray SMS / try to match it with a waiting request again
+            sms_schema($pdo);
+            $sid = (int)($_POST['sms_id'] ?? 0);
+            if ($_POST['sms_act'] === 'delete') {
+                $n = $pdo->prepare('DELETE FROM sms_inbox WHERE id = ? AND used = 0'); $n->execute([$sid]);
+                go('transactions', $n->rowCount() ? 'SMS deleted.' : 'This SMS was already used for a deposit, so it is kept for your records.');
+            } elseif ($_POST['sms_act'] === 'recheck') {
+                $dep = sms_match_pending($pdo, $sid, $bonus);
+                go('transactions', $dep ? 'Matched with deposit #' . $dep . ' and the balance was added.' : 'No waiting request matches this SMS (method, amount and transaction ID must all be the same).');
+            }
+            go('transactions');
+
         } elseif (isset($_POST['id'], $_POST['action'])) {
             with_tx($pdo, function (PDO $pdo) use ($bonus) {
                 $st = $pdo->prepare("SELECT * FROM deposits WHERE id = ? AND status = 'pending' FOR UPDATE");
@@ -671,6 +684,27 @@ if ($page === 'payments') {
 }
 
 /** Icon picker (searchable app icons + emoji). $auto adds an "Automatic" choice (stored as an empty value). */
+/* ---- Transactions page (SMS received from the forwarder app) ---- */
+$tList = []; $tStats = null; $tq = ''; $tst = '';
+if ($page === 'transactions') {
+    sms_schema($pdo);
+    $tq  = mb_substr(trim((string)($_GET['q'] ?? '')), 0, 80);
+    $tst = in_array($_GET['st'] ?? '', ['waiting', 'matched', 'ignored'], true) ? $_GET['st'] : '';
+    $tc = ['1=1']; $ta = [];
+    if ($tst === 'waiting') $tc[] = "kind = 'in' AND used = 0";
+    if ($tst === 'matched') $tc[] = 'used = 1';
+    if ($tst === 'ignored') $tc[] = "kind <> 'in'";
+    if ($tq !== '') { $lk = '%' . addcslashes($tq, '%_\\') . '%'; $tc[] = '(trx LIKE ? OR body LIKE ? OR sender LIKE ? OR amount = ?)'; array_push($ta, $lk, $lk, $lk, (float)$tq); }
+    $q = $pdo->prepare('SELECT * FROM sms_inbox WHERE ' . implode(' AND ', $tc) . ' ORDER BY id DESC LIMIT 100'); $q->execute($ta);
+    $tList = $q->fetchAll();
+    $tStats = [
+        'today'   => (int)$pdo->query('SELECT COUNT(*) FROM sms_inbox WHERE created_at >= CURDATE()')->fetchColumn(),
+        'waiting' => (int)$pdo->query("SELECT COUNT(*) FROM sms_inbox WHERE kind = 'in' AND used = 0")->fetchColumn(),
+        'matched' => (int)$pdo->query('SELECT COUNT(*) FROM sms_inbox WHERE used = 1')->fetchColumn(),
+        'last'    => (string)$pdo->query('SELECT MAX(created_at) FROM sms_inbox')->fetchColumn(),
+    ];
+}
+
 function icon_picker_html(string $pre, string $field, string $initial, bool $auto): string {
     ob_start(); ?>
 <div class="ipk" id="<?= e($pre) ?>">
@@ -711,7 +745,7 @@ function ai(string $n): string {
 
 $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
-    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']], ['payments', 'Payment methods', 'card', 0]],
+    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']], ['transactions', 'Transactions', 'history', 0], ['payments', 'Payment methods', 'card', 0]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
     'Manage'  => [['users', 'Users', 'users', 0], ['api', 'API Management', 'key', 0], ['announce', 'Notice & Maintenance', 'bell', 0], ['settings', 'Site settings', 'sliders', 0]],
 ];
@@ -720,6 +754,7 @@ $titles = [
     'orders'     => ['Orders', 'Deliver or cancel pending orders'],
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'payments'   => ['Payment methods', 'Numbers, logos, limits, fees and the deposit on/off switch'],
+    'transactions' => ['Transactions', 'Payment SMS received from the forwarder app and which deposit used them'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Search, top up, ban and manage accounts'],
@@ -863,6 +898,44 @@ $lg = media_url('logo');
 <tr><td><div class="pm-cell"><?= pm_logo_html($pm ?? $pmNone, 34) ?><div><b><?= e($pm['name'] ?? 'Deposit') ?> <span style="font-weight:400;color:#64748b">#<?= (int)$h['id'] ?></span></b><small><?= e($h['email']) ?><?= $trx !== '' ? ' · ' . e($trx) : '' ?></small></div></div></td>
 <td class="money"><?= money($h['amount']) ?></td><td><span class="badge <?= e($h['status']) ?>"><?= e($h['status']) ?></span></td><td class="hm"><?= e($h['created_at']) ?></td></tr>
 <?php endforeach; if (!$hist): ?><tr><td colspan="4">No matching deposits.</td></tr><?php endif; ?></tbody></table></div></div>
+<script>document.addEventListener('click',function(e){var b=e.target.closest('.pm-cp');if(!b)return;var t=b.dataset.c,done=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1200)};if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,done)}else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();try{document.execCommand('copy')}catch(_){}x.remove();done()}});</script>
+
+<?php /* ============================ TRANSACTIONS (SMS) ============================ */ elseif ($page === 'transactions'):
+  $smsSecret = (string)getenv('SMS_SECRET');
+  $smsHost = (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) ? explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'])[0] : (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http')) . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-site'); ?>
+<div class="stats">
+  <div class="stat"><span>SMS today</span><b><?= (int)$tStats['today'] ?></b></div>
+  <div class="stat"><span>Waiting for a user</span><b><?= (int)$tStats['waiting'] ?></b></div>
+  <div class="stat"><span>Used for deposits</span><b><?= (int)$tStats['matched'] ?></b></div>
+  <div class="stat"><span>Last SMS</span><b style="font-size:14px"><?= $tStats['last'] !== '' ? e($tStats['last']) : 'none yet' ?></b></div>
+</div>
+<?php if ($smsSecret === ''): ?><div class="err">SMS_SECRET is not set. Add it in Railway &rarr; Variables (any long random text), otherwise <code>/sms.php</code> refuses every SMS.</div><?php endif; ?>
+<div class="card"><div class="card-h"><h3>SMS Forwarder app URL</h3></div>
+  <p class="hint" style="margin:0 0 6px">Paste this as the recipient URL in the app:</p>
+  <code style="display:block;word-break:break-all;background:#f1f5f9;border-radius:10px;padding:10px"><?= e($smsHost) ?>/sms.php?key=<?= $smsSecret !== '' ? e($smsSecret) : 'YOUR_SMS_SECRET' ?></code>
+</div>
+<div class="card"><div class="card-h"><h3>Received payment SMS</h3><span class="hint" style="margin:0">Latest <?= count($tList) ?> (max 100)</span></div>
+<form method="get" class="tb"><input type="hidden" name="p" value="transactions">
+  <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($tq) ?>" placeholder="Transaction ID, amount or text" autocomplete="off"></div>
+  <select name="st" style="width:auto"><option value="">All</option><option value="waiting"<?= $tst === 'waiting' ? ' selected' : '' ?>>Waiting for a user</option><option value="matched"<?= $tst === 'matched' ? ' selected' : '' ?>>Used</option><option value="ignored"<?= $tst === 'ignored' ? ' selected' : '' ?>>Not a payment</option></select>
+  <button class="btn">Filter</button><?php if ($tq !== '' || $tst !== ''): ?><a class="btn ghost" href="/admin.php?p=transactions">Clear</a><?php endif; ?>
+</form>
+<div class="tw"><table><thead><tr><th>Method / TrxID</th><th>Amount</th><th>Status</th><th class="hm">Received</th><th></th></tr></thead><tbody>
+<?php foreach ($tList as $t): $isIn = $t['kind'] === 'in'; ?>
+<tr>
+  <td><b><?= e($t['provider'] !== '' ? ucfirst($t['provider']) : ($t['sender'] !== '' ? $t['sender'] : 'Unknown sender')) ?></b>
+    <small style="display:block"><?php if ($t['trx'] !== null && $t['trx'] !== ''): ?><code class="pm-trx"><?= e($t['trx']) ?></code><button type="button" class="pm-cp" data-c="<?= e($t['trx']) ?>">Copy</button><?php else: ?>no transaction ID found<?php endif; ?></small>
+    <small style="display:block;color:#64748b;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="<?= e($t['body']) ?>"><?= e($t['body']) ?></small></td>
+  <td class="money"><?= $t['amount'] !== null ? money((float)$t['amount']) : '-' ?></td>
+  <td><?php if ($t['used']): ?><span class="badge approved">Used<?= $t['deposit_id'] ? ' · deposit #' . (int)$t['deposit_id'] : '' ?></span>
+      <?php elseif ($isIn): ?><span class="badge pending">Waiting</span>
+      <?php else: ?><span class="badge off" title="<?= e($t['provider'] === '' ? 'Sender is not a known wallet' : 'Not an incoming payment') ?>">Not a payment</span><?php endif; ?></td>
+  <td class="hm"><?= e($t['created_at']) ?></td>
+  <td class="ra"><?php if (!$t['used']): ?><form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="sms_id" value="<?= (int)$t['id'] ?>">
+    <?php if ($isIn): ?><button class="btn sm" name="sms_act" value="recheck" title="Match with a waiting request again">Re-check</button><?php endif; ?>
+    <button class="btn sm red" name="sms_act" value="delete" onclick="return confirm('Delete this SMS?')">Delete</button></form><?php endif; ?></td>
+</tr>
+<?php endforeach; if (!$tList): ?><tr><td colspan="5"><?= ($tq !== '' || $tst !== '') ? 'No matching SMS.' : 'No SMS received yet. Send a test payment or use the app\'s test button.' ?></td></tr><?php endif; ?></tbody></table></div></div>
 <script>document.addEventListener('click',function(e){var b=e.target.closest('.pm-cp');if(!b)return;var t=b.dataset.c,done=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1200)};if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,done)}else{var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();try{document.execCommand('copy')}catch(_){}x.remove();done()}});</script>
 
 <?php /* ============================ PRODUCTS ============================ */ elseif ($page === 'products'): ?>
