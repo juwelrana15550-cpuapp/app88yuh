@@ -1,4 +1,5 @@
 <?php require __DIR__ . '/lib.php';
+require_once __DIR__ . '/supplier_hot.php';   // Supplier 1 (Supplier 2 = supplier.php, loaded by lib.php)
 if (isset($_GET['ajax']) && !current_user()) { http_response_code(401); exit; }   // category switcher: never answer with the login page
 $u = require_login();
 $pdo = db();
@@ -14,28 +15,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $st = $pdo->prepare('SELECT * FROM products WHERE id = ? AND active = 1 FOR UPDATE');
             $st->execute([(int)($_POST['product_id'] ?? 0)]); $p = $st->fetch();
             if (!$p) throw new RuntimeException('Product not found.');
-            $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: local stock is sold first, the rest is bought there after payment
-            $auto  = !$sup && !empty($p['auto_delivery']);
+            $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: bought there after payment
+            if ($sup && !bm_connected()) throw new RuntimeException('This product is temporarily unavailable.');
+            $hot   = !$sup && !empty($p['supplier_type']) && !empty($p['supplier_account']);   // linked to Supplier 1: bought there after payment
+            $auto  = !$sup && !$hot && !empty($p['auto_delivery']);
             $items = [];
-            $need  = 0;   // how many items must come from bulkmail.shop
-            if ($auto || $sup) {
-                // Own (local) stock first: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
+            if ($auto) {
+                // Instant delivery: take the oldest unsold uploaded items. The product row is locked above, so two buyers can never get the same item.
                 $it = $pdo->prepare('SELECT id, line FROM stock_items WHERE product_id = ? AND order_id IS NULL ORDER BY id LIMIT ' . (int)$qty . ' FOR UPDATE');
                 $it->execute([$p['id']]); $items = $it->fetchAll();
-            }
-            if ($auto) {
                 if (!$items) throw new RuntimeException('Sorry, this product is out of stock.');
                 if (count($items) < $qty) throw new RuntimeException('Only ' . number_format(count($items)) . ' available right now. Please lower the quantity.');
-            } elseif ($sup) {
-                $need = $qty - count($items);
-                if ($need > 0) {
-                    $apiHave = bm_connected() ? max(0, (int)$p['sup_stock']) : 0;
-                    if ($need > $apiHave) {
-                        $all = count($items) + $apiHave;   // local items are fewer than $qty here, so count($items) is all of them
-                        if ($all < 1) throw new RuntimeException(bm_connected() ? 'Sorry, this product is out of stock.' : 'This product is temporarily unavailable.');
-                        throw new RuntimeException('Only ' . number_format($all) . ' available right now. Please lower the quantity.');
-                    }
-                }
             } elseif ($p['stock'] !== null) {
                 $have = (int)$p['stock'];
                 if ($have < 1) throw new RuntimeException('Sorry, this product is out of stock.');
@@ -46,8 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((int)round($coins * 100) < $cents) throw new RuntimeException('Not enough balance. Please add funds first.');
             $total = number_format($cents / 100, 2, '.', '');
             $pdo->prepare('UPDATE users SET coins = coins - ? WHERE id = ?')->execute([$total, $u['id']]);
-            $instant = $auto || ($sup && $need === 0);   // everything comes from local stock: deliver at once
-            if ($instant) {
+            if ($auto) {
                 $pdo->prepare("INSERT INTO orders (user_id, product_id, product_name, price, qty, status, delivery) VALUES (?,?,?,?,?,'delivered',?)")
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty, implode("\n", array_column($items, 'line'))]);
             } else {
@@ -57,22 +46,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
             }
             $id = (int)$pdo->lastInsertId();   // read before add_tx inserts another row
-            if ($items) {   // mark the local items as sold (for a mixed order they are reserved for it; bm_fulfil adds the API items after them)
+            if ($auto) {
                 $pdo->exec('UPDATE stock_items SET order_id = ' . (int)$id . ' WHERE id IN (' . implode(',', array_map('intval', array_column($items, 'id'))) . ')');
                 stock_sync($pdo, (int)$p['id']);
+                $GLOBALS['__instant'] = true;
             }
-            if ($instant) $GLOBALS['__instant'] = true;
             add_tx($pdo, (int)$u['id'], 'purchase', -(float)$total, 'Order #' . $id . ': ' . $p['name'] . ($qty > 1 ? ' x' . $qty : '') . ($pct > 0 ? ' (' . pct_fmt($pct) . '% off)' : ''));
-            if ($sup && $need > 0) $GLOBALS['__sup'] = true;
+            if ($sup) $GLOBALS['__sup'] = true;
+            if ($hot) $GLOBALS['__hot'] = true;
             return $id;
         });
+        if (!empty($GLOBALS['__hot'])) {
+            // Supplier 1: buy now (outside the transaction). On a clear refusal the customer is refunded; if unclear the order stays pending (never refunded/resent blindly).
+            $hs = suphot_auto_fulfill($oid);
+            if ($hs === 'failed') {
+                with_tx($pdo, function (PDO $pdo) use ($oid) {
+                    $q = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND status = 'pending' FOR UPDATE"); $q->execute([$oid]);
+                    if (!($ord = $q->fetch())) return;
+                    $pdo->prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?")->execute([$oid]);
+                    $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$ord['price'], $ord['user_id']]);
+                    add_tx($pdo, (int)$ord['user_id'], 'refund', (float)$ord['price'], 'Refund for order #' . $oid);
+                });
+                suphot_sync_stock($pdo, true);
+                flash('err', 'Purchase failed, please try again later. Your money was refunded.');
+                $oid = 0;
+            } else {
+                $GLOBALS['__hot_done'] = $hs === 'delivered';
+            }
+        }
         if (!empty($GLOBALS['__sup'])) {
             // The payment is saved. Now buy the items at bulkmail.shop (outside the database transaction, so no locks are held while waiting for the network).
             $res = bm_fulfil($pdo, $oid);
             if ($res['status'] === 'refunded') { flash('err', $res['msg']); $oid = 0; }
             else flash('ok', $res['msg']);
         } else {
-            flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
+            flash('ok', (!empty($GLOBALS['__instant']) || !empty($GLOBALS['__hot_done'])) ?'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
         }
     } catch (RuntimeException $ex) {
         flash('err', $ex->getMessage());
@@ -85,8 +93,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Location: /dashboard.php' . ($back ? '?' . http_build_query($back) : '')); exit; // redirect: refresh must not buy again
 }
 
+suphot_sync_stock($pdo);   // Supplier 1 linked products: live stock (at most once a minute)
 bm_sync_stock($pdo);   // linked bulkmail.shop products: refresh live stock (at most once a minute)
-bm_sync_info($pdo);    // ... and name / description / possible domains (at most every 15 minutes, only products with auto-sync on)
 
 $c = (int)($_GET['c'] ?? 0);
 $q = mb_substr(trim($_GET['q'] ?? ''), 0, 80);
@@ -112,18 +120,6 @@ $rows = $s->fetchAll();
 if (isset($_GET['ajax'])) { header('Content-Type: text/html; charset=utf-8'); header('Cache-Control: no-store'); catalog_list_html($cats, $rows, $c, $q); exit; }
 
 user_start('Home', $u, 'dashboard'); ?>
-<style>
-@media(max-width:699px){
-.top{padding:8px 12px}
-main.with-side{padding:10px 12px 112px}
-.card.wallet.bbar{padding:10px 14px;margin-bottom:8px;border-radius:16px}
-.card.wallet.bbar::before{width:130px;height:130px;top:-70px}
-.card.wallet.bbar::after{width:80px;height:80px;bottom:-50px}
-.card.wallet.bbar b{font-size:1.4rem;margin-top:0}
-.card.wallet.bbar small{font-size:.75rem}
-.card.wallet.bbar .btn.sm{padding:7px 12px;font-size:.8rem;border-radius:10px}
-}
-</style>
 <div class="card wallet bbar"><div><small>Available balance</small><b><?= money($u['coins']) ?></b></div><a class="btn sm" href="/deposits.php">+ Add Funds</a></div>
 <?php catalog_html($cats, $rows, $c, $q, $total, (float)$u['coins']); ?>
 <?php user_end();

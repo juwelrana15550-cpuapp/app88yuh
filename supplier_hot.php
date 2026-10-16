@@ -14,6 +14,13 @@ function suphot_schema(): void {
         $st->execute([$c]);
         if (!$st->fetchColumn()) $pdo->exec("ALTER TABLE products ADD COLUMN $c VARCHAR(40) NULL DEFAULT NULL");
     }
+    // Supplier 2 (bulkmail.shop) link columns: normally exist already, added here only if missing.
+    $extra = ['products' => ['supplier_id' => 'INT NULL DEFAULT NULL'], 'orders' => ['supplier_order_id' => 'VARCHAR(40) NULL DEFAULT NULL']];
+    foreach ($extra as $tbl => $cols) foreach ($cols as $c => $def) {
+        $st = $pdo->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+        $st->execute([$tbl, $c]);
+        if (!$st->fetchColumn()) $pdo->exec("ALTER TABLE $tbl ADD COLUMN $c $def");
+    }
     $dt = $pdo->query("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'delivery'")->fetchColumn();
     if ($dt && !in_array(strtolower((string)$dt), ['mediumtext', 'longtext'], true)) {
         $pdo->exec('ALTER TABLE orders MODIFY delivery MEDIUMTEXT NULL'); // bulk orders can be large
@@ -111,7 +118,7 @@ function suphot_fulfill_order(int $oid): array {
             'quantity'     => $qty,
         ], 90);
         if (!$r['ok']) {
-            $res = [false, $r['error'] . (!empty($r['unknown']) ? ' Result unknown: check your supplier order history before retrying.' : '')];
+            $res = [false, $r['error'] . (!empty($r['unknown']) ? ' Result unknown: check your supplier order history before retrying.' : ''), !empty($r['unknown'])];   // [2] = outcome unclear (may have been charged)
             return;
         }
 
@@ -120,13 +127,13 @@ function suphot_fulfill_order(int $oid): array {
         $sid = $r['data']['order_id'] ?? '?';
         if (!$acc) {
             error_log('SUPPLIER: order #' . $oid . ' purchased (supplier order ' . $sid . ') but no accounts returned');
-            $res = [false, 'Supplier returned no accounts (supplier order #' . $sid . '). Check the supplier panel. Order left pending.'];
+            $res = [false, 'Supplier returned no accounts (supplier order #' . $sid . '). Check the supplier panel. Order left pending.', true];
             return;
         }
 
         if (count($acc) < $qty) { // paid but short: do not mark delivered, keep the goods in the log
             error_log('SUPPLIER: order #' . $oid . ' wanted ' . $qty . ' got ' . count($acc) . ' (supplier order ' . $sid . ') | ' . implode(' ; ', $acc));
-            $res = [false, 'Supplier returned only ' . count($acc) . ' of ' . $qty . ' accounts (supplier order #' . $sid . '). Order left pending: deliver manually (accounts are in the server log).'];
+            $res = [false, 'Supplier returned only ' . count($acc) . ' of ' . $qty . ' accounts (supplier order #' . $sid . '). Order left pending: deliver manually (accounts are in the server log).', true];
             return;
         }
         try {
@@ -142,8 +149,37 @@ function suphot_fulfill_order(int $oid): array {
     return $res;
 }
 
-/** Call right after a new order is committed. Does nothing unless "auto-deliver" is on; failures leave the order pending. */
-function suphot_auto_fulfill(int $oid): void {
-    if (setting('suphot_auto') !== '1') return;
-    try { suphot_fulfill_order($oid); } catch (Throwable $e) { error_log('SUPPLIER AUTO: ' . $e->getMessage()); }
+/**
+ * Copy the live stock of every Supplier 1 linked product into products.stock. At most once a minute unless $force. Never throws.
+ * A linked product that is missing from the supplier catalogue is set to 0 (out of stock). If the supplier is unreachable nothing changes.
+ */
+function suphot_sync_stock(PDO $pdo, bool $force = false): void {
+    try {
+        if ((string)setting('suphot_url') === '' || (string)setting('suphot_key') === '') return;
+        if (!$force && time() - (int)setting('suphot_sync_ts', '0') < 60) return;
+        save_setting('suphot_sync_ts', (string)time());   // set first: a slow API never makes every page wait
+        if (!$pdo->query('SELECT 1 FROM products WHERE supplier_type IS NOT NULL LIMIT 1')->fetchColumn()) return;
+        $r = suphot_call('GET', '/products', [], null, 6);
+        if (!$r['ok'] || !is_array($r['data']['products'] ?? null)) { error_log('supplier1 stock sync: ' . ($r['error'] ?? 'bad answer')); return; }
+        $stock = [];
+        foreach ($r['data']['products'] as $it) $stock[($it['product_type'] ?? '') . '|' . ($it['account_type'] ?? '')] = max(0, (int)($it['stock'] ?? 0));
+        $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_type = ? AND supplier_account = ?');
+        foreach ($pdo->query('SELECT DISTINCT supplier_type, supplier_account FROM products WHERE supplier_type IS NOT NULL AND supplier_account IS NOT NULL')->fetchAll() as $row) {
+            $upd->execute([$stock[$row['supplier_type'] . '|' . $row['supplier_account']] ?? 0, $row['supplier_type'], $row['supplier_account']]);
+        }
+    } catch (Throwable $e) { error_log('supplier1 stock sync: ' . $e->getMessage()); }
+}
+
+/**
+ * Call right after a new order is committed. Returns 'off' (auto-deliver disabled: order stays pending for the admin),
+ * 'delivered', 'failed' (supplier clearly refused: nothing was bought) or 'unclear' (may have been charged: leave pending).
+ */
+function suphot_auto_fulfill(int $oid): string {
+    if (setting('suphot_auto') !== '1') return 'off';
+    try {
+        $r = suphot_fulfill_order($oid);
+        if ($r[0]) return 'delivered';
+        error_log('SUPPLIER AUTO: order #' . $oid . ': ' . $r[1]);
+        return empty($r[2]) ? 'failed' : 'unclear';
+    } catch (Throwable $e) { error_log('SUPPLIER AUTO: ' . $e->getMessage()); return 'unclear'; }
 }
