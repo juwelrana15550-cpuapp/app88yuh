@@ -589,7 +589,9 @@ user_start('Deposits', $u, 'deposits'); ?>
   function openRes(h){ BOX.innerHTML = h; RES.hidden = false; }
   function setStep(n){ $$('.stp li').forEach(function(li, i){ li.className = i < n ? 'done' : i === n ? 'on' : ''; }); }
   function procHtml(m){
-    var st = ['Connecting to ' + (m.auto === 'bsc' ? 'BNB Smart Chain' : 'Binance'), 'Finding your transaction', 'Checking amount and token', 'Adding balance to your account'];
+    var st = m.auto
+      ? ['Connecting to ' + (m.auto === 'bsc' ? 'BNB Smart Chain' : 'Binance'), 'Finding your transaction', 'Checking amount and token', 'Adding balance to your account']
+      : ['Connecting to ' + m.name, 'Finding your transaction', 'Checking amount and method', 'Confirming your deposit'];
     return '<div class="spin-wrap"><div class="spin"></div><div class="spin-ic">' + IC.shield + '</div></div>' +
       '<h2>Verifying your payment</h2><p class="sub">This takes a few seconds. Please do not close or refresh this page.</p>' +
       '<ul class="stp">' + st.map(function(t){ return '<li><i></i><span>' + t + '</span></li>'; }).join('') + '</ul><div class="lock">🔒 Secure automatic verification</div>';
@@ -619,7 +621,7 @@ user_start('Deposits', $u, 'deposits'); ?>
   $('#dpForm').addEventListener('submit', function(e){
     if ($('#dpSubmit').disabled) { e.preventDefault(); return; }
     var m = M[meth.value];
-    if (m && m.auto && window.fetch && window.FormData) { e.preventDefault(); runAuto(m); }   // manual methods keep the normal form post
+    if (m && window.fetch && window.FormData) { e.preventDefault(); runAuto(m); }   // every method now uses the loading / result screens (falls back to a normal post if fetch is unavailable)
   });
   // restore state after a server-side error, otherwise start fresh
   if (meth.value && M[meth.value]) { var b = document.querySelector('.dp-mth[data-m="' + meth.value + '"]'); if (b) b.classList.add('on'); }
