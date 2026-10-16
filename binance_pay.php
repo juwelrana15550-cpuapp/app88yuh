@@ -16,6 +16,8 @@ const BN_USDT_BSC       = '0x55d398326f99059ff775485246999027b3197955';   // USD
 const BN_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const BN_TOLERANCE      = 1000000;   // 0.01 USDT, in 1e-8 units (covers PHP/JS rounding of the shown dollar amount)
 
+const BN_HOSTS = ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com', 'api4.binance.com', 'api-gcp.binance.com'];
+
 class BnTempError extends RuntimeException {}
 
 /* ------------------------------ config ------------------------------ */
@@ -94,7 +96,8 @@ function bn_pay_history(int $windowMs): array {
         'startTime' => $now - $windowMs, 'endTime' => $now, 'limit' => 100, 'timestamp' => $now, 'recvWindow' => 5000,
     ]);
     $sig = hash_hmac('sha256', $query, $secret);
-    [$code, $body] = bn_http('GET', 'https://api.binance.com/sapi/v1/pay/transactions?' . $query . '&signature=' . $sig, ['X-MBX-APIKEY: ' . $key]);
+    $base = (string)setting('bn_api_base', 'api.binance.com'); if (!in_array($base, BN_HOSTS, true)) $base = 'api.binance.com';
+    [$code, $body] = bn_http('GET', 'https://' . $base . '/sapi/v1/pay/transactions?' . $query . '&signature=' . $sig, ['X-MBX-APIKEY: ' . $key]);
     if ($code >= 400) throw new RuntimeException('Binance API ' . $code . ': ' . substr($body, 0, 300));   // body never contains the secret
     $data = json_decode($body, true);
     if (!is_array($data)) throw new RuntimeException('Invalid Binance API response');
@@ -233,8 +236,14 @@ function bn_credit(PDO $pdo, int $uid, string $provider, string $txid, float $cr
     });
 }
 
+/** Remember why an automatic check could not run, so the admin can see it in Admin > Payment methods (never contains the secret). */
+function bn_note_error(string $why): void {
+    $why = str_replace([bn_secret(), bn_key()], '***', $why);
+    save_setting('bn_last_error', date('d M H:i') . ' — ' . substr($why, 0, 300));
+}
+
 /** Admin "Test connection": one signed history call. Returns [ok, message]. */
 function bn_test(): array {
-    try { $rows = bn_pay_history(86400000); return [true, 'Connected to Binance. API key and secret are valid (' . count($rows) . ' Binance Pay transaction(s) in the last 24h).']; }
-    catch (Throwable $e) { return [false, 'Binance rejected the request: ' . $e->getMessage()]; }
+    try { $rows = bn_pay_history(86400000); save_setting('bn_last_error', ''); return [true, 'Connected to Binance. API key and secret are valid (' . count($rows) . ' Binance Pay transaction(s) in the last 24h).']; }
+    catch (Throwable $e) { $m = $e->getMessage(); bn_note_error($m); return [false, 'Binance rejected the request: ' . $m . (strpos($m, ' 451') !== false || stripos($m, 'restricted location') !== false ? ' — Binance blocks this server\'s country. Move the Railway service to a Singapore / EU region.' : '')]; }
 }

@@ -466,8 +466,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 go('payments', 'Deposit settings saved.');
             }
 
-        } elseif (isset($_POST['save_binance']) || isset($_POST['bn_test']) || isset($_POST['bn_clear'])) {
+        } elseif (isset($_POST['save_binance']) || isset($_POST['bn_test']) || isset($_POST['bn_clear']) || isset($_POST['bn_clear_err'])) {
             $page = 'payments';
+            if (isset($_POST['bn_clear_err'])) { save_setting('bn_last_error', ''); go('payments'); }
             if (isset($_POST['bn_clear'])) {
                 save_setting('bn_api_key', ''); save_setting('bn_api_secret', '');
                 go('payments', 'Binance API key and secret removed.');
@@ -478,17 +479,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $k1 = trim((string)($_POST['bn_api_key'] ?? '')); $k2 = trim((string)($_POST['bn_api_secret'] ?? ''));
             $ids = array_keys(pm_all());
             $mp = (string)($_POST['bn_pay_method'] ?? ''); $mb = (string)($_POST['bn_bsc_method'] ?? '');
-            $cf = (int)($_POST['bn_bsc_conf'] ?? 15); $rpc = trim((string)($_POST['bn_bsc_rpc'] ?? ''));
+            $base = (string)($_POST['bn_api_base'] ?? 'api.binance.com'); $cf = (int)($_POST['bn_bsc_conf'] ?? 15); $rpc = trim((string)($_POST['bn_bsc_rpc'] ?? ''));
             if (($k1 !== '' && !preg_match('/^[A-Za-z0-9]{20,128}$/', $k1)) || ($k2 !== '' && !preg_match('/^[A-Za-z0-9]{20,128}$/', $k2))) $pmErr = 'API key / secret look wrong. Copy them again from Binance (letters and numbers only).';
             elseif (($mp !== '' && !in_array($mp, $ids, true)) || ($mb !== '' && !in_array($mb, $ids, true))) $pmErr = 'Choose existing payment methods.';
             elseif ($mp !== '' && $mp === $mb) $pmErr = 'Binance Pay and BSC must be two different payment methods.';
+            elseif (!in_array($base, BN_HOSTS, true)) $pmErr = 'Choose a valid Binance API host.';
             elseif ($cf < 1 || $cf > 200) $pmErr = 'Confirmations must be between 1 and 200.';
             elseif ($rpc !== '' && !preg_match('#^https://\S+$#i', $rpc)) $pmErr = 'RPC URL must start with https://';
             else {
                 if ($k1 !== '') save_setting('bn_api_key', $k1);        // empty field = keep the saved value
                 if ($k2 !== '') save_setting('bn_api_secret', $k2);
                 save_setting('bn_pay_method', $mp); save_setting('bn_bsc_method', $mb);
-                save_setting('bn_bsc_conf', (string)$cf); save_setting('bn_bsc_rpc', $rpc);
+                save_setting('bn_api_base', $base); save_setting('bn_bsc_conf', (string)$cf); save_setting('bn_bsc_rpc', $rpc);
                 go('payments', 'Binance auto-verification settings saved.');
             }
 
@@ -1167,6 +1169,8 @@ $lg = media_url('logo');
 <?php $bnK = bn_key(); $bnS = bn_secret(); $bnOk = $bnK !== '' && $bnS !== '';
   $bv = fn(string $k, string $d = '') => e(isset($_POST['save_binance']) ? (string)($_POST[$k] ?? $d) : (string)setting($k, $d)); ?>
 <div class="card"><div class="card-h"><h3>Binance auto-verification</h3><span class="badge <?= $bnOk ? 'on' : 'off' ?>"><?= $bnOk ? 'Keys saved' : 'No keys' ?></span></div>
+  <?php if (($bnE = trim((string)setting('bn_last_error', ''))) !== ''): ?><div class="err" style="margin:0 0 10px"><b>Last auto-verify problem:</b> <?= e($bnE) ?>
+    <button class="btn sm ghost" name="bn_clear_err" value="1" style="margin-left:8px">Dismiss</button></div><?php endif; ?>
   <small class="hint" style="margin:0 0 6px">Deposits made with the two methods chosen below are checked automatically and the balance is added instantly. If the check is unavailable, the request goes to manual review.</small>
   <div class="pm-g2">
     <div><label style="margin-top:0">Binance API key</label><input type="password" name="bn_api_key" autocomplete="new-password" placeholder="<?= $bnK !== '' ? e(bn_mask($bnK)) . '  (leave empty to keep)' : 'Paste API key' ?>"></div>
@@ -1180,6 +1184,8 @@ $lg = media_url('logo');
       <?php foreach ($pmAll as $k => $m): ?><option value="<?= e($k) ?>"<?= $bv('bn_bsc_method') === e($k) ? ' selected' : '' ?>><?= e($m['name']) ?></option><?php endforeach; ?></select></div>
   </div>
   <small class="hint">First create both methods above (Add method). For Binance Pay put your <b>Pay ID</b> in the account field; for BSC put your <b>receiving wallet address (0x…)</b> there. Deposits are converted with the dollar rate in Settings.</small>
+  <label>Binance API host</label><select name="bn_api_base"><?php foreach (BN_HOSTS as $h): ?><option value="<?= e($h) ?>"<?= $bv('bn_api_base', 'api.binance.com') === e($h) ? ' selected' : '' ?>><?= e($h) ?></option><?php endforeach; ?></select>
+  <small class="hint">If Binance answers “restricted location” / 451, your server is in a blocked country (e.g. USA). Move the Railway service to a Singapore or EU region.</small>
   <div class="pm-g2">
     <div><label>BSC confirmations required</label><input type="number" name="bn_bsc_conf" min="1" max="200" value="<?= $bv('bn_bsc_conf', '15') ?>"></div>
     <div><label>Own BSC RPC URL <small>(optional)</small></label><input type="text" name="bn_bsc_rpc" value="<?= $bv('bn_bsc_rpc') ?>" placeholder="https://bsc-dataseed.binance.org/"></div>

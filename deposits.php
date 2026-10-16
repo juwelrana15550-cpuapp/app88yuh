@@ -34,6 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $M = $METHODS[$mk];
         $pdo = db();
         $auto = $kind !== null && bn_ready($kind) && $usdRate > 0;   // automatic check possible? otherwise the normal manual review below
+        if ($kind !== null && !$auto) bn_note_error($usdRate <= 0 ? 'Auto-verify skipped: dollar rate is not set (Admin > Settings).' : 'Auto-verify skipped: Binance API key / secret are not saved (Admin > Payment methods).');
         $st = $pdo->prepare("SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'"); $st->execute([$u['id']]);
         $st2 = $pdo->prepare('SELECT COUNT(*) FROM deposits WHERE note LIKE ?'); $st2->execute(['%TrxID: ' . $trx . ' |%']);
         $tries = array_values(array_filter($_SESSION['bn_try'] ?? [], fn($t) => $t > time() - 600));   // max 10 automatic checks / 10 min / session
@@ -55,6 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $r = $kind === 'bsc' ? bn_verify_bsc($trx, (string)$M['acct'], $usdAmt) : bn_verify_pay($trx, $usdAmt);
                 } catch (Throwable $ex) {
                     error_log('[binance-auto] ' . $kind . ': ' . $ex->getMessage());   // the API secret is never part of this message
+                    bn_note_error(strtoupper($kind) . ': ' . $ex->getMessage());
                     $r = ['state' => 'ERROR'];
                 }
                 switch ($r['state']) {
