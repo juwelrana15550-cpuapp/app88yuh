@@ -12,10 +12,14 @@
 /** Wallets that are verified from SMS. The key is what we look for inside the method name / SMS sender. Add more here. */
 const SMS_PROVIDERS = ['bkash', 'nagad', 'rocket', 'upay'];
 
+/** Other spellings an admin may use for the method name (Admin > Payment methods). */
+const SMS_NAME_ALIASES = ['roket' => 'rocket', 'bikash' => 'bkash', 'nogod' => 'nagad'];
+
 /** 'bKash' / 'bkash Personal' / 'Nagad' ...  ->  'bkash' | 'nagad' | ... | '' (not an SMS wallet). */
 function sms_slug(string $s): string {
     $l = strtolower(preg_replace('/[^a-z0-9]/i', '', $s));
     foreach (SMS_PROVIDERS as $p) if ($l !== '' && strpos($l, $p) !== false) return $p;
+    foreach (SMS_NAME_ALIASES as $alias => $p) if ($l !== '' && strpos($l, $alias) !== false) return $p;   // spelling variants of the method name
     return '';
 }
 
@@ -183,9 +187,17 @@ function sms_note_parts(string $note): array {
  */
 function sms_match_pending(PDO $pdo, int $smsId, float $bonus): int {
     return (int)with_tx($pdo, function (PDO $pdo) use ($smsId, $bonus) {
-        $st = $pdo->prepare("SELECT * FROM sms_inbox WHERE id = ? AND kind = 'in' AND used = 0 AND trx IS NOT NULL FOR UPDATE");
+        $st = $pdo->prepare("SELECT * FROM sms_inbox WHERE id = ? AND used = 0 FOR UPDATE");
         $st->execute([$smsId]);
         if (!($s = $st->fetch())) return 0;
+        if ($s['kind'] !== 'in') {   // saved before the parser knew this sender: read it again with the current rules
+            $np = sms_parse((string)$s['sender'], (string)$s['contact'], (string)$s['body']);
+            if ($np['kind'] !== 'in') return 0;
+            try { $pdo->prepare('UPDATE sms_inbox SET provider = ?, kind = ?, amount = ?, trx = ? WHERE id = ?')->execute([$np['provider'], $np['kind'], $np['amount'], $np['trx'], $s['id']]); }
+            catch (PDOException $ex) { return 0; }
+            $s = array_merge($s, $np);
+        }
+        if ($s['trx'] === null) return 0;
         $q = $pdo->prepare("SELECT * FROM deposits WHERE status = 'pending' AND note LIKE ? ORDER BY id LIMIT 20");
         $q->execute(['%| TrxID: ' . $s['trx'] . ' |%']);
         foreach ($q->fetchAll() as $d) {

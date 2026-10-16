@@ -932,7 +932,7 @@ $lg = media_url('logo');
       <?php else: ?><span class="badge off" title="<?= e($t['provider'] === '' ? 'Sender is not a known wallet' : 'Not an incoming payment') ?>">Not a payment</span><?php endif; ?></td>
   <td class="hm"><?= e($t['created_at']) ?></td>
   <td class="ra"><?php if (!$t['used']): ?><form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="sms_id" value="<?= (int)$t['id'] ?>">
-    <?php if ($isIn): ?><button class="btn sm" name="sms_act" value="recheck" title="Match with a waiting request again">Re-check</button><?php endif; ?>
+    <button class="btn sm" name="sms_act" value="recheck" title="Read this SMS again and match it with a waiting request">Re-check</button>
     <button class="btn sm red" name="sms_act" value="delete" onclick="return confirm('Delete this SMS?')">Delete</button></form><?php endif; ?></td>
 </tr>
 <?php endforeach; if (!$tList): ?><tr><td colspan="5"><?= ($tq !== '' || $tst !== '') ? 'No matching SMS.' : 'No SMS received yet. Send a test payment or use the app\'s test button.' ?></td></tr><?php endif; ?></tbody></table></div></div>
