@@ -18,18 +18,21 @@ $nf = function (float $n): string { return number_format($n, floor($n) == $n ? 0
 
 /* ============================== Submit ============================== */
 $err = '';
+$AJAX = ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch';   // the deposit page sends automatic checks in the background and shows a progress screen
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
+    $res = null;   // ['type' => success|pending|error, ...]  what the user is told
+    $bad = fn(string $title, string $msg) => ['type' => 'error', 'title' => $title, 'msg' => $msg];
     $amt  = round((float)($_POST['amount'] ?? 0), 2);
     $mk   = (string)($_POST['method'] ?? '');
     $kind = isset($METHODS[$mk]) ? bn_kind($mk) : null;              // 'pay' | 'bsc' | null (manual method)
     $raw  = preg_replace('/\s+/', '', (string)($_POST['trx'] ?? ''));
     $trx  = $kind === 'bsc' ? strtolower($raw) : strtoupper($raw);   // a BSC hash is 0x + 64 hex characters
     $validTrx = $kind === 'bsc' ? (bool)preg_match('/^0x[a-f0-9]{64}$/', $trx) : (bool)preg_match('/^[A-Z0-9]{6,40}$/', $trx);
-    if (!$CFG['on']) $err = 'Deposits are paused right now. Please try again later.';
-    elseif (!isset($METHODS[$mk]) || !$METHODS[$mk]['ok']) $err = 'Please choose a payment method.';
-    elseif ($amt < $METHODS[$mk]['lmin'] || $amt > $METHODS[$mk]['lmax']) $err = 'Amount for ' . $METHODS[$mk]['name'] . ' must be between ' . $nf($METHODS[$mk]['lmin']) . ' and ' . $nf($METHODS[$mk]['lmax']) . '.';
-    elseif (!$validTrx) $err = $kind === 'bsc' ? 'Enter the full transaction hash (starts with 0x, 66 characters).' : 'Enter a valid ' . $METHODS[$mk]['tid_label'] . ' (letters and numbers only, 6-40 characters).';
+    if (!$CFG['on']) $res = $bad('Deposits paused', 'Deposits are paused right now. Please try again later.');
+    elseif (!isset($METHODS[$mk]) || !$METHODS[$mk]['ok']) $res = $bad('Choose a method', 'Please choose a payment method.');
+    elseif ($amt < $METHODS[$mk]['lmin'] || $amt > $METHODS[$mk]['lmax']) $res = $bad('Check the amount', 'Amount for ' . $METHODS[$mk]['name'] . ' must be between ' . $nf($METHODS[$mk]['lmin']) . ' and ' . $nf($METHODS[$mk]['lmax']) . '.');
+    elseif (!$validTrx) $res = $bad('Check the ID', $kind === 'bsc' ? 'Enter the full transaction hash (starts with 0x, 66 characters).' : 'Enter a valid ' . $METHODS[$mk]['tid_label'] . ' (letters and numbers only, 6-40 characters).');
     else {
         $M = $METHODS[$mk];
         $pdo = db();
@@ -38,9 +41,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $st = $pdo->prepare("SELECT COUNT(*) FROM deposits WHERE user_id = ? AND status = 'pending'"); $st->execute([$u['id']]);
         $st2 = $pdo->prepare('SELECT COUNT(*) FROM deposits WHERE note LIKE ?'); $st2->execute(['%TrxID: ' . $trx . ' |%']);
         $tries = array_values(array_filter($_SESSION['bn_try'] ?? [], fn($t) => $t > time() - 600));   // max 10 automatic checks / 10 min / session
-        if ((int)$st2->fetchColumn() > 0) $err = 'This ' . $M['tid_label'] . ' was already submitted.';
-        elseif (!$auto && (int)$st->fetchColumn() >= $CFG['pending']) $err = 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.';
-        elseif ($auto && count($tries) >= 10) $err = 'Too many attempts. Please wait a few minutes and try again.';
+        if ((int)$st2->fetchColumn() > 0) $res = $bad('Already submitted', 'This ' . $M['tid_label'] . ' was already submitted.');
+        elseif (!$auto && (int)$st->fetchColumn() >= $CFG['pending']) $res = $bad('Too many pending', 'You already have ' . $CFG['pending'] . ' requests waiting for review. Please wait until they are approved.');
+        elseif ($auto && count($tries) >= 10) $res = $bad('Too many attempts', 'Please wait a few minutes and try again.');
         else {
             $credit  = pm_credit($M, $amt);   // amount minus the method fee, plus the method bonus
             $usdAmt  = number_format(round($amt / max($usdRate, 0.0001), 2), 2, '.', '');
@@ -49,6 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((float)$M['fee_pct'] > 0)   $note .= ' | Fee ' . (float)$M['fee_pct'] . '%';
             if ((float)$M['bonus_pct'] > 0) $note .= ' | Bonus ' . (float)$M['bonus_pct'] . '%';
             $manual = !$auto;   // true = create a pending request for the admin
+            $autoDown = false;
 
             if ($auto) {
                 $tries[] = time(); $_SESSION['bn_try'] = $tries;
@@ -62,25 +66,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 switch ($r['state']) {
                     case 'SUCCESS':
                         if (bn_credit($pdo, (int)$u['id'], $kind, $trx, (float)$credit, $note, (float)(getenv('REFERRAL_BONUS') ?: 10))) {
-                            $_SESSION['dep_success'] = ['amt' => (float)$credit, 'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'at' => time()];   // shown once as a success popup
-                            header('Location: /deposits.php'); exit;
-                        }
-                        $err = 'This ' . $M['tid_label'] . ' was already used.'; break;
-                    case 'NOT_FOUND':   $err = 'We could not find this payment yet. Check the ID and try again in a minute.'; break;
-                    case 'CONFIRMING':  $err = 'Payment found, but it is still being confirmed on the network. Please try again in a minute.'; break;
-                    case 'WRONG_AMOUNT':$err = 'The amount does not match. You must send exactly $' . $usdAmt . ' (USDT).'; break;
-                    case 'WRONG_TOKEN': $err = $kind === 'bsc' ? 'No USDT (BEP-20) transfer to our address was found in this transaction.' : 'This payment was not made in USDT.'; break;
-                    case 'FAILED':      $err = 'This transaction failed or was not completed.'; break;
-                    default:            $manual = true; $note .= ' | auto-check unavailable';   // temporary error: never reject a payment because of it
+                            $q = $pdo->prepare('SELECT coins FROM users WHERE id = ?'); $q->execute([$u['id']]);
+                            $res = ['type' => 'success', 'amt' => (float)$credit, 'amt_html' => money((float)$credit), 'bal_html' => money((float)$q->fetchColumn()),
+                                    'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'at' => time(), 'at_txt' => date('d M Y, h:i A')];
+                        } else $res = $bad('Already used', 'This ' . $M['tid_label'] . ' was already used.');
+                        break;
+                    case 'NOT_FOUND':   $res = $bad('Payment not found', 'We could not find this payment yet. Check the ID and try again in a minute.'); break;
+                    case 'CONFIRMING':  $res = $bad('Waiting for confirmation', 'Payment found, but it is still being confirmed on the network. Please try again in a minute.'); break;
+                    case 'WRONG_AMOUNT':$res = $bad('Amount does not match', 'You must send exactly $' . $usdAmt . ' (USDT) for this deposit.'); break;
+                    case 'WRONG_TOKEN': $res = $bad('Wrong token', $kind === 'bsc' ? 'No USDT (BEP-20) transfer to our address was found in this transaction.' : 'This payment was not made in USDT.'); break;
+                    case 'FAILED':      $res = $bad('Transaction failed', 'This transaction failed or was not completed.'); break;
+                    default:            $manual = true; $autoDown = true; $note .= ' | auto-check unavailable';   // temporary error: never reject a payment because of it
                 }
             }
-            if ($err === '' && $manual) {
+            if ($res === null && $manual) {
                 $pdo->prepare('INSERT INTO deposits (user_id, amount, note) VALUES (?,?,?)')->execute([$u['id'], $credit, substr($note, 0, 255)]);
-                flash('ok', $auto ? 'Automatic check is unavailable right now. Your request was saved and will be credited after review.' : 'Request received. Your balance is credited as soon as we confirm the payment.');
-                header('Location: /deposits.php'); exit;
+                $res = ['type' => 'pending', 'auto_down' => $autoDown, 'method' => $M['name'], 'trx' => $trx, 'paid' => $paid, 'amt_html' => money((float)$credit), 'at_txt' => date('d M Y, h:i A'),
+                        'msg' => $autoDown ? 'Automatic verification is unavailable right now. Your request is saved and our team will confirm it shortly.' : 'Your request was received. Your balance is credited as soon as we confirm the payment.'];
             }
         }
     }
+    if ($AJAX) { header('Content-Type: application/json; charset=utf-8'); header('Cache-Control: no-store'); echo json_encode($res, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG); exit; }
+    if ($res['type'] === 'success') { $_SESSION['dep_success'] = ['amt' => $res['amt'], 'method' => $res['method'], 'trx' => $res['trx'], 'paid' => $res['paid'], 'at' => $res['at']]; header('Location: /deposits.php'); exit; }
+    if ($res['type'] === 'pending') { flash('ok', $res['msg']); header('Location: /deposits.php'); exit; }
+    $err = $res['msg'];
 }
 
 $ok = $_SESSION['dep_success'] ?? null; unset($_SESSION['dep_success']);   // success popup data (set after an automatic credit)
@@ -291,6 +300,11 @@ user_start('Deposits', $u, 'deposits'); ?>
   .dp .dp-b{padding:8px 12px}
 }
 
+/* USDT preview under the amount */
+.dp .dp-usd{display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 12px;border-radius:12px;background:rgba(38,161,123,.1);border:1px solid rgba(38,161,123,.22);color:#0f7a5a;font-weight:600;font-size:13px;animation:dpin .2s ease}
+.dp .dp-usd svg{width:20px;height:20px;flex:none}
+.dp .dp-usd b{font-weight:800;font-size:14px}
+.dp .dp-usd small{margin-left:auto;color:#5f8f80;font-size:11px;font-weight:600;white-space:nowrap}
 /* Success popup */
 .dp-ov{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(18,20,42,.55);backdrop-filter:blur(3px);animation:dpfade .25s ease}
 .dp-ov[hidden]{display:none}
@@ -305,6 +319,29 @@ user_start('Deposits', $u, 'deposits'); ?>
 .dp-ok .rows div:last-child{border:0}
 .dp-ok .rows span{color:#6b7089;flex:none}.dp-ok .rows b{text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dp-ok button{margin-top:16px;width:100%;border:0;border-radius:12px;padding:13px;font-size:15px;font-weight:800;color:#fff;cursor:pointer;background:linear-gradient(135deg,#12a36b,#0e8a5a);box-shadow:0 6px 14px rgba(18,163,107,.3)}
+/* Processing / result states */
+.dp-ok .chk.warn{background:#d98a00;box-shadow:0 0 0 10px rgba(217,138,0,.14);animation:none}
+.dp-ok .chk.bad{background:#e5484d;box-shadow:0 0 0 10px rgba(229,72,77,.12);animation:none}
+.dp-ok .chk.warn svg,.dp-ok .chk.bad svg{stroke-dasharray:none;stroke-dashoffset:0;animation:dppop .4s ease}
+.dp-ok .sub b{color:#12142a}
+.dp-ok .badge2{display:inline-block;margin:0 0 12px;padding:3px 12px;border-radius:999px;font-size:12px;font-weight:800;background:rgba(217,138,0,.14);color:#b36f00}
+.dp-ok button.ghost{background:#f5f6fb;color:#12142a;border:1px solid #e6e8f2;box-shadow:none}
+.dp-ok button.pri{background:linear-gradient(135deg,#5b4bff,#8b5cf6);box-shadow:0 6px 14px rgba(91,75,255,.3)}
+.spin-wrap{position:relative;width:84px;height:84px;margin:0 auto 14px}
+.spin{position:absolute;inset:0;border-radius:50%;border:5px solid rgba(91,75,255,.14);border-top-color:#5b4bff;animation:dpspin 1s linear infinite}
+.spin-ic{position:absolute;inset:0;display:grid;place-items:center}
+.spin-ic svg{width:34px;height:34px;stroke:#5b4bff;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round;animation:dppulse 1.4s ease-in-out infinite}
+.stp{list-style:none;margin:10px 0 2px;padding:10px 14px;background:#f5f6fb;border:1px solid #e6e8f2;border-radius:14px;text-align:left}
+.stp li{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13.5px;color:#9aa0b8;transition:color .2s}
+.stp li i{width:20px;height:20px;border-radius:50%;border:2px solid #d9dcea;flex:none;box-sizing:border-box;position:relative}
+.stp li.on{color:#12142a;font-weight:700}
+.stp li.on i{border-color:#5b4bff;border-top-color:transparent;animation:dpspin .8s linear infinite}
+.stp li.done{color:#12a36b}
+.stp li.done i{background:#12a36b;border-color:#12a36b}
+.stp li.done i:after{content:"";position:absolute;left:5px;top:1px;width:4px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.dp-ok .lock{margin-top:12px;font-size:11.5px;color:#9aa0b8}
+@keyframes dpspin{to{transform:rotate(360deg)}}
+@keyframes dppulse{0%,100%{opacity:.55}50%{opacity:1}}
 @keyframes dpfade{from{opacity:0}to{opacity:1}}
 @keyframes dppop{from{opacity:0;transform:scale(.8) translateY(14px)}to{opacity:1;transform:none}}
 @keyframes dpdraw{to{stroke-dashoffset:0}}
@@ -331,6 +368,8 @@ user_start('Deposits', $u, 'deposits'); ?>
 <script>(function(){var o=document.getElementById('dpOk');function c(){o.hidden=true}document.getElementById('dpOkBtn').onclick=c;o.addEventListener('click',function(e){if(e.target===o)c()});document.addEventListener('keydown',function(e){if(e.key==='Escape')c()});})();</script>
 <?php endif; ?>
 
+
+<div class="dp-ov" id="dpRes" hidden role="dialog" aria-modal="true"><div class="dp-ok" id="dpResBox"></div></div>
 
 <div class="dp" id="dp">
   <div class="dp-hero">
@@ -360,6 +399,7 @@ user_start('Deposits', $u, 'deposits'); ?>
     <div class="dp-pane on" data-p="1">
       <label class="dp-l" for="dpAmt">Amount</label>
       <div class="dp-amt"><span>৳</span><input type="number" inputmode="decimal" id="dpAmt" name="amount" min="<?= e((string)$CFG['min']) ?>" max="<?= e((string)$CFG['max']) ?>" step="0.01" placeholder="0" value="<?= $err ? e($_POST['amount'] ?? '') : '' ?>"></div>
+      <div class="dp-usd" id="dpUsd" hidden></div>
       <div class="dp-chips"><?php foreach ($CFG['chips'] as $c): ?><button type="button" class="dp-chip" data-v="<?= $c ?>">+<?= number_format($c) ?></button><?php endforeach; ?></div>
       <div class="dp-hint" id="dpAmtHint">Min <?= $nf($CFG['min']) ?> · Max <?= $nf($CFG['max']) ?></div>
 
@@ -429,6 +469,7 @@ user_start('Deposits', $u, 'deposits'); ?>
       MIN = <?= json_encode((float)$CFG['min']) ?>, MAX = <?= json_encode((float)$CFG['max']) ?>, RATE = <?= json_encode($usdRate) ?>,
       $ = function(s){return document.querySelector(s)}, $$ = function(s){return [].slice.call(document.querySelectorAll(s))};
   var amt = $('#dpAmt'), meth = $('#dpMethod'), trx = $('#dpTrx'), cur = 1;
+  var USDT_IC = '<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="16" fill="#26a17b"/><path fill="#fff" d="M17.9 17.4v-.01c-.1 0-.6.04-1.9.04-1.1 0-1.7-.03-1.9-.04v.01c-3.4-.15-5.9-.7-5.9-1.4s2.5-1.25 5.9-1.4v2.2c.2.01.8.05 1.9.05 1.3 0 1.8-.04 1.9-.05v-2.2c3.4.15 5.9.7 5.9 1.4s-2.5 1.25-5.9 1.4zm0-3v-2h4.7V9.3H9.4v3.1h4.7v2c-3.8.17-6.7.9-6.7 1.8s2.9 1.65 6.7 1.8v6.4h3.8v-6.4c3.8-.17 6.7-.9 6.7-1.8s-2.9-1.63-6.7-1.8z"/></svg>';
   function fmt(n){return '৳' + Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
   function a(){var v = parseFloat(amt.value); return isFinite(v) ? v : 0}
   function okAmt(){var v = a(); return v >= MIN && v <= MAX}
@@ -463,6 +504,8 @@ user_start('Deposits', $u, 'deposits'); ?>
     var u = m && m.usd && RATE > 0 && v;
     $('#sUsdRow').hidden = !u;
     if (u) $('#sUsd').textContent = '$' + (v / RATE).toFixed(2);
+    var ub = $('#dpUsd');
+    if (RATE > 0 && v > 0) { ub.hidden = false; ub.innerHTML = USDT_IC + '<span>You pay about <b>$' + (v / RATE).toFixed(2) + ' USDT</b></span><small>' + fmt(RATE) + ' = $1</small>'; } else ub.hidden = true;
     $('#n1').disabled = !(okAmt() && m);
     var h = $('#dpAmtHint'), msg = !amt.value ? '' : (v < MIN ? 'Minimum deposit is ' + fmt(MIN) : v > MAX ? 'Maximum deposit is ' + fmt(MAX) : '');
     h.textContent = msg || ('Min ' + fmt(MIN) + ' · Max ' + fmt(MAX)); h.classList.toggle('bad', !!msg);
@@ -523,7 +566,51 @@ user_start('Deposits', $u, 'deposits'); ?>
     }
   });
   amt.addEventListener('input', sum); trx.addEventListener('input', sum);
-  $('#dpForm').addEventListener('submit', function(e){ if ($('#dpSubmit').disabled) e.preventDefault(); });
+  /* ---- automatic verification: progress screen + result screen ---- */
+  var RES = $('#dpRes'), BOX = $('#dpResBox');
+  var IC = {
+    ok: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+    x: '<svg viewBox="0 0 24 24"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg>',
+    shield: '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 7.8-7 9.5-4-1.7-7-5.1-7-9.5V6z"/><path d="M9 12l2.2 2.2L15 10.4"/></svg>'
+  };
+  function rowsHtml(l){ return '<div class="rows">' + l.map(function(r){ return '<div><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('') + '</div>'; }
+  function shortT(t){ return t.length > 18 ? t.slice(0, 8) + '…' + t.slice(-6) : t; }
+  function openRes(h){ BOX.innerHTML = h; RES.hidden = false; }
+  function setStep(n){ $$('.stp li').forEach(function(li, i){ li.className = i < n ? 'done' : i === n ? 'on' : ''; }); }
+  function procHtml(m){
+    var st = ['Connecting to ' + (m.auto === 'bsc' ? 'BNB Smart Chain' : 'Binance'), 'Finding your transaction', 'Checking amount and token', 'Adding balance to your account'];
+    return '<div class="spin-wrap"><div class="spin"></div><div class="spin-ic">' + IC.shield + '</div></div>' +
+      '<h2>Verifying your payment</h2><p class="sub">This takes a few seconds. Please do not close or refresh this page.</p>' +
+      '<ul class="stp">' + st.map(function(t){ return '<li><i></i><span>' + t + '</span></li>'; }).join('') + '</ul><div class="lock">🔒 Secure automatic verification</div>';
+  }
+  function resHtml(d){
+    if (d.type === 'success') return '<div class="chk">' + IC.ok + '</div><h2>Payment Successful</h2><p class="sub">Your balance was added successfully.</p><div class="big">+ ' + d.amt_html + '</div>' +
+      rowsHtml([['Method', esc(d.method)], ['You paid', esc(d.paid)], ['Transaction', esc(shortT(d.trx))], ['New balance', d.bal_html], ['Time', esc(d.at_txt)]]) + '<button type="button" data-act="reload">Done</button>';
+    if (d.type === 'pending') return '<div class="chk warn">' + IC.clock + '</div><h2>' + (d.auto_down ? 'Verification delayed' : 'Request received') + '</h2><p class="sub">' + esc(d.msg) + '</p><span class="badge2">Pending review</span>' +
+      rowsHtml([['Method', esc(d.method)], ['Amount', d.amt_html], ['Transaction', esc(shortT(d.trx))], ['Time', esc(d.at_txt)]]) + '<button type="button" class="pri" data-act="reload">OK, got it</button>';
+    return '<div class="chk bad">' + IC.x + '</div><h2>' + esc(d.title || 'Could not verify') + '</h2><p class="sub">' + esc(d.msg || 'Something went wrong.') + '</p>' +
+      '<button type="button" class="pri" data-act="close">Try again</button>' + (d.reload ? '<button type="button" class="ghost" data-act="reload">Check deposit history</button>' : '');
+  }
+  BOX.addEventListener('click', function(e){
+    var b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'reload') location.href = location.pathname;
+    else if (b.dataset.act === 'close') RES.hidden = true;
+  });
+  function runAuto(m){
+    var t0 = Date.now(), step = 0;
+    openRes(procHtml(m)); setStep(0);
+    var iv = setInterval(function(){ if (step < 2) setStep(++step); }, 900);
+    var fin = function(d){ setTimeout(function(){ clearInterval(iv); if (d.type === 'success') setStep(4); else if (d.type === 'pending') setStep(2); openRes(resHtml(d)); }, Math.max(0, 2600 - (Date.now() - t0))); };
+    fetch(location.pathname, {method: 'POST', body: new FormData($('#dpForm')), credentials: 'same-origin', headers: {'X-Requested-With': 'fetch'}})
+      .then(function(r){ return r.json(); })
+      .then(fin, function(){ fin({type: 'error', title: 'Connection problem', msg: 'We could not get an answer from the server. Your deposit may already have been processed, so check your deposit history before trying again.', reload: 1}); });
+  }
+  $('#dpForm').addEventListener('submit', function(e){
+    if ($('#dpSubmit').disabled) { e.preventDefault(); return; }
+    var m = M[meth.value];
+    if (m && m.auto && window.fetch && window.FormData) { e.preventDefault(); runAuto(m); }   // manual methods keep the normal form post
+  });
   // restore state after a server-side error, otherwise start fresh
   if (meth.value && M[meth.value]) { var b = document.querySelector('.dp-mth[data-m="' + meth.value + '"]'); if (b) b.classList.add('on'); }
   sum();
