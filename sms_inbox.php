@@ -59,6 +59,7 @@ function sms_read_request(): array {
     $j = json_decode($raw, true);
     if (is_array($j)) $data = $j;
     if (!$data && $_POST) $data = $_POST;
+    if (!$data && $raw !== '' && preg_match('/^[A-Za-z0-9_]+=/', $raw)) { parse_str($raw, $pf); if (is_array($pf)) $data = $pf; }   // form body without a content-type
     if (!$data && $_GET) { $data = $_GET; unset($data['key']); }
     $flat = [];
     $walk = function ($a, $pre = '') use (&$walk, &$flat) {
@@ -72,7 +73,7 @@ function sms_read_request(): array {
         foreach ($keys as $k) if (isset($flat[$k]) && trim($flat[$k]) !== '') return trim($flat[$k]);
         return '';
     };
-    $body   = $pick(['message', 'text', 'body', 'content', 'msg', 'sms', 'message body', 'messagebody', 'payload.message', 'payload.text']);
+    $body   = $pick(['message', 'text', 'body', 'content', 'msg', 'sms', 'key', 'message body', 'messagebody', 'messagetext', 'payload.message', 'payload.text']);   // the SMS Forwarder app posts the message in a field called "key" (plus "time")
     $sender = $pick(['from', 'sender', 'sender number', 'sendernumber', 'number', 'address', 'phone', 'payload.from']);
     $contact = $pick(['contact', 'contact name', 'contactname', 'name']);
     if ($body === '') $body = trim($raw);   // app posted the plain template text
