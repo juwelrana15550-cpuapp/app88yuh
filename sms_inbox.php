@@ -19,6 +19,16 @@ function sms_slug(string $s): string {
     return '';
 }
 
+/** SMS senders that are a number, not a name. Rocket sends from 16216. */
+const SMS_SENDER_CODES = ['16216' => 'rocket'];
+
+/** Who sent the SMS: 'bKash' / 'NAGAD' / '16216' / '+88016216' ...  ->  provider key or ''. */
+function sms_sender_provider(string $sender): string {
+    $digits = preg_replace('/\D+/', '', $sender);
+    foreach (SMS_SENDER_CODES as $code => $p) if ($digits === $code) return $p;
+    return sms_slug($sender);
+}
+
 /** Create the table / column once (cheap check afterwards). */
 function sms_schema(PDO $pdo): void {
     static $done = false;
@@ -94,7 +104,7 @@ function sms_read_request(): array {
  * that texts a fake "You have received Tk ..." message is never trusted.
  */
 function sms_parse(string $sender, string $contact, string $body): array {
-    $provider = sms_slug($sender);
+    $provider = sms_sender_provider($sender);
     if ($provider === '') $provider = sms_slug($contact);
     $t = preg_replace('/\s+/u', ' ', $body);
     $incoming = (bool)preg_match('/received|cash\s*-?in|credited|deposit/i', $t) && !preg_match('/\b(sent|cash\s*-?out|withdraw|paid|payment\s+to|bill|recharge|purchase)\b/i', $t);
