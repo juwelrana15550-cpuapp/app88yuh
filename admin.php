@@ -1,12 +1,13 @@
 <?php require __DIR__ . '/lib.php';
+require __DIR__ . '/supplier_hot.php';
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = '';
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''; $supTest = null;
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings', 'supplier'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null): void {
@@ -17,7 +18,13 @@ function go(string $p, ?string $ok = null): void {
 
 function product_fields(): array {
     $st = trim($_POST['stock'] ?? '');
+    $sp = explode('|', trim($_POST['supplier_link'] ?? ''), 2);
+    $src  = $_POST['supplier_src'] ?? '';                       // '' = manual, 'hot' = Supplier 1, 'bm' = Supplier 2 (bulkmail.shop)
+    $okSp = $src === 'hot' && count($sp) === 2 && preg_match('/^[\w.\-]{1,40}$/', $sp[0]) && preg_match('/^[\w.\-]{1,40}$/', $sp[1]);
+    $bmId = $src === 'bm' ? max(0, (int)($_POST['bm_id'] ?? 0)) : 0;
     return [
+        'src'     => $src === 'hot' ? 'hot' : ($src === 'bm' ? 'bm' : ''),
+        'sup_id'  => $bmId ?: null,
         'name'    => trim($_POST['pname'] ?? ''),
         'desc'    => mb_substr(trim($_POST['pdesc'] ?? ''), 0, 500),
         'price'   => round((float)($_POST['pprice'] ?? 0), 2),
@@ -25,6 +32,12 @@ function product_fields(): array {
         'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
+        'sup_t'   => $okSp ? $sp[0] : null,
+        'sup_a'   => $okSp ? $sp[1] : null,
+        // Supplier 2 only: keep name / description + Possible Domain in step with the supplier; show the domain line (default on)
+        'an'      => ($src === 'bm' && !empty($_POST['sup_an'])) ? 1 : 0,
+        'ad'      => ($src === 'bm' && !empty($_POST['sup_ad'])) ? 1 : 0,
+        'sd'      => ($src === 'bm' && empty($_POST['sup_sd'])) ? 0 : 1,
     ];
 }
 function category_fields(): array {
@@ -41,6 +54,7 @@ function category_fields(): array {
     ];
 }
 
+if (!empty($_SESSION['admin'])) suphot_schema();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (isset($_POST['admin_logout'])) { unset($_SESSION['admin']); header('Location: /admin.php'); exit; }
@@ -88,24 +102,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 go('settings', 'Settings saved.');
             }
 
+        } elseif (isset($_POST['bm_connect']) || isset($_POST['bm_disconnect'])) {
+            $page = 'supplier';
+            if (isset($_POST['bm_disconnect'])) { bm_disconnect($pdo); go('supplier', 'Supplier 2 disconnected.'); }
+            [$okB, $msgB] = bm_connect($pdo, (string)($_POST['bm_key'] ?? ''));
+            if ($okB) go('supplier', $msgB);
+            $supErr = $msgB;
+
+        } elseif (isset($_POST['save_supplier']) || isset($_POST['test_supplier'])) {
+            $page = 'supplier';
+            unset($_SESSION['sup_cat']);
+            if (isset($_POST['save_supplier'])) {
+                $u = rtrim(trim($_POST['supplier_url'] ?? ''), '/');
+                $k = trim($_POST['supplier_key'] ?? '');
+                if ($u !== '' && !preg_match('#^https://[^\s?\#]+$#i', $u)) {
+                    $supErr = 'API URL must start with https:// (example: https://supplier-site.com/api/v1).';
+                } else {
+                    save_setting('suphot_url', $u);
+                    if (!empty($_POST['remove_key'])) save_setting('suphot_key', '');
+                    elseif ($k !== '') save_setting('suphot_key', $k);
+                    save_setting('suphot_auto', empty($_POST['supplier_auto']) ? '0' : '1');
+                    go('supplier', 'Supplier settings saved.');
+                }
+            } else {
+                $supTest = suphot_call('GET', '/balance', [], null, 15);
+            }
+
         } elseif (isset($_POST['add_product']) || isset($_POST['update_product'])) {
             $page = 'products';
             $isEdit = isset($_POST['update_product']);
             $f = product_fields();
-            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0) {
-                $prodErr = 'Enter a product name (max 80 chars) and a price above 0.';
+            $linkErr = '';
+            if ($f['src'] === 'hot' && !$f['sup_t']) $linkErr = 'Choose a Supplier 1 product.';
+            if ($f['src'] === 'bm') {
+                if (!$f['sup_id']) $linkErr = 'Enter the Supplier 2 (bulkmail.shop) product ID.';
+                elseif (!bm_connected()) $linkErr = 'Connect Supplier 2 first (Admin > Supplier API).';
+                else { $chk = bm_product((int)$f['sup_id']); if (isset($chk['error'])) $linkErr = $chk['error']; }
+            }
+            if ($f['name'] === '' || mb_strlen($f['name']) > 80 || $f['price'] <= 0 || $linkErr !== '') {
+                $prodErr = $linkErr !== '' ? $linkErr : 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
                     'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'],
+                    'src' => $f['src'], 'sup' => $f['sup_t'] ? $f['sup_t'] . '|' . $f['sup_a'] : '', 'bmid' => $f['sup_id'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'],
                 ]];
-            } elseif ($isEdit) {
-                $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=? WHERE id=?')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], (int)$_POST['update_product']]);
-                go('products', 'Product saved.');
             } else {
-                $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular) VALUES (?,?,?,?,?,?,?)')
-                    ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular']]);
-                go('products', 'Product added.');
+                // A product is linked to exactly one supplier: the other supplier's link is always cleared.
+                if ($f['src'] === 'bm') { $f['sup_t'] = null; $f['sup_a'] = null; } else { $f['sup_id'] = null; }
+                if ($f['src'] === 'bm' && $f['stock'] === null) $f['stock'] = (int)($chk['stock'] ?? 0);   // live stock is synced from the supplier anyway
+                if ($isEdit) {
+                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=? WHERE id=?')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], (int)$_POST['update_product']]);
+                    $msg = 'Product saved.';
+                } else {
+                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd']]);
+                    $msg = 'Product added.';
+                }
+                if ($f['src'] === 'bm') bm_sync_stock($pdo, true);
+                if ($f['src'] === 'bm' && ($f['an'] || $f['ad']) && function_exists('bm_sync_details')) bm_sync_details($pdo, 30);   // name / description / domain now
+                if ($f['src'] === 'hot') suphot_sync_stock($pdo, true);
+                go('products', $msg);
             }
 
         } elseif (isset($_POST['add_category']) || isset($_POST['update_category'])) {
@@ -138,6 +195,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (isset($_POST['toggle_product'])) {
             $pdo->prepare('UPDATE products SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_product']]);
             go('products', 'Product visibility updated.');
+
+        } elseif (isset($_POST['supplier_deliver'])) {
+            $oidS = (int)($_POST['order_id'] ?? 0);
+            $ps = $pdo->prepare('SELECT p.supplier_id FROM orders o JOIN products p ON p.id = o.product_id WHERE o.id = ?');
+            $ps->execute([$oidS]);
+            if ((int)$ps->fetchColumn() > 0) {   // linked to Supplier 2 (bulkmail.shop)
+                if (!bm_connected()) { $okS = false; $msgS = 'Supplier 2 is not connected (Admin > Supplier API).'; }
+                else { $rb = bm_fulfil($pdo, $oidS); $okS = $rb['status'] !== 'pending'; $msgS = $rb['status'] === 'pending' ? ($rb['msg'] . ' Check Supplier 2 before retrying.') : $rb['msg']; }
+            } else {                              // Supplier 1
+                [$okS, $msgS] = suphot_fulfill_order($oidS);
+            }
+            if ($okS) go('orders', $msgS);
+            $page = 'orders'; $ordErr = $msgS;
 
         } elseif (isset($_POST['deliver']) || isset($_POST['cancel_order'])) {
             $oid = (int)($_POST['order_id'] ?? 0);
@@ -208,9 +278,11 @@ if ($page === null) {
 }
 $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
-$pendOrders = $pdo->query("SELECT o.*, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
+$pendOrders = $pdo->query("SELECT o.*, u.email, p.supplier_type AS sup_t, p.supplier_id AS sup_id FROM orders o JOIN users u ON u.id = o.user_id LEFT JOIN products p ON p.id = o.product_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
 $products = $pdo->query('SELECT * FROM products ORDER BY id DESC')->fetchAll();
+$supOpts = $page === 'products' ? suphot_options($products) : '';
+if ($page === 'products') { bm_sync_stock($pdo); suphot_sync_stock($pdo); }   // Supplier 2 products: live stock (at most once a minute)
 $cats = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) AS n FROM categories c ORDER BY c.sort_order, c.id')->fetchAll();
 $catById = []; foreach ($cats as $k) $catById[(int)$k['id']] = $k;
 $catOpts = function ($sel) use ($cats) {
@@ -232,6 +304,7 @@ function ai(string $n): string {
         'pencil'  => '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
         'trash'   => '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
         'chev'    => '<path d="m6 9 6 6 6-6"/>',
+        'plug'    => '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
         'ext'     => '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     ];
     return isset($x[$n]) ? '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . $x[$n] . '</svg>' : icon($n);
@@ -241,7 +314,7 @@ $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
     'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
-    'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0]],
+    'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0], ['supplier', 'Supplier API', 'plug', 0]],
 ];
 $titles = [
     'overview'   => ['Overview', 'Store activity at a glance'],
@@ -251,6 +324,7 @@ $titles = [
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Latest 100 registered users'],
     'settings'   => ['Site settings', 'Name, headline, support links, logo and banner'],
+    'supplier'   => ['Supplier API', 'Connect two suppliers; each product is bought from the supplier it is linked to'],
 ];
 $sv = fn(string $k) => e($_POST[$k] ?? setting($k));
 $lg = media_url('logo');
@@ -317,12 +391,14 @@ $lg = media_url('logo');
 <?php endforeach; if (!$hist): ?><tr><td colspan="4">No history yet.</td></tr><?php endif; ?></tbody></table></div></div>
 
 <?php /* ============================ ORDERS ============================ */ elseif ($page === 'orders'): ?>
+<?php if ($ordErr): ?><div class="err"><?= e($ordErr) ?></div><?php endif; ?>
 <?php foreach ($pendOrders as $o): ?>
 <div class="ord">
   <div class="ord-h"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?></b><p><?= e($o['email']) ?> · <?= e($o['created_at']) ?></p></div><span class="money"><?= money($o['price']) ?></span></div>
   <form method="post"><?= csrf_field() ?><input type="hidden" name="order_id" value="<?= (int)$o['id'] ?>">
   <textarea name="delivery" placeholder="Delivery details shown to the customer (account email/password, license key, instructions...)"></textarea>
-  <div class="acts" style="margin-top:10px"><button class="btn sm ok-b" name="deliver" value="1">Mark delivered</button>
+  <div class="acts" style="margin-top:10px"><?php if (!empty($o['sup_t']) || !empty($o['sup_id'])): ?><button class="btn sm" name="supplier_deliver" value="1" onclick="return confirm('Buy this from the supplier now? Your supplier balance will be charged.')">Auto-deliver (Supplier <?= !empty($o['sup_id']) ? '2' : '1' ?>)</button><?php endif; ?>
+  <button class="btn sm ok-b" name="deliver" value="1">Mark delivered</button>
   <button class="btn sm red" name="cancel_order" value="1" onclick="return confirm('Cancel and refund?')">Cancel &amp; refund</button></div></form>
 </div>
 <?php endforeach; if (!$pendOrders): ?><div class="card"><div class="empty">No pending orders. 🎉</div></div><?php endif; ?>
@@ -352,9 +428,13 @@ $lg = media_url('logo');
   <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular']]; ?>
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'],
+           'src' => !empty($p['supplier_id']) ? 'bm' : (!empty($p['supplier_type']) ? 'hot' : ''),
+           'sup' => !empty($p['supplier_type']) ? $p['supplier_type'] . '|' . $p['supplier_account'] : '',
+           'bmid' => !empty($p['supplier_id']) ? (int)$p['supplier_id'] : '',
+           'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1)]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if (!empty($p['supplier_id'])): ?><span class="tag">Supplier 2</span><?php elseif (!empty($p['supplier_type'])): ?><span class="tag">Supplier 1</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?= money($p['price']) ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) ?></td>
@@ -377,6 +457,14 @@ $lg = media_url('logo');
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
+  <label>Supplier <small>(orders for this product are bought from the chosen supplier)</small></label>
+  <select name="supplier_src" id="p_src"><option value="">— None (manual delivery) —</option><option value="hot">Supplier 1</option><option value="bm">Supplier 2 (bulkmail.shop)</option></select>
+  <div id="p_src_hot" hidden><label>Supplier 1 product</label><select name="supplier_link" id="p_sup"><?= $supOpts ?></select></div>
+  <div id="p_src_bm" hidden><label>Supplier 2 product ID</label><input type="number" name="bm_id" id="p_bmid" min="1" step="1" placeholder="e.g. 12"><small>Stock is shown live from Supplier 2.</small>
+    <label class="chk" style="margin-top:12px"><input type="checkbox" name="sup_an" id="p_an" value="1"> <span>Keep the name the same as Supplier 2</span></label>
+    <label class="chk"><input type="checkbox" name="sup_ad" id="p_ad" value="1"> <span>Keep the description and Possible Domain the same as Supplier 2</span></label>
+    <label class="chk"><input type="checkbox" name="sup_sd" id="p_sd" value="1" checked> <span>Show the Possible Domain line on the product card</span></label>
+  </div>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pSave" name="add_product" value="1">Save product</button></div>
 </form></dialog>
@@ -457,6 +545,49 @@ $lg = media_url('logo');
   <div class="savebar"><button class="btn" name="save_settings" value="1">Save settings</button></div>
 </div>
 </form>
+
+<?php /* ============================ SUPPLIER ============================ */ elseif ($page === 'supplier'):
+  $supUrl = (string)setting('suphot_url'); $hasKey = (string)setting('suphot_key') !== '';
+  $supAuto = setting('suphot_auto') === '1'; ?>
+<?php if ($supErr): ?><div class="err"><?= e($supErr) ?></div><?php endif; ?>
+<?php if ($supTest): ?>
+  <?php if ($supTest['ok']): ?><div class="card"><span class="badge on">Connected</span> Supplier balance: <b><?= e((string)($supTest['data']['balance_formatted'] ?? $supTest['data']['balance'] ?? '?')) ?></b> <small><?= e((string)($supTest['data']['email'] ?? '')) ?></small></div>
+  <?php else: ?><div class="err">Connection failed: <?= e($supTest['error']) ?></div><?php endif; ?>
+<?php endif; ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><h3>Supplier 1 — Connection</h3>
+  <label style="margin-top:0">Supplier API URL</label><input type="text" name="supplier_url" value="<?= e($_POST['supplier_url'] ?? $supUrl) ?>" placeholder="https://supplier-site.com/api/v1">
+  <small>Base URL ending in /api/v1, no trailing slash.</small>
+  <label>API key</label><input type="password" name="supplier_key" autocomplete="off" placeholder="<?= $hasKey ? 'Saved. Leave blank to keep it' : 'Paste your API key' ?>">
+  <?php if ($hasKey): ?><label class="rm"><input type="checkbox" name="remove_key" value="1"> Remove saved key</label><?php endif; ?>
+  <label class="chk"><input type="checkbox" name="supplier_auto" value="1"<?= $supAuto ? ' checked' : '' ?>> <span>Auto-deliver new orders for supplier-linked products</span></label>
+  <div class="savebar"><button class="btn" name="save_supplier" value="1">Save</button> <button class="btn ghost" name="test_supplier" value="1">Test connection</button></div>
+</div>
+</form>
+<?php $sc = ($hasKey && $supUrl !== '') ? suphot_catalog() : null; ?>
+<div class="card"><h3>Supplier 1 — catalogue</h3>
+<?php if ($sc === null): ?><div class="empty">Save the API URL and key first.</div>
+<?php elseif (!$sc['ok']): ?><div class="err"><?= e($sc['error']) ?></div>
+<?php else: ?><div class="tw"><table><thead><tr><th>Name</th><th class="hm">Type</th><th>Cost</th><th>Stock</th></tr></thead><tbody>
+  <?php foreach ($sc['items'] as $it): ?>
+  <tr><td><?= e((string)($it['name'] ?? '')) ?></td><td class="hm"><small><?= e(($it['product_type'] ?? '') . ' / ' . ($it['account_type'] ?? '')) ?></small></td><td class="money"><?= e((string)($it['price'] ?? '')) ?></td><td><?= number_format((int)($it['stock'] ?? 0)) ?></td></tr>
+  <?php endforeach; if (!$sc['items']): ?><tr><td colspan="4">No products returned.</td></tr><?php endif; ?></tbody></table></div>
+<?php endif; ?></div>
+
+<?php $bmOn = bm_connected(); $bmBal = $bmOn ? bm_balance() : null; $bmErr = (string)setting('bm_last_error', ''); ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><h3>Supplier 2 — bulkmail.shop</h3>
+  <?php if ($bmOn): ?>
+    <p><span class="badge on">Connected</span> Key: <b><?= e(bm_mask(bm_key())) ?></b><?php if ($bmBal): ?> · Balance: <b><?= e(number_format($bmBal['balance'], 2) . ' ' . $bmBal['currency']) ?></b><?php endif; ?></p>
+    <?php if ($bmErr !== ''): ?><div class="err"><?= e($bmErr) ?></div><?php endif; ?>
+    <div class="savebar"><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect Supplier 2? Its linked products will show as out of stock.')">Disconnect</button></div>
+  <?php else: ?>
+    <label style="margin-top:0">API key</label><input type="password" name="bm_key" autocomplete="off" placeholder="Paste the bulkmail.shop API key">
+    <small>Then open Products and link each product to Supplier 2 by its product ID.</small>
+    <div class="savebar"><button class="btn" name="bm_connect" value="1">Connect</button></div>
+  <?php endif; ?>
+</div>
+</form>
 <?php endif; ?>
 </main>
 </div>
@@ -478,16 +609,20 @@ $lg = media_url('logo');
   /* ---------- products ---------- */
   var pd=$('#pdlg');
   if(pd){
+    var showSrc=function(){ var s=$('#p_src').value; $('#p_src_hot').hidden=s!=='hot'; $('#p_src_bm').hidden=s!=='bm'; };
+    $('#p_src').addEventListener('change',showSrc);
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
-      $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop;
+      $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop; $('#p_sup').value=v.sup||'';
+      $('#p_src').value=v.src||''; $('#p_bmid').value=v.bmid||'';
+      $('#p_an').checked=!!+v.an; $('#p_ad').checked=!!+v.ad; $('#p_sd').checked=(v.sd===undefined||v.sd===null)?true:!!+v.sd; showSrc();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     var q=$('#pq'), c=$('#pcat'), none=$('#pnone');
