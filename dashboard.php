@@ -1,5 +1,5 @@
 <?php require __DIR__ . '/lib.php';
-require_once __DIR__ . '/supplier_hot.php';   // Supplier 1 (Supplier 2 = supplier.php, loaded by lib.php)
+require_once __DIR__ . '/supplier_hot.php';   // Supplier Hot (second supplier)
 if (isset($_GET['ajax']) && !current_user()) { http_response_code(401); exit; }   // category switcher: never answer with the login page
 $u = require_login();
 $pdo = db();
@@ -17,7 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$p) throw new RuntimeException('Product not found.');
             $sup   = (int)($p['supplier_id'] ?? 0);   // linked to a bulkmail.shop product: bought there after payment
             if ($sup && !bm_connected()) throw new RuntimeException('This product is temporarily unavailable.');
-            $hot   = !$sup && !empty($p['supplier_type']) && !empty($p['supplier_account']);   // linked to Supplier 1: bought there after payment
+            $hot   = !$sup && !empty($p['supplier_type']) && !empty($p['supplier_account']);   // linked to Supplier Hot: bought there after payment
+            if ($hot && !suphot_connected()) throw new RuntimeException('This product is temporarily unavailable.');
             $auto  = !$sup && !$hot && !empty($p['auto_delivery']);
             $items = [];
             if ($auto) {
@@ -41,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty, implode("\n", array_column($items, 'line'))]);
             } else {
                 // Supplier products keep their stock number from bulkmail.shop (refreshed after the purchase), so nothing is subtracted here.
-                if (!$sup && $p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
+                if (!$sup && !$hot && $p['stock'] !== null) $pdo->prepare('UPDATE products SET stock = stock - ? WHERE id = ?')->execute([$qty, $p['id']]);
                 $pdo->prepare('INSERT INTO orders (user_id, product_id, product_name, price, qty) VALUES (?,?,?,?,?)')
                     ->execute([$u['id'], $p['id'], $p['name'], $total, $qty]);
             }
@@ -56,31 +57,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($hot) $GLOBALS['__hot'] = true;
             return $id;
         });
-        if (!empty($GLOBALS['__hot'])) {
-            // Supplier 1: buy now (outside the transaction). On a clear refusal the customer is refunded; if unclear the order stays pending (never refunded/resent blindly).
-            $hs = suphot_auto_fulfill($oid);
-            if ($hs === 'failed') {
-                with_tx($pdo, function (PDO $pdo) use ($oid) {
-                    $q = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND status = 'pending' FOR UPDATE"); $q->execute([$oid]);
-                    if (!($ord = $q->fetch())) return;
-                    $pdo->prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?")->execute([$oid]);
-                    $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$ord['price'], $ord['user_id']]);
-                    add_tx($pdo, (int)$ord['user_id'], 'refund', (float)$ord['price'], 'Refund for order #' . $oid);
-                });
-                suphot_sync_stock($pdo, true);
-                flash('err', 'Purchase failed, please try again later. Your money was refunded.');
-                $oid = 0;
-            } else {
-                $GLOBALS['__hot_done'] = $hs === 'delivered';
-            }
-        }
         if (!empty($GLOBALS['__sup'])) {
             // The payment is saved. Now buy the items at bulkmail.shop (outside the database transaction, so no locks are held while waiting for the network).
             $res = bm_fulfil($pdo, $oid);
             if ($res['status'] === 'refunded') { flash('err', $res['msg']); $oid = 0; }
             else flash('ok', $res['msg']);
+        } elseif (!empty($GLOBALS['__hot'])) {
+            // The payment is saved. Now buy the items at Supplier Hot (outside the database transaction).
+            $st = suphot_auto_fulfill($oid);
+            if ($st === 'delivered') {
+                flash('ok', 'Purchase successful! Your items are ready below.');
+            } elseif ($st === 'failed') {          // supplier clearly refused: nothing was bought, so give the money back
+                suphot_refund_order($oid);
+                flash('err', 'Sorry, this product could not be delivered right now. Your balance has been refunded.');
+                $oid = 0;
+            } elseif ($st === 'unclear') {         // may have been bought: keep the order pending, the admin checks it
+                flash('ok', 'Your payment was received and the order is still processing. Please check My Orders in a few minutes.');
+            } else {                               // auto-buy switched off: the admin delivers it by hand
+                flash('ok', 'Purchase successful! Your order is below.');
+            }
+            suphot_sync_stock($pdo, true);
         } else {
-            flash('ok', (!empty($GLOBALS['__instant']) || !empty($GLOBALS['__hot_done'])) ?'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
+            flash('ok', !empty($GLOBALS['__instant']) ? 'Purchase successful! Your items are ready below.' : 'Purchase successful! Your order is below.');
         }
     } catch (RuntimeException $ex) {
         flash('err', $ex->getMessage());
@@ -93,8 +91,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Location: /dashboard.php' . ($back ? '?' . http_build_query($back) : '')); exit; // redirect: refresh must not buy again
 }
 
-suphot_sync_stock($pdo);   // Supplier 1 linked products: live stock (at most once a minute)
 bm_sync_stock($pdo);   // linked bulkmail.shop products: refresh live stock (at most once a minute)
+suphot_sync_stock($pdo);   // linked Supplier Hot products: same, at most once a minute
 
 $c = (int)($_GET['c'] ?? 0);
 $q = mb_substr(trim($_GET['q'] ?? ''), 0, 80);

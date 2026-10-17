@@ -158,13 +158,13 @@ function suphot_sync_stock(PDO $pdo, bool $force = false): void {
         if ((string)setting('suphot_url') === '' || (string)setting('suphot_key') === '') return;
         if (!$force && time() - (int)setting('suphot_sync_ts', '0') < 60) return;
         save_setting('suphot_sync_ts', (string)time());   // set first: a slow API never makes every page wait
-        if (!$pdo->query('SELECT 1 FROM products WHERE supplier_type IS NOT NULL LIMIT 1')->fetchColumn()) return;
+        if (!$pdo->query('SELECT 1 FROM products WHERE supplier_type IS NOT NULL AND supplier_id IS NULL LIMIT 1')->fetchColumn()) return;
         $r = suphot_call('GET', '/products', [], null, 6);
         if (!$r['ok'] || !is_array($r['data']['products'] ?? null)) { error_log('supplier1 stock sync: ' . ($r['error'] ?? 'bad answer')); return; }
         $stock = [];
         foreach ($r['data']['products'] as $it) $stock[($it['product_type'] ?? '') . '|' . ($it['account_type'] ?? '')] = max(0, (int)($it['stock'] ?? 0));
-        $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_type = ? AND supplier_account = ?');
-        foreach ($pdo->query('SELECT DISTINCT supplier_type, supplier_account FROM products WHERE supplier_type IS NOT NULL AND supplier_account IS NOT NULL')->fetchAll() as $row) {
+        $upd = $pdo->prepare('UPDATE products SET stock = ? WHERE supplier_type = ? AND supplier_account = ? AND supplier_id IS NULL');
+        foreach ($pdo->query('SELECT DISTINCT supplier_type, supplier_account FROM products WHERE supplier_type IS NOT NULL AND supplier_account IS NOT NULL AND supplier_id IS NULL')->fetchAll() as $row) {
             $upd->execute([$stock[$row['supplier_type'] . '|' . $row['supplier_account']] ?? 0, $row['supplier_type'], $row['supplier_account']]);
         }
     } catch (Throwable $e) { error_log('supplier1 stock sync: ' . $e->getMessage()); }
@@ -180,6 +180,34 @@ function suphot_auto_fulfill(int $oid): string {
         $r = suphot_fulfill_order($oid);
         if ($r[0]) return 'delivered';
         error_log('SUPPLIER AUTO: order #' . $oid . ': ' . $r[1]);
-        return empty($r[2]) ? 'failed' : 'unclear';
-    } catch (Throwable $e) { error_log('SUPPLIER AUTO: ' . $e->getMessage()); return 'unclear'; }
+        if (empty($r[2])) return 'failed';
+        suphot_mark_unclear($oid);
+        return 'unclear';
+    } catch (Throwable $e) { error_log('SUPPLIER AUTO: ' . $e->getMessage()); suphot_mark_unclear($oid); return 'unclear'; }
+}
+
+/** True when the Supplier Hot URL and API key are both saved. */
+function suphot_connected(): bool {
+    return (string)setting('suphot_url') !== '' && (string)setting('suphot_key') !== '';
+}
+
+/** Flag a pending order whose purchase result is unknown, so the admin checks the supplier history before retrying. */
+function suphot_mark_unclear(int $oid): void {
+    try { db()->prepare("UPDATE orders SET supplier_order_id = 'hot-unclear' WHERE id = ? AND status = 'pending'")->execute([$oid]); }
+    catch (Throwable $e) {}
+}
+
+/** Cancel a pending order and give the customer the full amount back (same as Admin > Orders > Cancel & refund). Returns true if refunded. */
+function suphot_refund_order(int $oid): bool {
+    $pdo = db(); $done = false;
+    with_tx($pdo, function (PDO $pdo) use ($oid, &$done) {
+        $st = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND status = 'pending' FOR UPDATE");
+        $st->execute([$oid]);
+        if (!($o = $st->fetch())) return;
+        $pdo->prepare("UPDATE orders SET status='cancelled' WHERE id=?")->execute([$oid]);
+        $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$o['price'], $o['user_id']]);
+        add_tx($pdo, (int)$o['user_id'], 'refund', (float)$o['price'], 'Refund for order #' . $oid);
+        $done = true;
+    });
+    return $done;
 }
