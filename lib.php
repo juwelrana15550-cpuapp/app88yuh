@@ -44,7 +44,10 @@ function db(): PDO {
     // Tables are created only once (not on every request).
     $ver = null;
     try { $ver = $pdo->query("SELECT v FROM settings WHERE k = 'schema_v'")->fetchColumn(); } catch (Throwable $ex) {}
-    if ($ver !== SCHEMA_VERSION) migrate($pdo);
+    if ($ver !== SCHEMA_VERSION) {
+        try { migrate($pdo); }
+        catch (Throwable $ex) { error_log('MIGRATION FAILED: ' . $ex->getMessage()); }   // logged (was silent); retried on the next request
+    }
     return $pdo;
 }
 
@@ -148,6 +151,7 @@ function migrate(PDO $pdo): void {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_prod_sold (product_id, order_id, id)
     ) ENGINE=InnoDB");
+    $migFail = false;
     // New product columns (stock NULL = unlimited, so existing products keep working). Errors 1060/1061 = already there.
     foreach ([
         "ALTER TABLE products ADD COLUMN category_id INT NULL",
@@ -168,10 +172,14 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE orders ADD COLUMN supplier_order_id VARCHAR(40) NULL",   // 'sending' = sent to bulkmail.shop, answer not known yet
         "ALTER TABLE products ADD COLUMN sup_show_dom TINYINT(1) NOT NULL DEFAULT 1",   // 1 = show the "Possible Domain (...)" line on the product card
         "ALTER TABLE products ADD COLUMN sup_domain VARCHAR(255) NULL",   // "Possible Domain" list copied from bulkmail.shop (refreshed automatically)
-        "ALTER TABLE products ADD COLUMN sup_stock INT NOT NULL DEFAULT 0",   // live stock at bulkmail.shop (products.stock = sup_stock + unsold local items)
+        "ALTER TABLE products ADD COLUMN sup_stock INT NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD COLUMN sup_auto_price TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD COLUMN sup_markup DECIMAL(7,2) NOT NULL DEFAULT 0",   // live stock at bulkmail.shop (products.stock = sup_stock + unsold local items)
     ] as $sql) {
         try { $pdo->exec($sql); }
-        catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
+        catch (PDOException $ex) {
+            if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) { error_log('migrate: ' . $ex->getMessage() . ' | ' . $sql); $migFail = true; }
+        }
     }
     // Product display order (smaller shows first). Added once; existing products start in id order so nothing jumps around.
     try {
@@ -195,6 +203,7 @@ function migrate(PDO $pdo): void {
             $pdo->exec("INSERT INTO settings (k, v) VALUES ('cats_seeded', '1') ON DUPLICATE KEY UPDATE v = VALUES(v)");
         }
     } catch (Throwable $ex) { error_log('Default categories: ' . $ex->getMessage()); }
+    if ($migFail) { error_log('migrate: not all steps worked, schema_v not saved (will retry)'); return; }
     $pdo->prepare("INSERT INTO settings (k, v) VALUES ('schema_v', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")->execute([SCHEMA_VERSION]);
 }
 
@@ -271,7 +280,8 @@ function setting(string $k, string $default = ''): string {
     static $cache = null;
     if ($cache === null) {
         $cache = [];
-        try { foreach (db()->query('SELECT k, v FROM settings') as $r) $cache[$r['k']] = $r['v']; } catch (Throwable $ex) {}
+        try { foreach (db()->query('SELECT k, v FROM settings') as $r) $cache[$r['k']] = $r['v']; }
+        catch (Throwable $ex) { error_log('setting() DB error: ' . $ex->getMessage()); }
     }
     return (isset($cache[$k]) && $cache[$k] !== '') ? $cache[$k] : $default;
 }
