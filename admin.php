@@ -613,9 +613,9 @@ $lg = media_url('logo');
     <label>Profit % on all Supplier 2 products <small>(e.g. 20 = supplier price + 20%)</small></label>
     <input type="number" name="bm_markup" step="0.01" min="0" max="1000" value="<?= e(rtrim(rtrim(number_format(bm_markup(), 2, '.', ''), '0'), '.')) ?>" placeholder="e.g. 20">
     <label class="chk"><input type="checkbox" name="bm_price_all" value="1"<?= bm_price_all() ? ' checked' : '' ?>> <span>Apply to ALL Supplier 2 products (price follows the supplier automatically)</span></label>
-    <div class="savebar"><button class="btn" name="bm_save_rate" value="1">Save rate &amp; profit</button> <button class="btn ghost" name="bm_sync_now" value="1">Sync now (name · price · description · domain · stock)</button></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;position:static"><button class="btn" name="bm_save_rate" value="1">Save rate &amp; profit</button> <button class="btn ghost" name="bm_sync_now" value="1">Sync now (name · price · description · domain · stock)</button></div>
     <small>Linked products also refresh automatically in the background (stock about every minute, name / price / description about every 2 minutes).</small>
-    <div class="savebar"><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect Supplier 2? Its linked products will show as out of stock.')">Disconnect</button></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;position:static"><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect Supplier 2? Its linked products will show as out of stock.')">Disconnect</button></div>
   <?php else: ?>
     <label style="margin-top:0">API key</label><input type="password" name="bm_key" autocomplete="off" placeholder="Paste the bulkmail.shop API key">
     <small>Then open Products and link each product to Supplier 2 by its product ID.</small>
