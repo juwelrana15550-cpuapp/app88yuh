@@ -21,6 +21,28 @@ const BM_DETAIL_EVERY = 120;  // seconds between name/description/domain refresh
 const BM_DETAIL_BATCH = 6;    // products refreshed per round (spreads the API calls out; the public endpoints allow 20 requests / minute)
 const BM_SYNC_EVERY   = 60;   // seconds between stock refreshes (the public stock endpoints allow 20 requests / minute)
 
+/** BDT per 1 USD (admin > Supplier API). Supplier prices are in USD, the shop is in ৳. 0 = not set -> price sync is skipped. */
+function bm_rate(): float { return max(0.0, (float)setting('bm_rate', '0')); }
+
+/** Profit % added on top of the supplier price for ALL supplier-linked products (admin > Supplier API). */
+function bm_markup(): float { return min(1000.0, max(0.0, (float)setting('bm_markup', '0'))); }
+
+/** When on, every supplier-linked product follows the supplier price (no per-product tick needed). */
+function bm_price_all(): bool { return setting('bm_price_all', '0') === '1'; }
+
+/** Adds the two price-sync columns to `products` once (sup_auto_price, sup_markup). Never throws. */
+function bm_schema(PDO $pdo): void {
+    static $done = false;
+    if ($done) return;
+    $done = true;
+    try {
+        if (setting('bm_schema_v', '') === '2') return;
+        $have = $pdo->query("SHOW COLUMNS FROM products LIKE 'sup_auto_price'")->fetchColumn();
+        if (!$have) $pdo->exec("ALTER TABLE products ADD COLUMN sup_auto_price TINYINT(1) NOT NULL DEFAULT 0, ADD COLUMN sup_markup DECIMAL(7,2) NOT NULL DEFAULT 0");
+        save_setting('bm_schema_v', '2');
+    } catch (Throwable $ex) { error_log('bulkmail schema: ' . $ex->getMessage()); }
+}
+
 function bm_base(): string { return rtrim(setting('bm_base', BM_DEFAULT_BASE), '/'); }
 function bm_key(): string  { return trim(setting('bm_key', '')); }
 /** True only while an API key is saved AND the admin has not disconnected. */
@@ -108,23 +130,50 @@ function bm_clean(string $t): string {
     return trim(preg_replace('/[ \t]{2,}/', ' ', $t));
 }
 
-/** One supplier product, normalised: ['id','name','description','price','stock'] or ['error' => text]. Needs no API key. */
+/** Normalises one supplier product row (from /products or /products/{id}) to ['id','name','description','price','stock','domain']. */
+function bm_norm(array $d, int $fallbackId = 0): array {
+    // description_text = markup already removed by the API; fall back to stripping the stored description ourselves
+    $txt = trim((string)($d['description_text'] ?? ''));
+    if ($txt === '') {
+        $raw = str_ireplace(['<br>', '<br/>', '<br />', '</p>', '</li>'], "\n", (string)($d['description'] ?? ''));
+        $txt = trim(html_entity_decode(strip_tags($raw), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+    }
+    $d = array_merge($d, ['description' => $txt]);
+    return [
+        'id'          => (int)($d['id'] ?? $fallbackId),
+        'name'        => bm_clean((string)($d['name'] ?? '')),
+        'description' => bm_clean($txt),
+        'price'       => (float)($d['price'] ?? 0),                              // USD, your own price when the key is sent
+        'stock'       => (int)($d['stock_quantity'] ?? $d['stock'] ?? 0),
+        'domain'      => bm_domain_text($d),
+    ];
+}
+
+/** One supplier product, normalised, or ['error' => text]. Sends the saved key (when connected) so the price is YOUR price. */
 function bm_product(int $id, int $timeout = 12): array {
     if ($id <= 0) return ['error' => 'Enter a valid product ID.'];
-    $r = bm_call('GET', '/products/' . $id, null, null, $timeout);
+    $r = bm_call('GET', '/products/' . $id, null, bm_connected() ? '' : null, $timeout);
     if (empty($r['success']) || empty($r['data']) || !is_array($r['data'])) {
         if ((int)$r['_http'] === 404) return ['error' => 'No product with ID ' . $id . ' at bulkmail.shop.'];
         return ['error' => 'Could not read the product: ' . bm_err($r)];
     }
-    $d = $r['data'];
-    return [
-        'id'          => (int)($d['id'] ?? $id),
-        'name'        => bm_clean((string)($d['name'] ?? '')),
-        'description' => bm_clean((string)($d['description'] ?? '')),
-        'price'       => (float)($d['price'] ?? 0),
-        'stock'       => (int)($d['stock_quantity'] ?? 0),
-        'domain'      => bm_domain_text($d),
-    ];
+    return bm_norm($r['data'], $id);
+}
+
+/** Reads the supplier catalogue 100 products per request and returns the wanted ids => normalised product (1 call instead of 1 per product). */
+function bm_catalogue(array $want, int $maxPages = 10): array {
+    $want = array_flip(array_map('intval', $want));
+    $out = [];
+    $key = bm_connected() ? '' : null;
+    for ($p = 1; $p <= $maxPages && count($out) < count($want); $p++) {
+        $r = bm_call('GET', '/products?per_page=100&page=' . $p, null, $key, 15);
+        if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail catalogue: ' . bm_err($r)); break; }
+        foreach ($r['data'] as $d) {
+            if (is_array($d) && isset($d['id']) && isset($want[(int)$d['id']])) $out[(int)$d['id']] = bm_norm($d);
+        }
+        if ($p >= (int)($r['meta']['total_pages'] ?? 1)) break;
+    }
+    return $out;
 }
 
 /** "Possible Domain" list of a supplier product as plain text ('' when the listing has none). */
@@ -137,7 +186,10 @@ function bm_domain_text(array $d): string {
         if ($v !== '') return mb_substr($v, 0, 255);
     }
     // some listings write it inside the description: "Possible Domain (a.com, b.com)"
-    if (preg_match('/possible\s+domains?\s*[:(\-]\s*([^)\n]+)/i', (string)($d['description'] ?? ''), $m)) return mb_substr(trim(bm_clean($m[1])), 0, 255);
+    foreach (['description_text', 'description'] as $k) {
+        $t = trim(strip_tags((string)($d[$k] ?? '')));
+        if ($t !== '' && preg_match('/possible\s+domains?\s*[:(\-]\s*([^)\n]+)/i', $t, $m)) return mb_substr(trim(bm_clean($m[1])), 0, 255);
+    }
     return '';
 }
 
@@ -148,6 +200,7 @@ function bm_domain_text(array $d): string {
 function bm_sync_stock(PDO $pdo, bool $force = false): void {
     try {
         if (!bm_connected()) return;
+        bm_schema($pdo);
         bm_sync_details_soon($pdo);   // name / description / domain of products that follow the supplier (own timer)
         if (!$force) {
             $ts = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_sync_ts'")->fetchColumn();
@@ -161,10 +214,13 @@ function bm_sync_stock(PDO $pdo, bool $force = false): void {
         foreach (array_chunk($ids, 50) as $chunk) {
             $r = bm_call('GET', '/stock/check?ids=' . implode(',', array_map('intval', $chunk)), null, null, 6);
             if (empty($r['success']) || !is_array($r['data'] ?? null)) { error_log('bulkmail stock sync: ' . bm_err($r)); continue; }
-            foreach ($r['data'] as $row) {
-                if (!is_array($row) || !isset($row['product_id'])) continue;
-                $sc = max(0, (int)($row['stock_count'] ?? 0));
-                $upd->execute([$sc, $sc, (int)$row['product_id']]);
+            $list = is_array($r['data']['products'] ?? null) ? $r['data']['products'] : $r['data'];   // v2: data.products[]
+            foreach ($list as $row) {
+                if (!is_array($row) || !empty($row['error'])) continue;
+                $pid = $row['id'] ?? $row['product_id'] ?? null;
+                if ($pid === null) continue;
+                $sc = max(0, (int)($row['stock'] ?? $row['stock_count'] ?? $row['stock_quantity'] ?? 0));
+                $upd->execute([$sc, $sc, (int)$pid]);
             }
         }
     } catch (Throwable $ex) { error_log('bulkmail stock sync: ' . $ex->getMessage()); }
@@ -250,31 +306,41 @@ function bm_fulfil(PDO $pdo, int $orderId): array {
 }
 
 /**
- * Refreshes name, description and "Possible Domain" of linked products from bulkmail.shop.
+ * Refreshes name, price, description and "Possible Domain" of linked products from bulkmail.shop.
  *  - name:                  only products with sup_auto_name = 1
  *  - description + domain:  only products with sup_auto_desc = 1
- * A field is never blanked: if the supplier sends nothing for it, the shop keeps what it has. Several products are handled per call,
- * continuing where the last call stopped, so every product gets its turn. Returns how many products changed. Never throws.
+ *  - price:                 only products with sup_auto_price = 1  ->  supplier USD price x BDT rate x (1 + markup %)
+ * A field is never blanked: if the supplier sends nothing for it, the shop keeps what it has.
+ * All linked products are read with ONE catalogue request per 100 products. Returns how many products changed. Never throws.
+ * ($limit is kept only so old callers still work.)
  */
 function bm_sync_details(PDO $pdo, int $limit = BM_DETAIL_BATCH): int {
     $changed = 0;
     try {
-        $rows = $pdo->query('SELECT id, supplier_id, name, description, sup_domain, sup_auto_name, sup_auto_desc FROM products
-                             WHERE supplier_id IS NOT NULL AND (sup_auto_name = 1 OR sup_auto_desc = 1) ORDER BY id')->fetchAll();
+        bm_schema($pdo);
+        $all = bm_price_all();
+        $rows = $pdo->query('SELECT id, supplier_id, name, description, price, sup_domain, sup_auto_name, sup_auto_desc, sup_auto_price, sup_markup FROM products
+                             WHERE supplier_id IS NOT NULL AND (sup_auto_name = 1 OR sup_auto_desc = 1 OR sup_auto_price = 1' . ($all ? ' OR 1 = 1' : '') . ') ORDER BY id')->fetchAll();
         if (!$rows) return 0;
-        $cur = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_detail_cur'")->fetchColumn();
-        $after  = array_values(array_filter($rows, fn($r) => (int)$r['id'] > $cur));
-        $before = array_values(array_filter($rows, fn($r) => (int)$r['id'] <= $cur));
-        $batch  = array_slice(array_merge($after, $before), 0, max(1, $limit));
+        $ids = array_values(array_unique(array_map(fn($r) => (int)$r['supplier_id'], $rows)));
+        $cat = bm_catalogue($ids);
+        $single = 0;   // anything the catalogue did not list: ask one by one (at most 5 per round)
+        foreach ($ids as $sid) {
+            if (isset($cat[$sid]) || $single >= 5) continue;
+            $single++;
+            $d = bm_product($sid, 6);
+            if (!isset($d['error'])) $cat[$sid] = $d;
+        }
 
-        $seen = [];   // supplier product id => answer (products sharing one supplier product ask only once)
-        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, sup_domain = ? WHERE id = ?');
-        foreach ($batch as $r) {
-            $sid = (int)$r['supplier_id'];
-            if (!isset($seen[$sid])) $seen[$sid] = bm_product($sid, 5);
-            $d = $seen[$sid];
-            if (isset($d['error'])) continue;
-            $name = (string)$r['name']; $desc = (string)$r['description']; $dom = (string)$r['sup_domain'];
+        $rate = bm_rate();
+        if ($rate <= 0 && array_filter($rows, fn($r) => $all || (int)$r['sup_auto_price'] === 1)) {
+            save_setting('bm_last_error', 'Price sync is on for some products but the USD→৳ rate is not set (Admin > Supplier API).');
+        }
+        $upd = $pdo->prepare('UPDATE products SET name = ?, description = ?, price = ?, sup_domain = ? WHERE id = ?');
+        foreach ($rows as $r) {
+            $d = $cat[(int)$r['supplier_id']] ?? null;
+            if (!$d) continue;
+            $name = (string)$r['name']; $desc = (string)$r['description']; $dom = (string)$r['sup_domain']; $price = (float)$r['price'];
             if ((int)$r['sup_auto_name'] === 1 && $d['name'] !== '') $name = mb_substr($d['name'], 0, 80);
             if ((int)$r['sup_auto_desc'] === 1) {
                 $t = $d['description'];
@@ -284,12 +350,15 @@ function bm_sync_details(PDO $pdo, int $limit = BM_DETAIL_BATCH): int {
                 }
                 if ($t !== '') $desc = mb_substr($t, 0, 500);
             }
-            if ($name !== (string)$r['name'] || $desc !== (string)$r['description'] || $dom !== (string)$r['sup_domain']) {
-                $upd->execute([$name, $desc, $dom === '' ? null : $dom, (int)$r['id']]);
+            if (($all || (int)$r['sup_auto_price'] === 1) && $rate > 0 && $d['price'] > 0) {
+                $np = round($d['price'] * $rate * (1 + bm_markup() / 100), 2);   // supplier USD x rate x (1 + profit %)
+                if ($np > 0) $price = $np;
+            }
+            if ($name !== (string)$r['name'] || $desc !== (string)$r['description'] || $dom !== (string)$r['sup_domain'] || abs($price - (float)$r['price']) > 0.004) {
+                $upd->execute([$name, $desc, $price, $dom === '' ? null : $dom, (int)$r['id']]);
                 $changed++;
             }
         }
-        if ($batch) save_setting('bm_detail_cur', (string)(int)end($batch)['id']);
     } catch (Throwable $ex) { error_log('bulkmail details sync: ' . $ex->getMessage()); }
     return $changed;
 }

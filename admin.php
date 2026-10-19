@@ -38,6 +38,9 @@ function product_fields(): array {
         'an'      => ($src === 'bm' && !empty($_POST['sup_an'])) ? 1 : 0,
         'ad'      => ($src === 'bm' && !empty($_POST['sup_ad'])) ? 1 : 0,
         'sd'      => ($src === 'bm' && empty($_POST['sup_sd'])) ? 0 : 1,
+        // price follows the supplier: supplier USD price x BDT rate x (1 + markup %)
+        'ap'      => ($src === 'bm' && !empty($_POST['sup_ap'])) ? 1 : 0,
+        'mk'      => ($src === 'bm') ? min(1000.0, max(0.0, round((float)($_POST['sup_mk'] ?? 0), 2))) : 0.0,
     ];
 }
 function category_fields(): array {
@@ -54,7 +57,7 @@ function category_fields(): array {
     ];
 }
 
-if (!empty($_SESSION['admin'])) suphot_schema();
+if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); }
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (isset($_POST['admin_logout'])) { unset($_SESSION['admin']); header('Location: /admin.php'); exit; }
@@ -102,6 +105,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 go('settings', 'Settings saved.');
             }
 
+        } elseif (isset($_POST['bm_sync_now']) || isset($_POST['bm_save_rate'])) {
+            $page = 'supplier';
+            if (isset($_POST['bm_save_rate'])) {
+                $rt = round((float)str_replace(',', '.', (string)($_POST['bm_rate'] ?? '0')), 4);
+                if ($rt < 0 || $rt > 100000) { $supErr = 'Enter a valid rate (৳ for 1 USD).'; }
+                else {
+                    $mkp = round(max(0.0, min(1000.0, (float)str_replace(',', '.', (string)($_POST['bm_markup'] ?? '0')))), 2);
+                    save_setting('bm_rate', (string)$rt);
+                    save_setting('bm_markup', (string)$mkp);
+                    save_setting('bm_price_all', empty($_POST['bm_price_all']) ? '0' : '1');
+                    if (bm_connected()) bm_sync_details($pdo, 1000);
+                    go('supplier', $rt > 0 ? 'Saved. Prices updated.' : 'Saved (no rate set, so price sync is paused).');
+                }
+            } else {
+                if (!bm_connected()) { $supErr = 'Connect Supplier 2 first.'; }
+                else {
+                    save_setting('bm_last_error', '');
+                    bm_sync_stock($pdo, true);
+                    $nChg = bm_sync_details($pdo, 1000);
+                    $eNow = (string)setting('bm_last_error', '');
+                    go('supplier', 'Sync finished. ' . $nChg . ' product(s) updated.' . ($eNow !== '' ? ' ' . $eNow : ''));
+                }
+            }
+
         } elseif (isset($_POST['bm_connect']) || isset($_POST['bm_disconnect'])) {
             $page = 'supplier';
             if (isset($_POST['bm_disconnect'])) { bm_disconnect($pdo); go('supplier', 'Supplier 2 disconnected.'); }
@@ -144,23 +171,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
                     'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'],
-                    'src' => $f['src'], 'sup' => $f['sup_t'] ? $f['sup_t'] . '|' . $f['sup_a'] : '', 'bmid' => $f['sup_id'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'],
+                    'src' => $f['src'], 'sup' => $f['sup_t'] ? $f['sup_t'] . '|' . $f['sup_a'] : '', 'bmid' => $f['sup_id'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'], 'ap' => $f['ap'], 'mk' => $f['mk'],
                 ]];
             } else {
                 // A product is linked to exactly one supplier: the other supplier's link is always cleared.
                 if ($f['src'] === 'bm') { $f['sup_t'] = null; $f['sup_a'] = null; } else { $f['sup_id'] = null; }
                 if ($f['src'] === 'bm' && $f['stock'] === null) $f['stock'] = (int)($chk['stock'] ?? 0);   // live stock is synced from the supplier anyway
                 if ($isEdit) {
-                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=? WHERE id=?')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], (int)$_POST['update_product']]);
+                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=? WHERE id=?')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], (int)$_POST['update_product']]);
                     $msg = 'Product saved.';
                 } else {
-                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd']]);
+                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk']]);
                     $msg = 'Product added.';
                 }
                 if ($f['src'] === 'bm') bm_sync_stock($pdo, true);
-                if ($f['src'] === 'bm' && ($f['an'] || $f['ad']) && function_exists('bm_sync_details')) bm_sync_details($pdo, 30);   // name / description / domain now
+                if ($f['src'] === 'bm' && ($f['an'] || $f['ad'] || $f['ap']) && function_exists('bm_sync_details')) bm_sync_details($pdo, 30);   // name / description / domain now
                 if ($f['src'] === 'hot') suphot_sync_stock($pdo, true);
                 go('products', $msg);
             }
@@ -432,7 +459,7 @@ $lg = media_url('logo');
            'src' => !empty($p['supplier_id']) ? 'bm' : (!empty($p['supplier_type']) ? 'hot' : ''),
            'sup' => !empty($p['supplier_type']) ? $p['supplier_type'] . '|' . $p['supplier_account'] : '',
            'bmid' => !empty($p['supplier_id']) ? (int)$p['supplier_id'] : '',
-           'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1)]; ?>
+           'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1), 'ap' => (int)($p['sup_auto_price'] ?? 0), 'mk' => (string)($p['sup_markup'] ?? '0')]; ?>
   <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
     <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if (!empty($p['supplier_id'])): ?><span class="tag">Supplier 2</span><?php elseif (!empty($p['supplier_type'])): ?><span class="tag">Supplier 1</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
@@ -463,6 +490,7 @@ $lg = media_url('logo');
   <div id="p_src_bm" hidden><label>Supplier 2 product ID</label><input type="number" name="bm_id" id="p_bmid" min="1" step="1" placeholder="e.g. 12"><small>Stock is shown live from Supplier 2.</small>
     <label class="chk" style="margin-top:12px"><input type="checkbox" name="sup_an" id="p_an" value="1"> <span>Keep the name the same as Supplier 2</span></label>
     <label class="chk"><input type="checkbox" name="sup_ad" id="p_ad" value="1"> <span>Keep the description and Possible Domain the same as Supplier 2</span></label>
+    <label class="chk"><input type="checkbox" name="sup_ap" id="p_ap" value="1"> <span>Keep the price in step with Supplier 2 (supplier price × rate + profit %, set in Supplier API)</span></label>
     <label class="chk"><input type="checkbox" name="sup_sd" id="p_sd" value="1" checked> <span>Show the Possible Domain line on the product card</span></label>
   </div>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
@@ -580,6 +608,13 @@ $lg = media_url('logo');
   <?php if ($bmOn): ?>
     <p><span class="badge on">Connected</span> Key: <b><?= e(bm_mask(bm_key())) ?></b><?php if ($bmBal): ?> · Balance: <b><?= e(number_format($bmBal['balance'], 2) . ' ' . $bmBal['currency']) ?></b><?php endif; ?></p>
     <?php if ($bmErr !== ''): ?><div class="err"><?= e($bmErr) ?></div><?php endif; ?>
+    <label>USD → ৳ rate <small>(how many ৳ equal 1 USD)</small></label>
+    <input type="number" name="bm_rate" step="0.0001" min="0" value="<?= e(rtrim(rtrim(number_format(bm_rate(), 4, '.', ''), '0'), '.')) ?>" placeholder="e.g. 125">
+    <label>Profit % on all Supplier 2 products <small>(e.g. 20 = supplier price + 20%)</small></label>
+    <input type="number" name="bm_markup" step="0.01" min="0" max="1000" value="<?= e(rtrim(rtrim(number_format(bm_markup(), 2, '.', ''), '0'), '.')) ?>" placeholder="e.g. 20">
+    <label class="chk"><input type="checkbox" name="bm_price_all" value="1"<?= bm_price_all() ? ' checked' : '' ?>> <span>Apply to ALL Supplier 2 products (price follows the supplier automatically)</span></label>
+    <div class="savebar"><button class="btn" name="bm_save_rate" value="1">Save rate &amp; profit</button> <button class="btn ghost" name="bm_sync_now" value="1">Sync now (name · price · description · domain · stock)</button></div>
+    <small>Linked products also refresh automatically in the background (stock about every minute, name / price / description about every 2 minutes).</small>
     <div class="savebar"><button class="btn red" name="bm_disconnect" value="1" onclick="return confirm('Disconnect Supplier 2? Its linked products will show as out of stock.')">Disconnect</button></div>
   <?php else: ?>
     <label style="margin-top:0">API key</label><input type="password" name="bm_key" autocomplete="off" placeholder="Paste the bulkmail.shop API key">
@@ -617,12 +652,12 @@ $lg = media_url('logo');
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop; $('#p_sup').value=v.sup||'';
       $('#p_src').value=v.src||''; $('#p_bmid').value=v.bmid||'';
-      $('#p_an').checked=!!+v.an; $('#p_ad').checked=!!+v.ad; $('#p_sd').checked=(v.sd===undefined||v.sd===null)?true:!!+v.sd; showSrc();
+      $('#p_ap').checked=!!+v.ap; $('#p_an').checked=!!+v.an; $('#p_ad').checked=!!+v.ad; $('#p_sd').checked=(v.sd===undefined||v.sd===null)?true:!!+v.sd; showSrc();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
     $('#addProduct').addEventListener('click',function(){ fill({},0); });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd,ap:v.ap,mk:v.mk}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     var q=$('#pq'), c=$('#pcat'), none=$('#pnone');
