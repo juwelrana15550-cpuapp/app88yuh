@@ -19,6 +19,7 @@ if (!defined('SCHEMA_VERSION')) { http_response_code(404); exit; }   // never ru
 const BM_DEFAULT_BASE = 'https://bulkmail.shop/api/v2';
 const BM_DETAIL_EVERY = 120;  // seconds between name/description/domain refresh rounds
 const BM_DETAIL_BATCH = 6;    // products refreshed per round (spreads the API calls out; the public endpoints allow 20 requests / minute)
+const BM_NEW_EVERY    = 300;  // seconds between "new product at the supplier?" checks (reads the whole catalogue, so not too often)
 const BM_SYNC_EVERY   = 60;   // seconds between stock refreshes (the public stock endpoints allow 20 requests / minute)
 
 /** BDT per 1 USD (admin > Supplier API). Supplier prices are in USD, the shop is in ৳. 0 = not set -> price sync is skipped. */
@@ -36,10 +37,20 @@ function bm_schema(PDO $pdo): void {
     if ($done) return;
     $done = true;
     try {
-        if (setting('bm_schema_v', '') === '2') return;
+        if (setting('bm_schema_v', '') === '3') return;
         $have = $pdo->query("SHOW COLUMNS FROM products LIKE 'sup_auto_price'")->fetchColumn();
         if (!$have) $pdo->exec("ALTER TABLE products ADD COLUMN sup_auto_price TINYINT(1) NOT NULL DEFAULT 0, ADD COLUMN sup_markup DECIMAL(7,2) NOT NULL DEFAULT 0");
-        save_setting('bm_schema_v', '2');
+        // Every supplier product id we have ever seen. status 0 = NEW (alert shown to the admin), 1 = known / added / dismissed.
+        $pdo->exec("CREATE TABLE IF NOT EXISTS bm_seen (
+            supplier_id INT NOT NULL PRIMARY KEY,
+            name VARCHAR(120) NOT NULL DEFAULT '',
+            price DECIMAL(12,4) NOT NULL DEFAULT 0,
+            stock INT NOT NULL DEFAULT 0,
+            status TINYINT(1) NOT NULL DEFAULT 0,
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB");
+        save_setting('bm_schema_v', '3');
     } catch (Throwable $ex) { error_log('bulkmail schema: ' . $ex->getMessage()); }
 }
 
@@ -174,6 +185,146 @@ function bm_catalogue(array $want, int $maxPages = 10): array {
         if ($p >= (int)($r['meta']['total_pages'] ?? 1)) break;
     }
     return $out;
+}
+
+/** Shop price (৳) for a supplier USD price: USD x rate x (1 + profit %). 0 when the rate is not set or the supplier price is 0. */
+function bm_sell_price(float $usd): float {
+    $rate = bm_rate();
+    return ($rate > 0 && $usd > 0) ? round($usd * $rate * (1 + bm_markup() / 100), 2) : 0.0;
+}
+
+/**
+ * The WHOLE supplier catalogue (100 per request). Returns ['ok' => bool, 'items' => [id => normalised product], 'error' => text].
+ * ok = false when any page failed, so callers never act on a half-read list.
+ */
+function bm_list_all(int $maxPages = 60): array {
+    $out = [];
+    $key = bm_connected() ? '' : null;
+    for ($p = 1; $p <= $maxPages; $p++) {
+        $r = bm_call('GET', '/products?per_page=100&page=' . $p, null, $key, 20);
+        if (empty($r['success']) || !is_array($r['data'] ?? null)) return ['ok' => false, 'items' => $out, 'error' => bm_err($r)];
+        foreach ($r['data'] as $d) {
+            if (is_array($d) && isset($d['id'])) { $n = bm_norm($d); if ($n['id'] > 0) $out[$n['id']] = $n; }
+        }
+        if ($p >= (int)($r['meta']['total_pages'] ?? 1)) return ['ok' => true, 'items' => $out, 'error' => ''];
+    }
+    return ['ok' => false, 'items' => $out, 'error' => 'Catalogue is longer than ' . $maxPages . ' pages.'];
+}
+
+/** Supplier ids that are already linked to a shop product: [id => true]. */
+function bm_linked_ids(PDO $pdo): array {
+    return array_fill_keys(array_map('intval', $pdo->query('SELECT DISTINCT supplier_id FROM products WHERE supplier_id IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN)), true);
+}
+
+/**
+ * Adds supplier products to the shop in one go (Import All / one-click add from the alert).
+ * Name, description, Possible Domain and price follow the supplier automatically (same as ticking those boxes in the product form).
+ * Products already linked are skipped. Returns ['added' => int, 'skipped' => int, 'failed' => [id => reason]].
+ */
+function bm_add_products(PDO $pdo, array $ids, ?int $cat = null, bool $active = true): array {
+    $res = ['added' => 0, 'skipped' => 0, 'failed' => []];
+    bm_schema($pdo);
+    $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $ids), fn($i) => $i > 0))), 0, 1000);
+    if (!$ids) return $res;
+    if (!bm_connected()) { foreach ($ids as $i) $res['failed'][$i] = 'Supplier 2 is not connected.'; return $res; }
+    if (bm_rate() <= 0) { foreach ($ids as $i) $res['failed'][$i] = 'Set the USD → ৳ rate first (Supplier API).'; return $res; }
+    if ($cat !== null) {
+        $q = $pdo->prepare('SELECT 1 FROM categories WHERE id = ?'); $q->execute([$cat]);
+        if (!$q->fetchColumn()) $cat = null;
+    }
+    $linked = bm_linked_ids($pdo);
+    $todo = [];
+    foreach ($ids as $i) { if (isset($linked[$i])) $res['skipped']++; else $todo[] = $i; }
+    if (!$todo) return $res;
+    @set_time_limit(180);
+
+    $data = [];
+    if (count($todo) <= 3) { foreach ($todo as $i) { $d = bm_product($i, 15); if (!isset($d['error'])) $data[$i] = $d; else $res['failed'][$i] = $d['error']; } }
+    else $data = bm_catalogue($todo, 60);
+
+    $ins = $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, active, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_domain, sup_auto_price, sup_markup, sup_stock)
+                          VALUES (?,?,?,?,?,?,0,?,?,1,1,1,?,1,0,?)');
+    $seen = $pdo->prepare('INSERT INTO bm_seen (supplier_id, name, price, stock, status) VALUES (?,?,?,?,1) ON DUPLICATE KEY UPDATE status = 1');
+    foreach ($todo as $i) {
+        if (isset($res['failed'][$i])) continue;
+        $d = $data[$i] ?? null;
+        if (!$d) { $res['failed'][$i] = 'Not found at Supplier 2.'; continue; }
+        $price = bm_sell_price((float)$d['price']);
+        if ($price <= 0) { $res['failed'][$i] = 'Supplier sent no price.'; continue; }
+        $t = (string)$d['description'];
+        if ($d['domain'] !== '') $t = trim(preg_replace('/\(?\s*possible\s+domains?\s*[:(\-][^)\n]*\)?/i', '', $t));   // shown on its own line
+        $name = mb_substr($d['name'] !== '' ? $d['name'] : ('Product ' . $i), 0, 80);
+        try {
+            $ins->execute([$name, mb_substr($t, 0, 500), $price, $cat, max(0, (int)$d['stock']), '', $active ? 1 : 0, $i, $d['domain'] === '' ? null : $d['domain'], max(0, (int)$d['stock'])]);
+            $seen->execute([$i, mb_substr($name, 0, 120), (float)$d['price'], max(0, (int)$d['stock'])]);
+            $res['added']++;
+        } catch (Throwable $ex) { error_log('bulkmail import #' . $i . ': ' . $ex->getMessage()); $res['failed'][$i] = 'Could not save.'; }
+    }
+    return $res;
+}
+
+/** One line for a flash message, e.g. "Added 12 product(s). 2 already in the shop. 1 failed: #7 Supplier sent no price." */
+function bm_import_msg(array $r): string {
+    $m = 'Added ' . $r['added'] . ' product(s).';
+    if ($r['skipped']) $m .= ' ' . $r['skipped'] . ' already in the shop.';
+    if ($r['failed']) {
+        $f = []; foreach (array_slice($r['failed'], 0, 3, true) as $i => $why) $f[] = '#' . $i . ' ' . $why;
+        $m .= ' ' . count($r['failed']) . ' failed: ' . implode(' · ', $f);
+    }
+    return $m;
+}
+
+/**
+ * NEW PRODUCT ALERT. Reads the supplier catalogue and records every id in bm_seen.
+ * The very first run only records what exists today (no flood of alerts); after that every unseen id becomes an alert (status 0).
+ * Returns how many new products were found. Never throws.
+ */
+function bm_check_new(PDO $pdo): int {
+    $found = 0;
+    try {
+        if (!bm_connected()) return 0;
+        bm_schema($pdo);
+        $all = bm_list_all();
+        if (!$all['ok']) { error_log('bulkmail new-product check: ' . $all['error']); return 0; }   // never baseline on a half-read list
+        $first = (string)$pdo->query("SELECT v FROM settings WHERE k = 'bm_new_base'")->fetchColumn() !== '1';
+        $known = array_fill_keys(array_map('intval', $pdo->query('SELECT supplier_id FROM bm_seen')->fetchAll(PDO::FETCH_COLUMN)), true);
+        $linked = bm_linked_ids($pdo);
+        $ins = $pdo->prepare('INSERT IGNORE INTO bm_seen (supplier_id, name, price, stock, status) VALUES (?,?,?,?,?)');
+        $upd = $pdo->prepare('UPDATE bm_seen SET name = ?, price = ?, stock = ? WHERE supplier_id = ? AND status = 0');   // keep open alerts current
+        foreach ($all['items'] as $id => $d) {
+            $name = mb_substr($d['name'], 0, 120); $stock = max(0, (int)$d['stock']);
+            if (isset($known[$id])) { $upd->execute([$name, (float)$d['price'], $stock, $id]); continue; }
+            $isNew = !$first && !isset($linked[$id]);
+            $ins->execute([$id, $name, (float)$d['price'], $stock, $isNew ? 0 : 1]);
+            if ($isNew) $found++;
+        }
+        if ($first) save_setting('bm_new_base', '1');
+    } catch (Throwable $ex) { error_log('bulkmail new-product check: ' . $ex->getMessage()); }
+    return $found;
+}
+
+/** Runs bm_check_new at most every BM_NEW_EVERY seconds, after the page has been sent to the visitor when the server allows it. */
+function bm_check_new_soon(PDO $pdo): void {
+    try {
+        if (!bm_connected()) return;
+        $ts = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_new_ts'")->fetchColumn();
+        if (time() - $ts < BM_NEW_EVERY) return;
+        save_setting('bm_new_ts', (string)time());   // set first: concurrent visitors do not repeat the check
+        register_shutdown_function(function () use ($pdo) {
+            if (function_exists('fastcgi_finish_request')) @fastcgi_finish_request();
+            bm_check_new($pdo);
+        });
+    } catch (Throwable $ex) { error_log('bulkmail new-product check: ' . $ex->getMessage()); }
+}
+
+/** Open alerts (new supplier products not yet in the shop): ['count' => int, 'items' => [rows, newest first]]. */
+function bm_new_alerts(PDO $pdo, int $limit = 8): array {
+    try {
+        $where = 'status = 0 AND NOT EXISTS (SELECT 1 FROM products p WHERE p.supplier_id = bm_seen.supplier_id)';
+        $n = (int)$pdo->query("SELECT COUNT(*) FROM bm_seen WHERE $where")->fetchColumn();
+        $items = $n ? $pdo->query("SELECT * FROM bm_seen WHERE $where ORDER BY supplier_id DESC LIMIT " . max(1, $limit))->fetchAll() : [];
+        return ['count' => $n, 'items' => $items];
+    } catch (Throwable $ex) { return ['count' => 0, 'items' => []]; }
 }
 
 /** "Possible Domain" list of a supplier product as plain text ('' when the listing has none). */
@@ -365,6 +516,7 @@ function bm_sync_details(PDO $pdo, int $limit = BM_DETAIL_BATCH): int {
 
 /** Starts a details round at most every BM_DETAIL_EVERY seconds, after the page has been sent to the visitor when the server allows it. */
 function bm_sync_details_soon(PDO $pdo): void {
+    bm_check_new_soon($pdo);   // new-product alert has its own timer
     try {
         $ts = (int)$pdo->query("SELECT v FROM settings WHERE k = 'bm_detail_ts'")->fetchColumn();
         if (time() - $ts < BM_DETAIL_EVERY) return;

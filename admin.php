@@ -7,7 +7,7 @@ $err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings', 'supplier'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'import', 'categories', 'users', 'settings', 'supplier'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null): void {
@@ -58,6 +58,25 @@ function category_fields(): array {
 }
 
 if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); }
+// Live lookup for the product form: Supplier 2 product id -> name / price / description (used to auto-fill the dialog)
+if (!empty($_SESSION['admin']) && isset($_GET['bm_lookup'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $out = ['ok' => false, 'error' => 'Connect Supplier 2 first (Admin > Supplier API).'];
+    if (bm_connected()) {
+        $d = bm_product((int)$_GET['bm_lookup'], 10);
+        if (isset($d['error'])) { $out = ['ok' => false, 'error' => $d['error']]; }
+        else {
+            $t = (string)$d['description'];
+            if ($d['domain'] !== '') $t = trim(preg_replace('/\(?\s*possible\s+domains?\s*[:(\-][^)\n]*\)?/i', '', $t));
+            $rate = bm_rate();
+            $out = ['ok' => true, 'name' => mb_substr((string)$d['name'], 0, 80), 'desc' => mb_substr($t, 0, 500), 'domain' => (string)$d['domain'],
+                    'usd' => $d['price'], 'rate_set' => $rate > 0, 'all' => bm_price_all(),
+                    'price' => ($rate > 0 && $d['price'] > 0) ? round($d['price'] * $rate * (1 + bm_markup() / 100), 2) : null];
+        }
+    }
+    echo json_encode($out, JSON_UNESCAPED_UNICODE);
+    exit;
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (isset($_POST['admin_logout'])) { unset($_SESSION['admin']); header('Location: /admin.php'); exit; }
@@ -154,6 +173,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $supTest = suphot_call('GET', '/balance', [], null, 15);
             }
+
+        } elseif (isset($_POST['bm_import']) || isset($_POST['bm_add_one']) || isset($_POST['bm_dismiss']) || isset($_POST['bm_check_now'])) {
+            // Import All (ticked list), one-click add from the new-product alert, dismiss alerts, check for new products now
+            $back = in_array($_POST['back'] ?? '', ADMIN_PAGES, true) ? $_POST['back'] : 'import';
+            if (!bm_connected()) { flash('err', 'Connect Supplier 2 first (Admin > Supplier API).'); go($back); }
+            if (isset($_POST['bm_check_now'])) {
+                $n = bm_check_new($pdo);
+                go($back, $n ? $n . ' new product(s) found at Supplier 2.' : 'Checked. No new products at Supplier 2.');
+            }
+            if (isset($_POST['bm_dismiss'])) {
+                if ($_POST['bm_dismiss'] === 'all') $pdo->exec('UPDATE bm_seen SET status = 1 WHERE status = 0');
+                else $pdo->prepare('UPDATE bm_seen SET status = 1 WHERE supplier_id = ?')->execute([(int)$_POST['bm_dismiss']]);
+                go($back, 'Alert dismissed.');
+            }
+            $ids = isset($_POST['bm_add_one']) ? [(int)$_POST['bm_add_one']]
+                 : array_map('intval', array_filter(explode(',', (string)($_POST['ids_csv'] ?? '')), 'strlen'));   // one field, so a long list never hits PHP's max_input_vars
+            $catSel = ((int)($_POST['category_id'] ?? 0)) ?: null;
+            $r = bm_add_products($pdo, $ids, $catSel, isset($_POST['bm_add_one']) ? true : !empty($_POST['publish']));
+            $msg = bm_import_msg($r);
+            if ($r['added'] === 0 && ($r['failed'] || !$ids)) { flash('err', $ids ? $msg : 'Tick at least one product.'); go($back); }
+            go($back, $msg);
 
         } elseif (isset($_POST['add_product']) || isset($_POST['update_product'])) {
             $page = 'products';
@@ -303,6 +343,8 @@ if ($page === null) {
     $page = $_GET['p'] ?? 'overview';
     if (!in_array($page, ADMIN_PAGES, true)) $page = 'overview';
 }
+$bmNew = ['count' => 0, 'items' => []];   // new-product alerts from Supplier 2
+if (bm_connected()) { bm_check_new_soon($pdo); $bmNew = bm_new_alerts($pdo, 5); }
 $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $pendOrders = $pdo->query("SELECT o.*, u.email, p.supplier_type AS sup_t, p.supplier_id AS sup_id FROM orders o JOIN users u ON u.id = o.user_id LEFT JOIN products p ON p.id = o.product_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
@@ -340,7 +382,7 @@ function ai(string $n): string {
 $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
     'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
-    'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
+    'Catalog' => [['products', 'Products', 'bag', 0], ['import', 'Import products', 'download', $bmNew['count']], ['categories', 'Categories', 'grid', 0]],
     'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0], ['supplier', 'Supplier API', 'plug', 0]],
 ];
 $titles = [
@@ -348,6 +390,7 @@ $titles = [
     'orders'     => ['Orders', 'Deliver or cancel pending orders'],
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
+    'import'     => ['Import products', 'Tick the Supplier 2 products you want and add them all at once'],
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Latest 100 registered users'],
     'settings'   => ['Site settings', 'Name, headline, support links, logo and banner'],
@@ -393,6 +436,20 @@ $lg = media_url('logo');
   <?php if ($page === 'categories'): ?><button type="button" class="btn" id="addCategory"><?= ai('plus') ?>Add category</button><?php endif; ?>
 </div>
 <?php flash_html(); ?>
+
+<?php /* ===== NEW PRODUCT ALERT (every admin page except Import, which shows the full list) ===== */ if ($bmNew['count'] && $page !== 'import'): ?>
+<div class="card" style="border-left:4px solid #4f46e5">
+  <div class="card-h"><h3>🔔 <?= (int)$bmNew['count'] ?> new product<?= $bmNew['count'] > 1 ? 's' : '' ?> at Supplier 2</h3><a href="/admin.php?p=import">Review all</a></div>
+  <?php foreach ($bmNew['items'] as $nw): $sp = bm_sell_price((float)$nw['price']); ?>
+    <div class="mini"><div><b><?= e($nw['name'] !== '' ? $nw['name'] : 'Product ' . (int)$nw['supplier_id']) ?></b><small>ID <?= (int)$nw['supplier_id'] ?> · stock <?= number_format((int)$nw['stock']) ?> · <?= $sp > 0 ? 'sell ' . e(money($sp)) : e('$' . rtrim(rtrim(number_format((float)$nw['price'], 4), '0'), '.')) . ' (set the rate to see the ৳ price)' ?></small></div>
+      <form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="back" value="<?= e($page) ?>">
+        <button class="btn sm ok-b" name="bm_add_one" value="<?= (int)$nw['supplier_id'] ?>">Add</button>
+        <button class="btn sm ghost" name="bm_dismiss" value="<?= (int)$nw['supplier_id'] ?>">Dismiss</button></form></div>
+  <?php endforeach; ?>
+  <?php if ($bmNew['count'] > count($bmNew['items'])): ?><div class="mini"><small>…and <?= (int)($bmNew['count'] - count($bmNew['items'])) ?> more. <a href="/admin.php?p=import">Open the list</a>.</small></div><?php endif; ?>
+  <form method="post" style="margin-top:10px"><?= csrf_field() ?><input type="hidden" name="back" value="<?= e($page) ?>"><button class="btn sm ghost" name="bm_dismiss" value="all">Dismiss all</button></form>
+</div>
+<?php endif; ?>
 
 <?php /* ============================ OVERVIEW ============================ */ if ($page === 'overview'): ?>
 <div class="stats">
@@ -487,7 +544,7 @@ $lg = media_url('logo');
   <label>Supplier <small>(orders for this product are bought from the chosen supplier)</small></label>
   <select name="supplier_src" id="p_src"><option value="">— None (manual delivery) —</option><option value="hot">Supplier 1</option><option value="bm">Supplier 2 (bulkmail.shop)</option></select>
   <div id="p_src_hot" hidden><label>Supplier 1 product</label><select name="supplier_link" id="p_sup"><?= $supOpts ?></select></div>
-  <div id="p_src_bm" hidden><label>Supplier 2 product ID</label><input type="number" name="bm_id" id="p_bmid" min="1" step="1" placeholder="e.g. 12"><small>Stock is shown live from Supplier 2.</small>
+  <div id="p_src_bm" hidden><label>Supplier 2 product ID</label><input type="number" name="bm_id" id="p_bmid" min="1" step="1" placeholder="e.g. 12"><small>Stock is shown live from Supplier 2.</small> <small id="p_bmnote"></small>
     <label class="chk" style="margin-top:12px"><input type="checkbox" name="sup_an" id="p_an" value="1"> <span>Keep the name the same as Supplier 2</span></label>
     <label class="chk"><input type="checkbox" name="sup_ad" id="p_ad" value="1"> <span>Keep the description and Possible Domain the same as Supplier 2</span></label>
     <label class="chk"><input type="checkbox" name="sup_ap" id="p_ap" value="1"> <span>Keep the price in step with Supplier 2 (supplier price × rate + profit %, set in Supplier API)</span></label>
@@ -496,6 +553,51 @@ $lg = media_url('logo');
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pSave" name="add_product" value="1">Save product</button></div>
 </form></dialog>
+
+<?php /* ============================ IMPORT (Supplier 2) ============================ */ elseif ($page === 'import'): ?>
+<?php if (!bm_connected()): ?>
+<div class="card"><div class="empty">Connect Supplier 2 first. <a href="/admin.php?p=supplier">Open Supplier API</a></div></div>
+<?php else:
+  $imp = bm_list_all(); $impLinked = bm_linked_ids($pdo);
+  $impNew = []; foreach ($pdo->query('SELECT supplier_id FROM bm_seen WHERE status = 0')->fetchAll(PDO::FETCH_COLUMN) as $x) $impNew[(int)$x] = true;
+  $impTodo = 0; foreach ($imp['items'] as $iid => $_) if (!isset($impLinked[$iid])) $impTodo++; ?>
+<?php if (bm_rate() <= 0): ?><div class="err">Set the USD → ৳ rate first, otherwise prices cannot be calculated. <a href="/admin.php?p=supplier">Open Supplier API</a></div><?php endif; ?>
+<?php if (!$imp['ok']): ?><div class="err">Could not read the full Supplier 2 catalogue: <?= e($imp['error']) ?><?= $imp['items'] ? ' Showing the ' . count($imp['items']) . ' products that were read.' : '' ?></div><?php endif; ?>
+<?php if ($imp['items']): ?>
+<form method="post" id="impForm"><?= csrf_field() ?><input type="hidden" name="back" value="import"><input type="hidden" name="ids_csv" id="ids_csv" value="">
+<div class="card">
+  <div class="tb">
+    <div class="srch grow"><?= ai('search') ?><input type="search" id="iq" placeholder="Search by name, ID or domain" autocomplete="off"></div>
+    <label class="chk" style="margin:0"><input type="checkbox" id="ihide" checked> <span>Hide already added</span></label>
+    <label class="chk" style="margin:0"><input type="checkbox" id="istock"> <span>In stock only</span></label>
+    <?php if ($impNew): ?><label class="chk" style="margin:0"><input type="checkbox" id="inew"> <span>New only (<?= count($impNew) ?>)</span></label><?php endif; ?>
+  </div>
+  <p style="margin:8px 0"><small id="icount"><?= count($imp['items']) ?> products at Supplier 2 · <?= $impTodo ?> not in your shop yet</small></p>
+  <div class="tw"><table id="itable"><thead><tr><th style="width:36px"><input type="checkbox" id="iall" aria-label="Select all shown"></th><th>Product</th><th class="hm">Supplier price</th><th>Your price</th><th>Stock</th></tr></thead><tbody>
+  <?php foreach ($imp['items'] as $iid => $it): $added = isset($impLinked[$iid]); $sp = bm_sell_price((float)$it['price']); ?>
+  <tr data-s="<?= e(mb_strtolower($it['name'] . ' ' . $iid . ' ' . $it['domain'])) ?>" data-added="<?= $added ? 1 : 0 ?>" data-stock="<?= (int)$it['stock'] ?>" data-new="<?= isset($impNew[$iid]) && !$added ? 1 : 0 ?>"<?= $added ? ' style="opacity:.55"' : '' ?>>
+    <td><input type="checkbox" class="ichk" value="<?= (int)$iid ?>"<?= ($added || $sp <= 0) ? ' disabled' : '' ?> aria-label="Select <?= e($it['name']) ?>"></td>
+    <td><b><?= e($it['name']) ?></b><?php if ($added): ?><span class="tag">Added</span><?php elseif (isset($impNew[$iid])): ?><span class="tag">New</span><?php endif; ?><small>ID <?= (int)$iid ?><?= $it['domain'] !== '' ? ' · ' . e($it['domain']) : '' ?></small></td>
+    <td class="money hm">$<?= e(rtrim(rtrim(number_format((float)$it['price'], 4, '.', ''), '0'), '.')) ?></td>
+    <td class="money"><?= $sp > 0 ? money($sp) : '<small>—</small>' ?></td>
+    <td><?= number_format((int)$it['stock']) ?></td>
+  </tr>
+  <?php endforeach; ?></tbody></table></div>
+  <div class="empty" id="inone" style="display:none">No products match.</div>
+  <div class="grid2" style="margin-top:14px">
+    <div><label style="margin-top:0">Category for the added products</label><select name="category_id"><?= $catOpts(0) ?></select></div>
+    <div><label style="margin-top:0">&nbsp;</label><label class="chk"><input type="checkbox" name="publish" value="1" checked> <span>Show them in the shop right away</span></label></div>
+  </div>
+  <small>Name, description, domain and price follow Supplier 2 automatically (price = supplier price × rate + profit %). You can still edit any product later.</small>
+  <div class="savebar" style="display:flex;flex-wrap:wrap;gap:8px">
+    <button class="btn" id="iadd" name="bm_import" value="1" disabled>Add selected (0)</button>
+    <button class="btn ghost" name="bm_check_now" value="1" formnovalidate>Check for new products now</button>
+    <?php if ($impNew): ?><button class="btn ghost" name="bm_dismiss" value="all" formnovalidate>Dismiss new-product alerts</button><?php endif; ?>
+  </div>
+</div>
+</form>
+<?php endif; ?>
+<?php endif; ?>
 
 <?php /* ============================ CATEGORIES ============================ */ elseif ($page === 'categories'): ?>
 <div class="card">
@@ -656,7 +758,30 @@ $lg = media_url('logo');
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';
       pd.showModal();
     };
-    $('#addProduct').addEventListener('click',function(){ fill({},0); });
+    /* Supplier 2: after the product ID is typed (and the boxes ticked) fill name / price / description straight away */
+    var bmSeq=0, bmTimer=null, bmNote=$('#p_bmnote');
+    var bmLookup=function(){
+      var id=parseInt($('#p_bmid').value,10);
+      if($('#p_src').value!=='bm'||!id||id<1){ bmNote.textContent=''; return; }
+      if(!$('#p_an').checked&&!$('#p_ad').checked&&!$('#p_ap').checked){ bmNote.textContent='Tick a box below to fill it from Supplier 2.'; return; }
+      var my=++bmSeq; bmNote.textContent='Loading from Supplier 2…';
+      fetch('/admin.php?bm_lookup='+id,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(j){
+        if(my!==bmSeq) return;
+        if(!j.ok){ bmNote.textContent=j.error||'Could not read the product.'; return; }
+        var done=[];
+        if($('#p_an').checked&&j.name){ $('#p_name').value=j.name; done.push('name'); }
+        if($('#p_ad').checked&&j.desc){ $('#p_desc').value=j.desc; done.push('description'); }
+        if($('#p_ap').checked||j.all){
+          if(j.price){ $('#p_price').value=j.price; done.push('price'); }
+          else if(!j.rate_set){ bmNote.textContent='Set the USD → ৳ rate in Supplier API to fill the price.'; return; }
+        }
+        bmNote.textContent=done.length?('Filled: '+done.join(', ')+'.'):'Nothing to fill.';
+      }).catch(function(){ if(my===bmSeq) bmNote.textContent='Could not reach Supplier 2.'; });
+    };
+    var bmSoon=function(){ clearTimeout(bmTimer); bmTimer=setTimeout(bmLookup,500); };
+    ['#p_bmid'].forEach(function(q){ $(q).addEventListener('input',bmSoon); });
+    ['#p_an','#p_ad','#p_ap','#p_src'].forEach(function(q){ $(q).addEventListener('change',bmSoon); });
+    $('#addProduct').addEventListener('click',function(){ fill({},0); bmNote.textContent=''; });
     $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd,ap:v.ap,mk:v.mk}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
@@ -667,6 +792,32 @@ $lg = media_url('logo');
       none.textContent='No products match your search.'; none.style.display = (rows.length && !n) ? '' : 'none';
     };
     q.addEventListener('input',filt); c.addEventListener('change',filt);
+  }
+
+  /* ---------- import from Supplier 2: filter, tick, add all ---------- */
+  var imp=$('#impForm');
+  if(imp){
+    var irows=$$('#itable tbody tr'), iq=$('#iq'), ihide=$('#ihide'), istock=$('#istock'), inew=$('#inew'), iall=$('#iall'), iadd=$('#iadd'), ids=$('#ids_csv'), ino=$('#inone'), icnt=$('#icount');
+    var ichecked=function(){ return $$('.ichk:checked',imp); };
+    var isync=function(){ var n=ichecked().length; iadd.textContent='Add selected ('+n+')'; iadd.disabled=!n; };
+    var iapply=function(){
+      var t=iq.value.trim().toLowerCase(), shown=0;
+      irows.forEach(function(r){
+        var ok=(!t||r.dataset.s.indexOf(t)>-1)&&!(ihide.checked&&r.dataset.added==='1')&&!(istock.checked&&+r.dataset.stock<=0)&&!(inew&&inew.checked&&r.dataset.new!=='1');
+        r.style.display=ok?'':'none'; if(ok) shown++; else { var c=$('.ichk',r); if(c) c.checked=false; }   // a hidden row is never submitted by accident
+      });
+      ino.style.display=shown?'none':''; iall.checked=false; isync();
+    };
+    [iq].forEach(function(x){ x.addEventListener('input',iapply); });
+    [ihide,istock,inew].forEach(function(x){ if(x) x.addEventListener('change',iapply); });
+    iall.addEventListener('change',function(){ irows.forEach(function(r){ var c=$('.ichk',r); if(c&&!c.disabled&&r.style.display!=='none') c.checked=iall.checked; }); isync(); });
+    $('#itable').addEventListener('change',function(e){ if(e.target.classList.contains('ichk')) isync(); });
+    iadd.addEventListener('click',function(){ ids.value=ichecked().map(function(c){return c.value;}).join(','); });
+    imp.addEventListener('submit',function(e){
+      var s=e.submitter; if(s&&s.name!=='bm_import') ids.value='';
+      if(s&&s.name==='bm_import'&&!confirm('Add '+ichecked().length+' product(s) to your shop?')) e.preventDefault();
+    });
+    iapply();
   }
 
   /* ---------- users ---------- */
