@@ -563,6 +563,12 @@ $knownProfit = 'COALESCE(SUM(CASE WHEN o.cost IS NOT NULL THEN o.price - o.cost 
 if ($page === 'overview') {
     $ac['today'] = acct_kpi($pdo, $today, $today);
     $ac['month'] = acct_kpi($pdo, substr($today, 0, 8) . '01', $today);
+    // hourly series for today's two graphs (sales = pending + delivered orders, deposits = approved)
+    $t0 = $today . ' 00:00:00'; $t1 = date('Y-m-d', strtotime($today . ' +1 day')) . ' 00:00:00';
+    $ac['hs'] = array_fill(0, 24, 0.0); $ac['hd'] = array_fill(0, 24, 0.0); $ac['ns'] = 0; $ac['nd'] = 0;
+    foreach ($acQ("SELECT HOUR(created_at) h, COUNT(*) n, SUM(price) s FROM orders WHERE status <> 'cancelled' AND created_at >= ? AND created_at < ? GROUP BY HOUR(created_at)", [$t0, $t1]) as $r) { $ac['hs'][(int)$r['h']] = (float)$r['s']; $ac['ns'] += (int)$r['n']; }
+    foreach ($acQ("SELECT HOUR(created_at) h, COUNT(*) n, SUM(amount) s FROM deposits WHERE status = 'approved' AND created_at >= ? AND created_at < ? GROUP BY HOUR(created_at)", [$t0, $t1]) as $r) { $ac['hd'][(int)$r['h']] = (float)$r['s']; $ac['nd'] += (int)$r['n']; }
+    $ac['nowH'] = (int)$pdo->query('SELECT HOUR(NOW())')->fetchColumn();
 }
 if ($page === 'reports') {
     $rp['from'] = acct_date($_GET['from'] ?? '', substr($today, 0, 8) . '01');
@@ -739,6 +745,20 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <a class="stat" href="/admin.php?p=reports"><span>This month's sales (<?= (int)$ac['month']['n'] ?> orders)</span><b><?= money($ac['month']['rev']) ?></b></a>
   <a class="stat" href="/admin.php?p=reports"><span>This month's profit</span><b><?= money($ac['month']['profit']) ?></b></a>
 </div>
+<style>
+.tg{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;margin-top:18px}
+.tg .card h3{margin:0}.tg .tot{font-size:1.5rem;font-weight:700;margin:4px 0 12px}.tg .tot small{font-size:.8rem;font-weight:400;color:#6b7280}
+.tgc{display:flex;align-items:flex-end;gap:3px;height:130px;border-bottom:1px solid #d9dce8}
+.tgc i{flex:1;min-height:2px;border-radius:3px 3px 0 0;background:var(--c);opacity:.85}.tgc i.z{opacity:.18}.tgc i.now{opacity:1;outline:2px solid var(--c);outline-offset:1px}.tgc i.fut{opacity:.07}
+.tgx{display:flex;justify-content:space-between;font-size:.72rem;color:#6b7280;margin-top:4px}
+</style>
+<?php foreach ([['Today\'s sales', 'hs', 'ns', '#5b4bff', 'orders'], ['Today\'s deposits', 'hd', 'nd', '#16a34a', 'deposits']] as [$gt, $gk, $gn, $gc, $gw]):
+  $ser = $ac[$gk]; $gm = max($ser) ?: 1; ob_start(); ?>
+<div class="card"><h3><?= $gt ?> by hour</h3><div class="tot"><?= money(array_sum($ser)) ?> <small>· <?= (int)$ac[$gn] ?> <?= $gw ?></small></div>
+  <div class="tgc" style="--c:<?= $gc ?>"><?php foreach ($ser as $h => $v): ?><i class="<?= $v <= 0 ? ($h > $ac['nowH'] ? 'fut' : 'z') : ($h === $ac['nowH'] ? 'now' : '') ?>" style="height:<?= $v > 0 ? max(3, round($v / $gm * 100)) : 2 ?>%" title="<?= sprintf('%02d:00', $h) ?> — <?= e(strip_tags(money($v))) ?>"></i><?php endforeach; ?></div>
+  <div class="tgx"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div></div>
+<?php $tgHtml[] = ob_get_clean(); endforeach; ?>
+<div class="tg"><?= implode('', $tgHtml) ?></div>
 <?php if ((int)$ac['month']['unk'] > 0): ?><p style="margin:10px 2px;color:#b45309;font-size:.85rem">⚠ <?= (int)$ac['month']['unk'] ?> delivered order(s) this month have no cost, so their profit is not counted. Set a Cost price on those products (Products → Edit).</p><?php endif; ?>
 <div class="cols">
   <div class="card"><div class="card-h"><h3>Pending orders</h3><a href="/admin.php?p=orders">Open all</a></div>
