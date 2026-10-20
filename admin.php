@@ -318,9 +318,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk']]);
                     $msg = 'Product added.';
                 }
-                if ($f['src'] === 'bm') bm_sync_stock($pdo, true);
-                if ($f['src'] === 'bm' && ($f['an'] || $f['ad'] || $f['ap']) && function_exists('bm_sync_details')) bm_sync_details($pdo, 30);   // name / description / domain now
-                if ($f['src'] === 'hot') suphot_sync_stock($pdo, true);
+                $syncBm = $f['src'] === 'bm'; $syncHot = $f['src'] === 'hot';
+                $syncDet = $syncBm && ($f['an'] || $f['ad'] || $f['ap']) && function_exists('bm_sync_details');
+                if ($syncBm || $syncHot) {
+                    // Answer the browser first, then talk to the supplier, so saving does not wait for the supplier's server.
+                    ignore_user_abort(true);
+                    register_shutdown_function(function () use ($pdo, $syncBm, $syncHot, $syncDet) {
+                        if (function_exists('session_write_close')) @session_write_close();   // release the session so the next page is not blocked
+                        if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+                        @set_time_limit(60);
+                        try {
+                            if ($syncBm) bm_sync_stock($pdo, true);
+                            if ($syncDet) bm_sync_details($pdo, 30);   // name / description / domain
+                            if ($syncHot) suphot_sync_stock($pdo, true);
+                        } catch (Throwable $ex) { error_log('[admin supplier sync] ' . $ex->getMessage()); }
+                    });
+                }
                 go('products', $msg);
             }
 
@@ -515,6 +528,11 @@ $lg = media_url('logo');
 <title><?= e($titles[$page][0]) ?> - Admin - <?= e(site_name()) ?></title>
 <link rel="stylesheet" href="/admin.css?v=<?= is_file(__DIR__ . '/admin.css') ? filemtime(__DIR__ . '/admin.css') : 1 ?>">
 <?= icon_tags() ?>
+<style>
+body.ld .main{opacity:.55;transition:opacity .15s;pointer-events:none}
+body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;background:#5b4bff;z-index:9999;animation:ldbar .9s ease-in-out infinite}
+@keyframes ldbar{0%{left:-40%}100%{left:100%}}
+</style>
 </head><body class="adm">
 <?= app_icon_sprite() ?>
 <div class="shell">
@@ -539,6 +557,7 @@ $lg = media_url('logo');
 </aside>
 
 <main class="main">
+<div id="reopenData" hidden data-v="<?= e(json_encode($reopen, JSON_UNESCAPED_UNICODE)) ?>"></div>
 <div class="mtop"><button type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu')"><?= ai('menu') ?></button><b><?= e($titles[$page][0]) ?></b></div>
 <div class="ph">
   <div><h1><?= e($titles[$page][0]) ?></h1><p><?= e($titles[$page][1]) ?></p></div>
@@ -1000,10 +1019,54 @@ $lg = media_url('logo');
 <script>
 (function(){
   var $=function(s,r){return (r||document).querySelector(s)}, $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
-  var REOPEN = <?= json_encode($reopen, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+  var REOPEN = null;
 
   document.addEventListener('keydown',function(e){ if(e.key==='Escape') document.body.classList.remove('menu'); });
-  $$('.s-nav a').forEach(function(a){ a.addEventListener('click',function(){ document.body.classList.remove('menu'); }); });
+
+  /* ---------- no page reloads: links and forms are sent in the background and only the page content is swapped ---------- */
+  var busy=false;
+  var readReopen=function(){ var el=$('#reopenData'); try{ return el&&el.dataset.v ? JSON.parse(el.dataset.v) : null; }catch(x){ return null; } };
+  var soft=function(url,opt){
+    opt=opt||{};
+    if(busy) return;
+    busy=true; if(!opt.quiet) document.body.classList.add('ld');
+    var init={credentials:'same-origin',headers:{'X-Requested-With':'fetch'}};
+    if(opt.body){ init.method='POST'; init.body=opt.body; }
+    fetch(url,init).then(function(r){ return r.text().then(function(t){ return {t:t,u:r.url}; }); }).then(function(r){
+      busy=false; document.body.classList.remove('ld');
+      var doc=new DOMParser().parseFromString(r.t,'text/html'), sh=doc.querySelector('.shell'), cur=$('.shell');
+      if(!sh||!cur){ location.href=r.u; return; }   /* e.g. the login page: do a normal load */
+      var y=window.pageYOffset;
+      cur.innerHTML=sh.innerHTML;
+      document.title=doc.title;
+      document.body.classList.remove('menu');
+      if(opt.push) history.pushState(null,'',r.u); else history.replaceState(null,'',r.u);
+      initPage();
+      window.scrollTo(0,opt.top?0:y);
+    }).catch(function(){ busy=false; document.body.classList.remove('ld'); if(!opt.quiet) alert('Connection problem. Please try again.'); });
+  };
+  document.addEventListener('click',function(e){
+    if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey) return;
+    var a=e.target.closest&&e.target.closest('a[href]');
+    if(!a||a.target||a.hasAttribute('download')||a.getAttribute('href').charAt(0)==='#') return;
+    var u; try{ u=new URL(a.href,location.href); }catch(x){ return; }
+    if(u.origin!==location.origin||u.pathname!=='/admin.php') return;
+    e.preventDefault(); soft(u.href,{push:true,top:true});
+  });
+  document.addEventListener('submit',function(e){
+    var f=e.target;
+    if(!f||f.tagName!=='FORM'||(f.getAttribute('method')||'get').toLowerCase()!=='post'||(f.target&&f.target!=='_self')) return;
+    var u; try{ u=new URL(f.action||location.href,location.href); }catch(x){ return; }
+    if(u.origin!==location.origin||u.pathname!=='/admin.php') return;
+    e.preventDefault();
+    var fd=new FormData(f), s=e.submitter;
+    if(s&&s.name&&!fd.has(s.name)) fd.append(s.name,s.value);
+    soft(u.href,{body:fd});
+  });
+  window.addEventListener('popstate',function(){ soft(location.href,{top:true}); });
+
+  function initPage(){
+  REOPEN=readReopen();
 
   /* dialogs: close buttons + click on backdrop */
   $$('dialog').forEach(function(d){
@@ -1084,10 +1147,11 @@ $lg = media_url('logo');
       });
       $('#sdText').textContent=v.body||'(empty)'; sd.showModal();
     }); });
-    /* new SMS: reload the list (as a plain GET) every 30 s unless the admin is searching or has a window open */
-    var auto=$('#txauto');
-    setInterval(function(){
-      if(auto.checked && !tq.value && !sd.open && !document.hidden) location.href = location.pathname + location.search;
+    /* new SMS: refresh the list in the background every 30 s unless the admin is searching or has a window open */
+    clearInterval(window.__txT);
+    window.__txT=setInterval(function(){
+      var au=$('#txauto'), q=$('#txq'), d=$('#sdlg');
+      if(au && q && d && au.checked && !q.value && !d.open && !document.hidden) soft(location.href,{quiet:true});
     }, 30000);
   }
 
@@ -1158,6 +1222,8 @@ $lg = media_url('logo');
     $$('[data-edit-c]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editC); fillC(v,v.id); }); });
     if(REOPEN && REOPEN.t==='category') fillC(REOPEN.v, REOPEN.id);
   }
+  }
+  initPage();
 })();
 </script>
 </body></html>
