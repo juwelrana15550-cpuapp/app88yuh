@@ -243,6 +243,7 @@ function product_fields(): array {
         'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
+        'style'   => (($_POST['card_style'] ?? '') === 'midnight') ? 'midnight' : '',   // '' = classic card
         'cost'    => trim((string)($_POST['pcost'] ?? '')) === '' ? null : max(0.0, round((float)$_POST['pcost'], 2)),   // blank = unknown / follow supplier
         'sup_t'   => $okSp ? $sp[0] : null,
         'sup_a'   => $okSp ? $sp[1] : null,
@@ -640,7 +641,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = $linkErr !== '' ? $linkErr : 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'cost' => $f['cost'] ?? '',
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'cs' => $f['style'], 'cost' => $f['cost'] ?? '',
                     'src' => $f['src'], 'sup' => $f['sup_t'] ? $f['sup_t'] . '|' . $f['sup_a'] : '', 'bmid' => $f['sup_id'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'], 'ap' => $f['ap'], 'mk' => $f['mk'],
                 ]];
             } else {
@@ -648,12 +649,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($f['src'] === 'bm') { $f['sup_t'] = null; $f['sup_a'] = null; } else { $f['sup_id'] = null; }
                 if ($f['src'] === 'bm' && $f['stock'] === null) $f['stock'] = (int)($chk['stock'] ?? 0);   // live stock is synced from the supplier anyway
                 if ($isEdit) {
-                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=?, cost_price=? WHERE id=?')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], (int)$_POST['update_product']]);
+                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=?, cost_price=?, card_style=? WHERE id=?')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], $f['style'], (int)$_POST['update_product']]);
                     $msg = 'Product saved.';
                 } else {
-                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup, cost_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost']]);
+                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup, cost_price, card_style) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], $f['style']]);
                     $msg = 'Product added.';
                 }
                 $syncBm = $f['src'] === 'bm'; $syncHot = $f['src'] === 'hot';
@@ -1209,7 +1210,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Cost</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'], 'cost' => $p['cost_price'] ?? '',
-           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'],
+           'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'cs' => (string)($p['card_style'] ?? ''),
            'src' => !empty($p['supplier_id']) ? 'bm' : (!empty($p['supplier_type']) ? 'hot' : ''),
            'sup' => !empty($p['supplier_type']) ? $p['supplier_type'] . '|' . $p['supplier_account'] : '',
            'bmid' => !empty($p['supplier_id']) ? (int)$p['supplier_id'] : '',
@@ -1234,7 +1235,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <div class="dlg-h"><h3 id="pTitle">Add product</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
   <?php if ($prodErr): ?><div class="err" style="margin-top:12px"><?= e($prodErr) ?></div><?php endif; ?>
   <label>Name</label><input type="text" name="pname" id="p_name" maxlength="80" required>
-  <label>Description <small>(optional)</small></label><input type="text" name="pdesc" id="p_desc" maxlength="500">
+  <label>Description <small>(optional, one line per row)</small></label><textarea name="pdesc" id="p_desc" maxlength="500" rows="4" style="width:100%;box-sizing:border-box;font:inherit;resize:vertical" placeholder="One line per row. For the Midnight card use Key: Value, e.g.&#10;Age: 2019&#10;Format: mail|pass|token"></textarea>
   <div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" id="p_price" step="0.01" min="0.01" required></div>
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
   <label>Cost price (৳) <small>(what you pay to get it, used for profit reports. Blank = Supplier 2 products use supplier price × rate automatically)</small></label><input type="number" name="pcost" id="p_cost" step="0.01" min="0">
@@ -1249,6 +1250,8 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <label class="chk"><input type="checkbox" name="sup_ap" id="p_ap" value="1"> <span>Keep the price in step with Supplier 2 (supplier price × rate + profit %, set in Supplier API)</span></label>
     <label class="chk"><input type="checkbox" name="sup_sd" id="p_sd" value="1" checked> <span>Show the Possible Domain line on the product card</span></label>
   </div>
+  <label>Card style <small>(how this product looks in the shop)</small></label>
+  <select name="card_style" id="p_cs"><option value="">Classic (current look)</option><option value="midnight">Midnight (dark card, Key: Value rows)</option></select>
   <label class="chk" style="margin-top:16px"><input type="checkbox" name="popular" id="p_pop" value="1"> <span>Mark as Popular</span></label>
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pSave" name="add_product" value="1">Save product</button></div>
 </form></dialog>
@@ -1855,7 +1858,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
       $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_cost').value=(v.cost===null||v.cost===undefined)?'':v.cost;
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
-      $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop; $('#p_sup').value=v.sup||'';
+      $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop; $('#p_cs').value=(v.cs==='midnight')?'midnight':''; $('#p_sup').value=v.sup||'';
       $('#p_src').value=v.src||''; $('#p_bmid').value=v.bmid||'';
       $('#p_ap').checked=!!+v.ap; $('#p_an').checked=!!+v.an; $('#p_ad').checked=!!+v.ad; $('#p_sd').checked=(v.sd===undefined||v.sd===null)?true:!!+v.sd; showSrc();
       var s=$('#pSave'); s.name = id ? 'update_product' : 'add_product'; s.value = id ? id : '1';

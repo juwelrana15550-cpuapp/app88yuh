@@ -174,6 +174,7 @@ function migrate(PDO $pdo): void {
         "ALTER TABLE products ADD COLUMN sup_domain VARCHAR(255) NULL",   // "Possible Domain" list copied from bulkmail.shop (refreshed automatically)
         "ALTER TABLE products ADD COLUMN sup_stock INT NOT NULL DEFAULT 0",
         "ALTER TABLE products ADD COLUMN sup_auto_price TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE products ADD COLUMN card_style VARCHAR(12) NOT NULL DEFAULT ''",   // '' = classic card, 'midnight' = dark card with Key: Value rows
         "ALTER TABLE products ADD COLUMN sup_markup DECIMAL(7,2) NOT NULL DEFAULT 0",   // live stock at bulkmail.shop (products.stock = sup_stock + unsold local items)
     ] as $sql) {
         try { $pdo->exec($sql); }
@@ -763,14 +764,27 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
         $pct = discount_pct($p, $ud); $fin = final_price((float)$p['price'], $pct);
         $mine = $pct > 0 && (float)($p['discount_pct'] ?? 0) < $pct;   // own discount of this user is the one applied
         $domOn = !empty($p['sup_domain']) && (int)($p['sup_show_dom'] ?? 1) === 1;
+        $mid = ($p['card_style'] ?? '') === 'midnight';   // admin picks the card look per product (Admin > Products)
         // One line = one bullet. 2+ non-empty lines render as a checklist; a single line stays plain text.
         $descLines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', (string)$p['description'])), function ($l) { return $l !== ''; })); ?>
-    <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?>">
+    <div class="pc<?= !empty($p['popular']) ? ' pop' : '' ?><?= $mid ? ' pc-mid' : '' ?>">
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
       <div class="pc-h"><span class="pc-ic"><?= ico_html($icon) ?></span><div class="pc-t"><h4 title="<?= e($p['name']) ?>"><?= e($p['name']) ?></h4><span class="pc-c"><?= $k ? e($k['name']) : '&nbsp;' ?></span></div></div>
       <?php if ($anyBody): ?>
       <div class="pc-bd<?= $domOn ? ' hd' : '' ?>">
-        <?php if (count($descLines) > 1): ?>
+        <?php if ($mid && $descLines): ?>
+          <?php // Midnight rows: skip blank lines and "Key:" lines with no value, so only what the admin really wrote is shown
+          $kvRows = [];
+          foreach ($descLines as $dl) {
+              $ci = strpos($dl, ':'); $hasK = $ci !== false && $ci > 0 && $ci <= 22;
+              $kk = $hasK ? trim(substr($dl, 0, $ci)) : ''; $vv = $hasK ? trim(substr($dl, $ci + 1)) : $dl;
+              if ($vv === '' || ($hasK && $kk === '')) continue;
+              $kvRows[] = [$hasK ? $kk : '', $vv, $dl];
+          } ?>
+          <?php if ($kvRows): ?><ul class="pc-kv"><?php foreach (array_slice($kvRows, 0, $domOn ? 3 : 4) as $r): ?>
+            <li title="<?= e($r[2]) ?>"><?php if ($r[0] !== ''): ?><span class="k"><?= e($r[0]) ?></span><b class="v"><?= e($r[1]) ?></b><?php else: ?><b class="v full"><?= e($r[1]) ?></b><?php endif; ?></li>
+          <?php endforeach; ?></ul><?php endif; ?>
+        <?php elseif (count($descLines) > 1): ?>
           <ul class="pc-dl"><?php foreach (array_slice($descLines, 0, $domOn ? 3 : 4) as $dl): ?><li title="<?= e($dl) ?>"><?= e($dl) ?></li><?php endforeach; ?></ul>
         <?php elseif ($descLines): ?>
           <p class="pc-d" title="<?= e($descLines[0]) ?>"><?= e($descLines[0]) ?></p>
@@ -936,6 +950,31 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 /* Buy Now button: same full width as before, slimmer height (overrides the older full-width / tall rules above) */
 .catalog .pc .btn.buy,.pc .btn.buy{width:100%!important;min-height:32px!important;height:32px;padding:0 12px!important;font-size:13px!important;border-radius:9px!important;gap:6px!important;margin-top:0!important}
 .catalog .pc .btn.buy svg,.pc .btn.buy svg{width:15px!important;height:15px!important}
+/* Card style "Midnight" (picked per product in Admin): dark card, Key: Value rows */
+.catalog .pc.pc-mid,.pc.pc-mid{background:#0b1226 radial-gradient(120% 80% at 100% 0%,rgba(37,99,235,.42),transparent 60%)!important;border:1px solid #1e2750!important;color:#e8ecff!important}
+.pc-mid h4{color:#eef1ff!important}
+.pc-mid .pc-c{color:#8e9ac0!important}
+.pc-mid .pc-ic{background:rgba(255,255,255,.09)!important;color:#7db2ff!important}
+.pc-mid .pc-d{color:#c3cbea!important}
+.pc-mid .pc-dl li{color:#c3cbea!important;border-color:rgba(255,255,255,.08)!important}
+.catalog .pc-mid .pc-kv{margin:0!important;padding:0;list-style:none}
+.catalog .pc-mid .pc-kv li{display:flex;justify-content:space-between;align-items:center;gap:12px;box-sizing:border-box;height:var(--rh);line-height:calc(var(--rh) - 1px);border-bottom:1px solid rgba(255,255,255,.08);font-size:12.5px;overflow:hidden}
+.catalog .pc-mid .pc-kv li:last-child{border-bottom:0}
+.pc-mid .pc-kv .k{flex:none;color:#8e9ac0;white-space:nowrap}
+.pc-mid .pc-kv .v{min-width:0;flex:0 1 auto;text-align:right;font-weight:700;color:#eef1ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-mid .pc-kv .v.full{flex:1;text-align:left;font-weight:600}
+.catalog .pc-mid .pc-dom{color:#fbbf24!important}
+.pc-mid .pc-price{color:#fff!important}
+.pc-mid .pc-price small,.pc-mid .pc-old{color:#8e9ac0!important}
+.pc-mid .pc-off{background:rgba(74,222,128,.15)!important;color:#4ade80!important}
+.pc-mid .sx-pid{background:rgba(255,255,255,.08)!important;color:#8e9ac0!important}
+.pc-mid .sx-stk{background:rgba(255,255,255,.08)!important;color:#4ade80!important;border-color:transparent!important}
+.pc-mid .sx-stk.low{color:#fbbf24!important}
+.pc-mid .sx-stk.out{color:#f87171!important}
+.pc-mid .inst{color:#4ade80!important}
+.catalog .pc.pc-mid .btn.buy{background:#60a5fa!important;color:#0b1226!important;border:0!important}
+.catalog .pc.pc-mid .btn.buy:hover{filter:brightness(1.08)}
+.catalog .pc.pc-mid .btn.buy:disabled{background:rgba(255,255,255,.1)!important;color:#8e9ac0!important}
 /* Category switch: skeleton cards + spinner while products load */
 @keyframes sxSpin{to{transform:rotate(360deg)}}
 @keyframes sxShim{0%{background-position:-200px 0}100%{background-position:200px 0}}
