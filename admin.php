@@ -16,8 +16,13 @@ const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories',
 
 /** One-time schema upgrade: products.cost_price, orders.cost, expenses table. Safe to run repeatedly. */
 function acct_schema(PDO $pdo): void {
-    if (setting('acct_v', '') === '1') return;
+    if (setting('acct_v', '') === '2') return;
     try {
+        foreach (["ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP NULL DEFAULT NULL", "ALTER TABLE users ADD COLUMN last_ip VARCHAR(45) NULL DEFAULT NULL", "ALTER TABLE users ADD INDEX idx_last_ip (last_ip)"] as $q) {
+            try { $pdo->exec($q); } catch (PDOException $ex) { if (!in_array((int)($ex->errorInfo[1] ?? 0), [1060, 1061], true)) throw $ex; }
+        }
+        $pdo->exec('CREATE TABLE IF NOT EXISTS user_notes (user_id INT PRIMARY KEY, note TEXT NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4');
+        $pdo->exec('CREATE TABLE IF NOT EXISTS admin_log (id INT AUTO_INCREMENT PRIMARY KEY, action VARCHAR(30) NOT NULL, user_id INT NULL, detail VARCHAR(255) NOT NULL DEFAULT \'\', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY (user_id)) DEFAULT CHARSET=utf8mb4');
         $has = function (string $t, string $c) use ($pdo): bool {
             $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
             $s->execute([$t, $c]);
@@ -26,7 +31,9 @@ function acct_schema(PDO $pdo): void {
         if (!$has('products', 'cost_price')) $pdo->exec('ALTER TABLE products ADD COLUMN cost_price DECIMAL(12,2) NULL DEFAULT NULL');
         if (!$has('orders', 'cost'))         $pdo->exec('ALTER TABLE orders ADD COLUMN cost DECIMAL(12,2) NULL DEFAULT NULL');
         $pdo->exec('CREATE TABLE IF NOT EXISTS expenses (id INT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(120) NOT NULL, amount DECIMAL(12,2) NOT NULL, spent_on DATE NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY (spent_on)) DEFAULT CHARSET=utf8mb4');
-        save_setting('acct_v', '1');
+        // v2 fix: orders with qty > 1 need cost = unit cost x qty, so recompute those once
+        $pdo->exec('UPDATE orders SET cost = NULL WHERE qty > 1');
+        save_setting('acct_v', '2');
     } catch (Throwable $ex) { error_log('[acct schema] ' . $ex->getMessage()); }
 }
 
@@ -37,7 +44,7 @@ function acct_schema(PDO $pdo): void {
  */
 function acct_backfill(PDO $pdo): void {
     try {
-        $rows = $pdo->query('SELECT o.id, p.supplier_id, p.cost_price FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.cost IS NULL ORDER BY o.id DESC LIMIT 300')->fetchAll();
+        $rows = $pdo->query('SELECT o.id, GREATEST(1, o.qty) qty, p.supplier_id, p.cost_price FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.cost IS NULL ORDER BY o.id DESC LIMIT 300')->fetchAll();
         if (!$rows) return;
         $rate = function_exists('bm_rate') ? (float)bm_rate() : 0.0;
         $bmOk = $rate > 0 && function_exists('bm_connected') && bm_connected();
@@ -57,10 +64,38 @@ function acct_backfill(PDO $pdo): void {
                 }
                 $c = $cache[$sid];
             }
-            if ($c !== null) $up->execute([$c, (int)$r['id']]);
+            if ($c !== null) $up->execute([round($c * (int)$r['qty'], 2), (int)$r['id']]);   // price/cost on an order are the totals, so cost = unit cost x qty
         }
     } catch (Throwable $ex) { error_log('[acct backfill] ' . $ex->getMessage()); }
 }
+
+/** Write one line to the admin action log (shown on the user profile). */
+function alog(PDO $pdo, string $action, ?int $uid, string $detail = ''): void {
+    try { $pdo->prepare('INSERT INTO admin_log (action, user_id, detail) VALUES (?,?,?)')->execute([$action, $uid, mb_substr($detail, 0, 255)]); }
+    catch (Throwable $ex) { error_log('[admin log] ' . $ex->getMessage()); }
+}
+
+/** WHERE clause + params for the Users list (search + filter). */
+function users_where(array $g): array {
+    $w = []; $a = [];
+    $q = trim((string)($g['q'] ?? ''));
+    if ($q !== '') { $w[] = '(u.email LIKE ? OR u.id = ? OR u.last_ip = ?)'; array_push($a, '%' . $q . '%', (int)$q, $q); }
+    switch ($g['f'] ?? '') {
+        case 'banned': $w[] = 'u.banned = 1'; break;
+        case 'nodep':  $w[] = 'u.has_deposited = 0'; break;
+        case 'bal':    $w[] = 'u.coins > 0'; break;
+        case 'nobuy':  $w[] = 'NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.status <> \'cancelled\')'; break;
+        case 'disc':   $w[] = 'EXISTS (SELECT 1 FROM user_discounts d WHERE d.user_id = u.id)'; break;
+        case 'new7':   $w[] = 'u.created_at >= (NOW() - INTERVAL 7 DAY)'; break;
+    }
+    return [$w ? ' WHERE ' . implode(' AND ', $w) : '', $a];
+}
+const USERS_SELECT = "SELECT u.id, u.email, u.coins, u.banned, u.created_at, u.last_login_at,
+    (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) refs,
+    (SELECT COALESCE(SUM(amount),0) FROM deposits d WHERE d.user_id = u.id AND d.status = 'approved') dep,
+    (SELECT COALESCE(SUM(price),0) FROM orders o WHERE o.user_id = u.id AND o.status <> 'cancelled') spent,
+    (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id AND o.status <> 'cancelled') ords FROM users u";
+const USERS_SORT = ['new' => 'u.id DESC', 'bal' => 'u.coins DESC', 'spent' => 'spent DESC', 'dep' => 'dep DESC', 'ords' => 'ords DESC', 'login' => 'u.last_login_at DESC'];
 
 /** Delivered-order totals for an inclusive date range (Y-m-d .. Y-m-d). profit only counts orders whose cost is known. */
 function acct_kpi(PDO $pdo, string $from, string $to): array {
@@ -141,6 +176,17 @@ function category_fields(): array {
 
 if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); acct_schema(db()); }
 // CSV export of orders (All orders page): cost and profit included, opens fine in Excel
+if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'users') {
+    $pdoU = db(); [$uw, $ua] = users_where($_GET);
+    $so = USERS_SORT[$_GET['s'] ?? ''] ?? USERS_SORT['new'];
+    $st = $pdoU->prepare(USERS_SELECT . $uw . ' ORDER BY ' . $so . ' LIMIT 50000'); $st->execute($ua);
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="users-' . date('Y-m-d') . '.csv"');
+    $o = fopen('php://output', 'w'); fwrite($o, "\xEF\xBB\xBF");
+    fputcsv($o, ['ID', 'Email', 'Balance', 'Total deposited', 'Total spent', 'Orders', 'Referrals', 'Blocked', 'Joined', 'Last login']);
+    foreach ($st as $r) fputcsv($o, [$r['id'], $r['email'], $r['coins'], $r['dep'], $r['spent'], $r['ords'], $r['refs'], $r['banned'] ? 'yes' : '', $r['created_at'], $r['last_login_at']]);
+    fclose($o); exit;
+}
 if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'orders') {
     $pdoX = db(); acct_backfill($pdoX);
     header('Content-Type: text/csv; charset=utf-8');
@@ -291,6 +337,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try { if (sms_match_pending($pdo, (int)$sid, $bonus)) $n++; } catch (Throwable $ex) { error_log('[sms recheck] ' . $ex->getMessage()); }
             }
             go('transactions', $n ? $n . ' deposit(s) matched an SMS and were approved.' : 'No waiting deposit matches an unused SMS right now.');
+
+        } elseif (isset($_POST['u_ban']) || isset($_POST['u_adjust']) || isset($_POST['u_pw']) || isset($_POST['u_note']) || isset($_POST['u_disc_add']) || isset($_POST['u_disc_del'])) {
+            // ---- user management actions (all come from the user profile) ----
+            $page = 'users';
+            $tuid = (int)($_POST['uid'] ?? 0);
+            $tu = $pdo->prepare('SELECT id, email, banned FROM users WHERE id = ?'); $tu->execute([$tuid]); $tu = $tu->fetch();
+            if (!$tu) go('users', 'User not found.');
+            $back = 'users&u=' . $tuid;
+            $reason = mb_substr(trim((string)($_POST['reason'] ?? '')), 0, 120);
+
+            if (isset($_POST['u_ban'])) {
+                $nb = $tu['banned'] ? 0 : 1;
+                $pdo->prepare('UPDATE users SET banned = ? WHERE id = ?')->execute([$nb, $tuid]);
+                alog($pdo, $nb ? 'ban' : 'unban', $tuid, $reason);
+                go($back, $nb ? 'User blocked. They are signed out and cannot log in.' : 'User unblocked.');
+
+            } elseif (isset($_POST['u_adjust'])) {
+                $amt = round((float)str_replace(',', '', (string)($_POST['amount'] ?? '0')), 2);
+                $dir = ($_POST['dir'] ?? '') === 'sub' ? -1 : 1;
+                $amt = abs($amt) * $dir;
+                if ($amt == 0 || abs($amt) > 10000000) flash('err', 'Enter an amount above 0.');
+                elseif ($reason === '') flash('err', 'Write a reason (it is saved in the log).');
+                else {
+                    $okAdj = with_tx($pdo, function (PDO $pdo) use ($tuid, $amt, $reason) {
+                        $b = $pdo->prepare('SELECT coins FROM users WHERE id = ? FOR UPDATE'); $b->execute([$tuid]);
+                        if ((float)$b->fetchColumn() + $amt < 0) return false;
+                        $pdo->prepare('UPDATE users SET coins = coins + ? WHERE id = ?')->execute([$amt, $tuid]);
+                        add_tx($pdo, $tuid, 'adjust', $amt, 'Admin: ' . $reason);
+                        return true;
+                    });
+                    if ($okAdj) { alog($pdo, 'balance', $tuid, ($amt > 0 ? '+' : '') . $amt . ' · ' . $reason); go($back, 'Balance updated.'); }
+                    flash('err', 'Not enough balance to subtract that much.');
+                }
+                go($back);
+
+            } elseif (isset($_POST['u_pw'])) {
+                $np = (string)($_POST['new_pw'] ?? '');
+                if (strlen($np) < 8) flash('err', 'Password must be at least 8 characters.');
+                else {
+                    $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([password_hash($np, PASSWORD_DEFAULT), $tuid]);
+                    alog($pdo, 'password', $tuid, 'password reset by admin');
+                    go($back, 'Password changed. Tell the user the new password.');
+                }
+                go($back);
+
+            } elseif (isset($_POST['u_note'])) {
+                $nt = mb_substr(trim((string)($_POST['note'] ?? '')), 0, 2000);
+                if ($nt === '') $pdo->prepare('DELETE FROM user_notes WHERE user_id = ?')->execute([$tuid]);
+                else $pdo->prepare('INSERT INTO user_notes (user_id, note) VALUES (?,?) ON DUPLICATE KEY UPDATE note = VALUES(note)')->execute([$tuid, $nt]);
+                go($back, 'Note saved.');
+
+            } elseif (isset($_POST['u_disc_add'])) {
+                $pc = round((float)($_POST['percent'] ?? 0), 2); $pid = max(0, (int)($_POST['product_id'] ?? 0));
+                if ($pc < 0.01 || $pc > 99) flash('err', 'Discount must be between 0.01 and 99 %.');
+                else {
+                    $pdo->prepare('INSERT INTO user_discounts (user_id, product_id, percent) VALUES (?,?,?) ON DUPLICATE KEY UPDATE percent = VALUES(percent)')->execute([$tuid, $pid, $pc]);
+                    alog($pdo, 'discount', $tuid, $pc . '% on ' . ($pid ? 'product #' . $pid : 'all products'));
+                    go($back, 'Discount saved.');
+                }
+                go($back);
+
+            } else { // u_disc_del
+                $pdo->prepare('DELETE FROM user_discounts WHERE id = ? AND user_id = ?')->execute([(int)$_POST['u_disc_del'], $tuid]);
+                alog($pdo, 'discount', $tuid, 'discount removed');
+                go($back, 'Discount removed.');
+            }
 
         } elseif (isset($_POST['add_expense'])) {
             $page = 'expenses';
@@ -609,6 +721,42 @@ if ($page === 'expenses') {
     $expRows = $acQ('SELECT * FROM expenses ORDER BY spent_on DESC, id DESC LIMIT 200');
     $expMonth = (float)$acQ('SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE spent_on BETWEEN ? AND ?', [substr($today, 0, 8) . '01', $today])[0]['s'];
 }
+/* ---- users page data ---- */
+$um = []; $pu = null; $ul = [];
+if ($page === 'users') {
+    $uid0 = (int)($_GET['u'] ?? 0);
+    if ($uid0 > 0) {
+        $s0 = $pdo->prepare(USERS_SELECT . ' WHERE u.id = ?'); $s0->execute([$uid0]); $pu = $s0->fetch() ?: null;
+        if (!$pu) { flash('err', 'User not found.'); header('Location: /admin.php?p=users'); exit; }
+        $full = $acQ('SELECT referred_by, has_deposited, last_ip FROM users WHERE id = ?', [$uid0])[0];
+        $pu += $full;
+        $um['note'] = (string)($acQ('SELECT note FROM user_notes WHERE user_id = ?', [$uid0])[0]['note'] ?? '');
+        $um['ref_by'] = $pu['referred_by'] ? ($acQ('SELECT id, email FROM users WHERE id = ?', [(int)$pu['referred_by']])[0] ?? null) : null;
+        $um['refs'] = $acQ('SELECT id, email, has_deposited, created_at FROM users WHERE referred_by = ? ORDER BY id DESC LIMIT 30', [$uid0]);
+        $um['same_ip'] = $pu['last_ip'] ? $acQ('SELECT id, email, banned FROM users WHERE last_ip = ? AND id <> ? ORDER BY id DESC LIMIT 20', [$pu['last_ip'], $uid0]) : [];
+        $um['disc'] = $acQ('SELECT d.id, d.product_id, d.percent, p.name FROM user_discounts d LEFT JOIN products p ON p.id = d.product_id WHERE d.user_id = ? ORDER BY d.product_id', [$uid0]);
+        $um['orders'] = $acQ('SELECT id, product_name, price, cost, status, created_at FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 15', [$uid0]);
+        $um['deps'] = $acQ('SELECT id, amount, status, note, created_at FROM deposits WHERE user_id = ? ORDER BY id DESC LIMIT 15', [$uid0]);
+        $um['tx'] = $acQ('SELECT type, amount, note, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 20', [$uid0]);
+        $um['log'] = $acQ('SELECT action, detail, created_at FROM admin_log WHERE user_id = ? ORDER BY id DESC LIMIT 15', [$uid0]);
+        $x = $acQ("SELECT COALESCE(SUM(status = 'cancelled'),0) canc, COALESCE(SUM(CASE WHEN status = 'delivered' AND cost IS NOT NULL THEN price - cost ELSE 0 END),0) profit FROM orders WHERE user_id = ?", [$uid0])[0];
+        $um['canc'] = (int)$x['canc']; $um['profit'] = (float)$x['profit'];
+        $um['rej'] = (int)$acQ("SELECT COUNT(*) c FROM deposits WHERE user_id = ? AND status = 'rejected'", [$uid0])[0]['c'];
+        $um['prods'] = $acQ('SELECT id, name FROM products ORDER BY name LIMIT 500');
+    } else {
+        $uPer = 50;
+        $uPg = max(1, (int)($_GET['pg'] ?? 1));
+        [$uw, $ua] = users_where($_GET);
+        $uSort = array_key_exists($_GET['s'] ?? '', USERS_SORT) ? $_GET['s'] : 'new';
+        $um['total'] = (int)$acQ('SELECT COUNT(*) c FROM users u' . $uw, $ua)[0]['c'];
+        $um['pages'] = max(1, (int)ceil($um['total'] / $uPer));
+        $uPg = min($uPg, $um['pages']);
+        $ul = $acQ(USERS_SELECT . $uw . ' ORDER BY ' . USERS_SORT[$uSort] . ' LIMIT ' . $uPer . ' OFFSET ' . (($uPg - 1) * $uPer), $ua);
+        $x = $acQ("SELECT COUNT(*) a, COALESCE(SUM(banned),0) b, COALESCE(SUM(created_at >= CURDATE()),0) t, COALESCE(SUM(coins > 0),0) c FROM users")[0];
+        $um['st'] = $x;
+        $um['log'] = $acQ('SELECT l.action, l.detail, l.created_at, u.email FROM admin_log l LEFT JOIN users u ON u.id = l.user_id ORDER BY l.id DESC LIMIT 10');
+    }
+}
 $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $smsC = ['all' => 0, 'unused' => 0, 'used' => 0, 'other' => 0, 'bn' => 0, 'last' => null]; $smsRows = []; $bnRows = [];
@@ -643,7 +791,7 @@ $catOpts = function ($sel) use ($cats) {
     return $h;
 };
 $rows = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status='pending' ORDER BY d.id")->fetchAll();
-$users = $pdo->query('SELECT u.id, u.email, u.coins, u.created_at, (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.id) AS refs FROM users u ORDER BY u.id DESC LIMIT 100')->fetchAll();
+$users = [];   // the Users page now loads its own paged list (see "users page data")
 $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = d.user_id WHERE d.status <> 'pending' ORDER BY d.id DESC LIMIT 30")->fetchAll();
 
 /** Admin-only icons (everything else comes from icon() in lib.php). */
@@ -678,7 +826,7 @@ $titles = [
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
-    'users'      => ['Users', 'Latest 100 registered users'],
+    'users'      => ['Users', 'Search, filter, block, adjust balance and manage every user'],
     'settings'   => ['Site settings', 'Name, headline, support links, logo and banner'],
     'transactions' => ['Transactions', 'SMS received from your wallets, with used and unused TrxIDs'],
     'payments'   => ['Payment methods', 'Accounts, limits, fees and the deposit on/off switch'],
@@ -1029,14 +1177,119 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 </form></dialog>
 
 <?php /* ============================ USERS ============================ */ elseif ($page === 'users'): ?>
-<div class="card">
-  <div class="tb"><div class="srch grow"><?= ai('search') ?><input type="search" id="uq" placeholder="Search by email or ID" autocomplete="off"></div></div>
-  <div class="tw"><table id="utable"><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Referrals</th><th class="hm">Joined</th></tr></thead><tbody>
-  <?php foreach ($users as $x): ?>
-  <tr data-s="<?= e(mb_strtolower($x['email'] . ' ' . $x['id'])) ?>"><td><?= (int)$x['id'] ?></td><td><?= e($x['email']) ?></td><td class="money"><?= money($x['coins']) ?></td><td class="hm"><?= (int)$x['refs'] ?></td><td class="hm"><?= e($x['created_at']) ?></td></tr>
-  <?php endforeach; if (!$users): ?><tr><td colspan="5">No users yet.</td></tr><?php endif; ?></tbody></table></div>
-  <div class="empty" id="unone" style="display:none">No matching users.</div>
+<style>
+.um-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;margin-top:18px}
+.um-g .card h3{margin-top:0}.um-note{font-size:.82rem;color:#6b7280;margin:6px 0}
+.badge.ban{background:#fee2e2;color:#b91c1c}.um-flag{display:inline-block;padding:2px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:.74rem;margin:2px 4px 2px 0}
+.um-pg{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}.um-pos{color:#16a34a}.um-neg{color:#dc2626}
+</style>
+<?php if ($pu): /* ---------- one user ---------- */
+  $banned = (int)$pu['banned'] === 1;
+  $flags = [];
+  if ($um['same_ip']) $flags[] = count($um['same_ip']) . ' other account(s) use the same IP';
+  if ($um['canc'] >= 3) $flags[] = $um['canc'] . ' cancelled orders';
+  if ($um['rej'] >= 2) $flags[] = $um['rej'] . ' rejected deposits';
+  if ($pu['referred_by'] && $um['ref_by'] && $pu['last_ip'] && $um['ref_by'] && $acQ('SELECT 1 FROM users WHERE id = ? AND last_ip = ?', [(int)$pu['referred_by'], $pu['last_ip']])) $flags[] = 'same IP as the user who referred them';
+  $rfd = count(array_filter($um['refs'], fn($r) => (int)$r['has_deposited'])); ?>
+<div class="card"><div class="card-h"><h3><?= e($pu['email']) ?> <span class="badge <?= $banned ? 'ban' : 'on' ?>"><?= $banned ? 'Blocked' : 'Active' ?></span></h3><a href="/admin.php?p=users">← All users</a></div>
+  <p class="um-note">ID <?= (int)$pu['id'] ?> · Joined <?= e($pu['created_at']) ?> · Last login <?= $pu['last_login_at'] ? e($pu['last_login_at']) : 'not recorded yet' ?><?= $pu['last_ip'] ? ' · IP ' . e($pu['last_ip']) : '' ?><?= $um['ref_by'] ? ' · Referred by <a href="/admin.php?p=users&u=' . (int)$um['ref_by']['id'] . '">' . e($um['ref_by']['email']) . '</a>' : '' ?></p>
+  <?php foreach ($flags as $fl): ?><span class="um-flag">⚠ <?= e($fl) ?></span><?php endforeach; ?></div>
+<div class="stats" style="margin-top:14px">
+  <div class="stat"><span>Balance</span><b><?= money($pu['coins']) ?></b></div>
+  <div class="stat"><span>Total deposited</span><b><?= money($pu['dep']) ?></b></div>
+  <div class="stat"><span>Total spent (<?= (int)$pu['ords'] ?> orders)</span><b><?= money($pu['spent']) ?></b></div>
+  <div class="stat"><span>Profit from this user</span><b class="<?= $um['profit'] < 0 ? 'um-neg' : 'um-pos' ?>"><?= money($um['profit']) ?></b></div>
 </div>
+
+<div class="um-g">
+<div class="card"><h3>Block / unblock</h3>
+  <p class="um-note"><?= $banned ? 'This user is blocked: they cannot log in or buy.' : 'Blocking signs the user out right away and stops login, orders and deposits. Their balance stays.' ?></p>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>">
+  <input type="text" name="reason" maxlength="120" placeholder="Reason (saved in the log)">
+  <div class="savebar"><button class="btn <?= $banned ? 'ok-b' : 'red' ?>" name="u_ban" value="1" onclick="return confirm('<?= $banned ? 'Unblock' : 'Block' ?> this user?')"><?= $banned ? 'Unblock user' : 'Block user' ?></button></div></form></div>
+
+<div class="card"><h3>Add or remove balance</h3>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>">
+  <div class="grid2"><div><select name="dir"><option value="add">Add (+)</option><option value="sub">Subtract (−)</option></select></div>
+  <div><input type="number" name="amount" step="0.01" min="0.01" placeholder="Amount (৳)" required></div></div>
+  <input type="text" name="reason" maxlength="120" placeholder="Reason (required, saved in the log)" required style="margin-top:8px">
+  <div class="savebar"><button class="btn" name="u_adjust" value="1" onclick="return confirm('Change this user\'s balance?')">Update balance</button></div></form></div>
+
+<div class="card"><h3>Discounts for this user</h3>
+  <?php foreach ($um['disc'] as $d): ?><div class="mini"><div><b><?= e(pct_fmt((float)$d['percent'])) ?>% off</b><small><?= (int)$d['product_id'] === 0 ? 'All products' : e($d['name'] ?? ('Product #' . (int)$d['product_id'])) ?></small></div>
+  <form method="post" class="inl"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>"><button class="btn sm red" name="u_disc_del" value="<?= (int)$d['id'] ?>" aria-label="Remove"><?= ai('trash') ?></button></form></div>
+  <?php endforeach; if (!$um['disc']) echo '<div class="empty">No discount.</div>'; ?>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>">
+  <div class="grid2"><div><select name="product_id"><option value="0">All products</option><?php foreach ($um['prods'] as $p2): ?><option value="<?= (int)$p2['id'] ?>"><?= e($p2['name']) ?></option><?php endforeach; ?></select></div>
+  <div><input type="number" name="percent" step="0.01" min="0.01" max="99" placeholder="% off" required></div></div>
+  <div class="savebar"><button class="btn" name="u_disc_add" value="1">Save discount</button></div></form></div>
+
+<div class="card"><h3>Reset password</h3>
+  <p class="um-note">Sets a new password. Send it to the user yourself. Already open sessions stay logged in; use Block if you need to cut them off now.</p>
+  <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>">
+  <input type="text" name="new_pw" minlength="8" placeholder="New password (8+ characters)" autocomplete="off" required>
+  <div class="savebar"><button class="btn ghost" name="u_pw" value="1" onclick="return confirm('Change this user\'s password?')">Change password</button></div></form></div>
+
+<div class="card"><h3>Private note</h3>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="uid" value="<?= (int)$pu['id'] ?>">
+  <textarea name="note" maxlength="2000" placeholder="Only admins see this. e.g. VIP reseller, wrong TrxID twice..."><?= e($um['note']) ?></textarea>
+  <div class="savebar"><button class="btn" name="u_note" value="1">Save note</button></div></form></div>
+
+<div class="card"><h3>Referrals <small>(<?= count($um['refs']) ?> invited, <?= $rfd ?> deposited)</small></h3>
+  <?php foreach ($um['refs'] as $r): ?><div class="mini"><div><a href="/admin.php?p=users&u=<?= (int)$r['id'] ?>"><?= e($r['email']) ?></a><small><?= e($r['created_at']) ?></small></div><span class="badge <?= $r['has_deposited'] ? 'on' : 'off' ?>"><?= $r['has_deposited'] ? 'deposited' : 'no deposit' ?></span></div>
+  <?php endforeach; if (!$um['refs']) echo '<div class="empty">Nobody invited yet.</div>'; ?>
+  <?php if ($um['same_ip']): ?><h3 style="margin-top:16px">Same IP</h3><?php foreach ($um['same_ip'] as $r): ?><div class="mini"><div><a href="/admin.php?p=users&u=<?= (int)$r['id'] ?>"><?= e($r['email']) ?></a></div><?= $r['banned'] ? '<span class="badge ban">Blocked</span>' : '' ?></div><?php endforeach; endif; ?></div>
+</div>
+
+<div class="um-g">
+<div class="card"><h3>Recent orders</h3><div class="tw"><table><thead><tr><th>#</th><th>Product</th><th>Price</th><th>Status</th></tr></thead><tbody>
+<?php foreach ($um['orders'] as $o): ?><tr><td><?= (int)$o['id'] ?></td><td><?= e($o['product_name']) ?><small style="display:block"><?= e($o['created_at']) ?></small></td><td class="money"><?= money($o['price']) ?></td><td><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></td></tr>
+<?php endforeach; if (!$um['orders']) echo '<tr><td colspan="4">No orders.</td></tr>'; ?></tbody></table></div></div>
+<div class="card"><h3>Recent deposits</h3><div class="tw"><table><thead><tr><th>#</th><th>Amount</th><th>Status</th><th class="hm">Date</th></tr></thead><tbody>
+<?php foreach ($um['deps'] as $d): ?><tr><td><?= (int)$d['id'] ?></td><td class="money"><?= money($d['amount']) ?></td><td><span class="badge <?= e($d['status']) ?>"><?= e($d['status']) ?></span></td><td class="hm"><?= e($d['created_at']) ?></td></tr>
+<?php endforeach; if (!$um['deps']) echo '<tr><td colspan="4">No deposits.</td></tr>'; ?></tbody></table></div></div>
+<div class="card"><h3>Wallet history</h3><div class="tw"><table><thead><tr><th>Type</th><th>Amount</th><th>Note</th></tr></thead><tbody>
+<?php foreach ($um['tx'] as $t): ?><tr><td><?= e($t['type']) ?><small style="display:block"><?= e($t['created_at']) ?></small></td><td class="money"><?= money($t['amount']) ?></td><td><small><?= e((string)$t['note']) ?></small></td></tr>
+<?php endforeach; if (!$um['tx']) echo '<tr><td colspan="3">No activity.</td></tr>'; ?></tbody></table></div></div>
+<div class="card"><h3>Admin actions on this user</h3>
+<?php foreach ($um['log'] as $l): ?><div class="mini"><div><b><?= e($l['action']) ?></b><small><?= e($l['detail']) ?></small></div><small><?= e($l['created_at']) ?></small></div>
+<?php endforeach; if (!$um['log']) echo '<div class="empty">Nothing yet.</div>'; ?></div>
+</div>
+
+<?php else: /* ---------- list ---------- */
+  $uf = (string)($_GET['f'] ?? ''); $uq2 = (string)($_GET['q'] ?? '');
+  $uBase = ['p' => 'users', 'q' => $uq2, 'f' => $uf, 's' => $uSort];
+  $uLink = fn(array $o) => '/admin.php?' . http_build_query(array_filter(array_merge($uBase, $o), fn($v) => $v !== '' && $v !== null)); ?>
+<div class="stats">
+  <div class="stat"><span>All users</span><b><?= (int)$um['st']['a'] ?></b></div>
+  <div class="stat"><span>New today</span><b><?= (int)$um['st']['t'] ?></b></div>
+  <div class="stat"><span>With balance</span><b><?= (int)$um['st']['c'] ?></b></div>
+  <a class="stat <?= (int)$um['st']['b'] ? 'alert' : '' ?>" href="<?= e($uLink(['f' => 'banned'])) ?>"><span>Blocked</span><b><?= (int)$um['st']['b'] ?></b></a>
+</div>
+<div class="card" style="margin-top:14px">
+  <form method="get" class="tb" style="flex-wrap:wrap;gap:10px;align-items:flex-end"><input type="hidden" name="p" value="users">
+    <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($uq2) ?>" placeholder="Email, user ID or IP" autocomplete="off"></div>
+    <select name="f" style="width:auto"><?php foreach (['' => 'All users', 'banned' => 'Blocked', 'nodep' => 'Never deposited', 'bal' => 'Has balance', 'nobuy' => 'Never bought', 'disc' => 'Has a discount', 'new7' => 'Joined in last 7 days'] as $k2 => $lb): ?><option value="<?= $k2 ?>"<?= $uf === $k2 ? ' selected' : '' ?>><?= e($lb) ?></option><?php endforeach; ?></select>
+    <select name="s" style="width:auto"><?php foreach (['new' => 'Newest first', 'bal' => 'Highest balance', 'spent' => 'Most spent', 'dep' => 'Most deposited', 'ords' => 'Most orders', 'login' => 'Last login'] as $k2 => $lb): ?><option value="<?= $k2 ?>"<?= $uSort === $k2 ? ' selected' : '' ?>><?= e($lb) ?></option><?php endforeach; ?></select>
+    <button class="btn">Apply</button>
+    <a class="btn ghost" href="<?= e('/admin.php?' . http_build_query(array_filter(['export' => 'users', 'q' => $uq2, 'f' => $uf, 's' => $uSort]))) ?>">Download CSV</a>
+  </form>
+  <p class="um-note"><?= number_format($um['total']) ?> user(s) · page <?= (int)$uPg ?> of <?= (int)$um['pages'] ?></p>
+  <div class="tw"><table><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Deposited</th><th class="hm">Spent</th><th class="hm">Orders</th><th class="hm">Refs</th><th>Status</th><th class="hm">Joined</th><th></th></tr></thead><tbody>
+  <?php foreach ($ul as $x): ?>
+  <tr><td><?= (int)$x['id'] ?></td><td><a href="/admin.php?p=users&u=<?= (int)$x['id'] ?>"><?= e($x['email']) ?></a></td><td class="money"><?= money($x['coins']) ?></td><td class="hm money"><?= money($x['dep']) ?></td><td class="hm money"><?= money($x['spent']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td><td class="hm"><?= (int)$x['refs'] ?></td>
+  <td><span class="badge <?= $x['banned'] ? 'ban' : 'on' ?>"><?= $x['banned'] ? 'Blocked' : 'Active' ?></span></td><td class="hm"><?= e(substr((string)$x['created_at'], 0, 10)) ?></td>
+  <td class="ra"><a class="btn sm ghost" href="/admin.php?p=users&u=<?= (int)$x['id'] ?>">Manage</a></td></tr>
+  <?php endforeach; if (!$ul): ?><tr><td colspan="10">No users match.</td></tr><?php endif; ?></tbody></table></div>
+  <?php if ($um['pages'] > 1): ?><div class="um-pg">
+    <?php if ($uPg > 1): ?><a class="btn sm ghost" href="<?= e($uLink(['pg' => $uPg - 1])) ?>">← Prev</a><?php endif; ?>
+    <span><?= (int)$uPg ?> / <?= (int)$um['pages'] ?></span>
+    <?php if ($uPg < $um['pages']): ?><a class="btn sm ghost" href="<?= e($uLink(['pg' => $uPg + 1])) ?>">Next →</a><?php endif; ?></div><?php endif; ?>
+</div>
+<div class="card" style="margin-top:18px"><h3>Latest admin actions</h3>
+<?php foreach ($um['log'] as $l): ?><div class="mini"><div><b><?= e($l['action']) ?></b> · <?= e((string)$l['email']) ?><small><?= e($l['detail']) ?></small></div><small><?= e($l['created_at']) ?></small></div>
+<?php endforeach; if (!$um['log']) echo '<div class="empty">No actions yet. Blocking a user, changing a balance or giving a discount is recorded here.</div>'; ?></div>
+<?php endif; ?>
 
 <?php /* ============================ TRANSACTIONS ============================ */ elseif ($page === 'transactions'):
   $provM = [];
