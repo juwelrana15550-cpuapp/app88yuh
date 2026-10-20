@@ -75,6 +75,101 @@ function alog(PDO $pdo, string $action, ?int $uid, string $detail = ''): void {
     catch (Throwable $ex) { error_log('[admin log] ' . $ex->getMessage()); }
 }
 
+/** Round avatar with the first letter of the email and a colour picked from the email. */
+function user_avatar(string $email, int $px = 40): string {
+    $h = crc32($email) % 360;
+    return '<span class="ua" style="width:' . $px . 'px;height:' . $px . 'px;font-size:' . round($px * .42) . 'px;background:hsl(' . $h . ',70%,92%);color:hsl(' . $h . ',55%,30%)">' . e(mb_strtoupper(mb_substr($email, 0, 1))) . '</span>';
+}
+
+/** HTML for the quick-manage drawer on the Users list (Overview, Balance, Discount, Security tabs). */
+function user_drawer_html(PDO $pdo, int $uid, string $ret): string {
+    $q = function (string $sql, array $a = []) use ($pdo): array { $s = $pdo->prepare($sql); $s->execute($a); return $s->fetchAll(); };
+    $r = $q(USERS_SELECT . ' WHERE u.id = ?', [$uid]);
+    if (!$r) return '<div class="err" style="margin:20px">User not found.</div>';
+    $u = $r[0] + $q('SELECT referred_by, has_deposited, last_ip FROM users WHERE id = ?', [$uid])[0];
+    $note = (string)($q('SELECT note FROM user_notes WHERE user_id = ?', [$uid])[0]['note'] ?? '');
+    $refBy = $u['referred_by'] ? ($q('SELECT id, email FROM users WHERE id = ?', [(int)$u['referred_by']])[0] ?? null) : null;
+    $disc = $q('SELECT d.id, d.product_id, d.percent, p.name FROM user_discounts d LEFT JOIN products p ON p.id = d.product_id WHERE d.user_id = ? ORDER BY d.product_id', [$uid]);
+    $ords = $q('SELECT id, product_name, price, status, created_at FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 5', [$uid]);
+    $txs  = $q('SELECT type, amount, note, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 8', [$uid]);
+    $prod = $q('SELECT id, name FROM products ORDER BY name LIMIT 500');
+    $sameIp = $u['last_ip'] ? (int)$q('SELECT COUNT(*) c FROM users WHERE last_ip = ? AND id <> ?', [$u['last_ip'], $uid])[0]['c'] : 0;
+    $canc = (int)$q("SELECT COUNT(*) c FROM orders WHERE user_id = ? AND status = 'cancelled'", [$uid])[0]['c'];
+    $rej  = (int)$q("SELECT COUNT(*) c FROM deposits WHERE user_id = ? AND status = 'rejected'", [$uid])[0]['c'];
+    $profit = (float)$q("SELECT COALESCE(SUM(CASE WHEN status = 'delivered' AND cost IS NOT NULL THEN price - cost ELSE 0 END),0) p FROM orders WHERE user_id = ?", [$uid])[0]['p'];
+    $banned = (int)$u['banned'] === 1;
+    $hid = '<input type="hidden" name="uid" value="' . $uid . '"><input type="hidden" name="ret" value="' . e($ret) . '">';
+    ob_start(); ?>
+<div class="dw-head"><?= user_avatar($u['email'], 52) ?>
+  <div class="dw-who"><b><?= e($u['email']) ?></b><span>ID <?= $uid ?> · joined <?= e(substr((string)$u['created_at'], 0, 10)) ?></span></div>
+  <span class="pill <?= $banned ? 'bad' : 'good' ?>"><i></i><?= $banned ? 'Blocked' : 'Active' ?></span></div>
+<div class="dw-bal"><small>Current balance</small><b><?= money($u['coins']) ?></b></div>
+<nav class="dw-tabs"><button type="button" data-tab="ov" class="on">Overview</button><button type="button" data-tab="bal">Balance</button><button type="button" data-tab="disc">Discount</button><button type="button" data-tab="sec">Security &amp; note</button></nav>
+
+<section data-pane="ov">
+  <div class="dw-tiles">
+    <div><small>Deposited</small><b><?= money($u['dep']) ?></b></div>
+    <div><small>Spent</small><b><?= money($u['spent']) ?></b></div>
+    <div><small>Orders</small><b><?= (int)$u['ords'] ?></b></div>
+    <div><small>Profit from user</small><b class="<?= $profit < 0 ? 'neg' : 'pos' ?>"><?= money($profit) ?></b></div>
+    <div><small>Referrals</small><b><?= (int)$u['refs'] ?></b></div>
+    <div><small>Cancelled / rejected</small><b><?= $canc ?> / <?= $rej ?></b></div>
+  </div>
+  <?php if ($sameIp || $canc >= 3 || $rej >= 2): ?><div class="dw-warn"><?php if ($sameIp) echo '⚠ ' . $sameIp . ' other account(s) on the same IP<br>'; if ($canc >= 3) echo '⚠ ' . $canc . ' cancelled orders<br>'; if ($rej >= 2) echo '⚠ ' . $rej . ' rejected deposits'; ?></div><?php endif; ?>
+  <dl class="dw-info">
+    <dt>Email</dt><dd><?= e($u['email']) ?></dd>
+    <dt>Last login</dt><dd><?= $u['last_login_at'] ? e($u['last_login_at']) : '<span class="mut">not recorded yet</span>' ?></dd>
+    <dt>IP address</dt><dd><?= $u['last_ip'] ? e($u['last_ip']) : '<span class="mut">—</span>' ?></dd>
+    <dt>Referred by</dt><dd><?= $refBy ? '<a href="/admin.php?p=users&u=' . (int)$refBy['id'] . '">' . e($refBy['email']) . '</a>' : '<span class="mut">—</span>' ?></dd>
+    <dt>First deposit</dt><dd><?= $u['has_deposited'] ? 'Done' : '<span class="mut">Not yet</span>' ?></dd>
+    <dt>Discounts</dt><dd><?= $disc ? count($disc) . ' active' : '<span class="mut">none</span>' ?></dd>
+  </dl>
+  <h4>Latest orders</h4>
+  <?php foreach ($ords as $o): ?><div class="dw-row"><div><b>#<?= (int)$o['id'] ?> · <?= e($o['product_name']) ?></b><small><?= e($o['created_at']) ?></small></div><div class="dw-r"><?= money($o['price']) ?><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></div></div>
+  <?php endforeach; if (!$ords) echo '<p class="mut">No orders yet.</p>'; ?>
+</section>
+
+<section data-pane="bal" hidden>
+  <form method="post"><?= csrf_field() . $hid ?>
+    <div class="dw-seg"><label><input type="radio" name="dir" value="add" checked><span>＋ Add money</span></label><label><input type="radio" name="dir" value="sub"><span>− Take money</span></label></div>
+    <label class="dw-l">Amount (৳)</label><input type="number" name="amount" step="0.01" min="0.01" placeholder="0.00" required class="dw-big">
+    <div class="dw-chips"><?php foreach ([50, 100, 500, 1000, 5000] as $c): ?><button type="button" data-dir="add" data-amt="<?= $c ?>">+<?= $c ?></button><?php endforeach; ?><?php foreach ([100, 500] as $c): ?><button type="button" data-dir="sub" data-amt="<?= $c ?>" class="m">−<?= $c ?></button><?php endforeach; ?></div>
+    <label class="dw-l">Reason <small>(saved in the log)</small></label><input type="text" name="reason" maxlength="120" required placeholder="e.g. Manual deposit, refund, bonus">
+    <button class="btn dw-btn" name="u_adjust" value="1" onclick="return confirm('Change this user\'s balance?')">Update balance</button>
+  </form>
+  <h4>Wallet history</h4>
+  <?php foreach ($txs as $t): ?><div class="dw-row"><div><b><?= e($t['type']) ?></b><small><?= e((string)$t['note']) ?: e($t['created_at']) ?></small></div><div class="dw-r <?= (float)$t['amount'] < 0 ? 'neg' : 'pos' ?>"><?= (float)$t['amount'] > 0 ? '+' : '' ?><?= money($t['amount']) ?></div></div>
+  <?php endforeach; if (!$txs) echo '<p class="mut">No wallet activity.</p>'; ?>
+</section>
+
+<section data-pane="disc" hidden>
+  <?php foreach ($disc as $d): ?><div class="dw-row"><div><b><?= e(pct_fmt((float)$d['percent'])) ?>% off</b><small><?= (int)$d['product_id'] === 0 ? 'All products' : e($d['name'] ?? ('Product #' . (int)$d['product_id'])) ?></small></div>
+    <form method="post" class="inl"><?= csrf_field() . $hid ?><button class="btn sm red" name="u_disc_del" value="<?= (int)$d['id'] ?>">Remove</button></form></div>
+  <?php endforeach; if (!$disc) echo '<p class="mut">No discount for this user.</p>'; ?>
+  <h4>Give a discount</h4>
+  <form method="post"><?= csrf_field() . $hid ?>
+    <label class="dw-l">Applies to</label><select name="product_id"><option value="0">All products</option><?php foreach ($prod as $p): ?><option value="<?= (int)$p['id'] ?>"><?= e($p['name']) ?></option><?php endforeach; ?></select>
+    <label class="dw-l">Percent off</label><input type="number" name="percent" step="0.01" min="0.01" max="99" placeholder="e.g. 10" required>
+    <button class="btn dw-btn" name="u_disc_add" value="1">Save discount</button>
+  </form>
+</section>
+
+<section data-pane="sec" hidden>
+  <div class="dw-box <?= $banned ? 'bad' : '' ?>"><b><?= $banned ? 'This user is blocked' : 'Block this user' ?></b>
+    <p><?= $banned ? 'They cannot log in or buy. Their balance stays.' : 'They are signed out at once and cannot log in or buy.' ?></p>
+    <form method="post"><?= csrf_field() . $hid ?><input type="text" name="reason" maxlength="120" placeholder="Reason (optional)">
+    <button class="btn <?= $banned ? 'ok-b' : 'red' ?> dw-btn" name="u_ban" value="1" onclick="return confirm('<?= $banned ? 'Unblock' : 'Block' ?> this user?')"><?= $banned ? 'Unblock user' : 'Block user' ?></button></form></div>
+  <h4>Reset password</h4>
+  <form method="post" autocomplete="off"><?= csrf_field() . $hid ?><input type="text" name="new_pw" minlength="8" placeholder="New password (8+ characters)" autocomplete="off" required>
+  <button class="btn ghost dw-btn" name="u_pw" value="1" onclick="return confirm('Change this user\'s password?')">Change password</button></form>
+  <h4>Private note</h4>
+  <form method="post"><?= csrf_field() . $hid ?><textarea name="note" maxlength="2000" rows="4" placeholder="Only admins see this"><?= e($note) ?></textarea>
+  <button class="btn dw-btn" name="u_note" value="1">Save note</button></form>
+</section>
+<a class="dw-full" href="/admin.php?p=users&u=<?= $uid ?>">Open full profile →</a>
+<?php return ob_get_clean();
+}
+
 /** WHERE clause + params for the Users list (search + filter). */
 function users_where(array $g): array {
     $w = []; $a = [];
@@ -176,6 +271,13 @@ function category_fields(): array {
 
 if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); acct_schema(db()); }
 // CSV export of orders (All orders page): cost and profit included, opens fine in Excel
+if (!empty($_SESSION['admin']) && isset($_GET['uq'])) {   // quick-manage drawer content (loaded by the Users list)
+    $retQ = (string)($_GET['ret'] ?? '');
+    if (!preg_match('#^/admin\.php\?p=users(&[\w%.+=@\-]*)?$#', $retQ)) $retQ = '/admin.php?p=users';
+    $retQ = preg_replace('/&(open|t)=[^&]*/', '', $retQ);
+    header('Content-Type: text/html; charset=utf-8'); header('Cache-Control: no-store');
+    echo user_drawer_html(db(), (int)$_GET['uq'], $retQ); exit;
+}
 if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'users') {
     $pdoU = db(); [$uw, $ua] = users_where($_GET);
     $so = USERS_SORT[$_GET['s'] ?? ''] ?? USERS_SORT['new'];
@@ -345,6 +447,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $tu = $pdo->prepare('SELECT id, email, banned FROM users WHERE id = ?'); $tu->execute([$tuid]); $tu = $tu->fetch();
             if (!$tu) go('users', 'User not found.');
             $back = 'users&u=' . $tuid;
+            $retP = (string)($_POST['ret'] ?? '');   // came from the quick-manage drawer: go back to the list and reopen the drawer
+            if (preg_match('#^/admin\.php\?p=users(&[\w%.+=@\-]*)?$#', $retP)) {
+                $retP = preg_replace('/&(open|t)=[^&]*/', '', $retP);
+                $tabK = (isset($_POST['u_adjust'])) ? 'bal' : ((isset($_POST['u_disc_add']) || isset($_POST['u_disc_del'])) ? 'disc' : 'sec');
+                $back = substr($retP, strlen('/admin.php?p=')) . '&open=' . $tuid . '&t=' . $tabK;
+            }
             $reason = mb_substr(trim((string)($_POST['reason'] ?? '')), 0, 120);
 
             if (isset($_POST['u_ban'])) {
@@ -1182,6 +1290,52 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 .um-g .card h3{margin-top:0}.um-note{font-size:.82rem;color:#6b7280;margin:6px 0}
 .badge.ban{background:#fee2e2;color:#b91c1c}.um-flag{display:inline-block;padding:2px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:.74rem;margin:2px 4px 2px 0}
 .um-pg{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}.um-pos{color:#16a34a}.um-neg{color:#dc2626}
+/* avatar + status pill */
+.ua{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-weight:700;flex:none}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:600;white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:currentColor}
+.pill.good{background:#dcfce7;color:#15803d}.pill.bad{background:#fee2e2;color:#b91c1c}
+/* user table */
+.ut td{vertical-align:middle}.ut tr.is-ban{background:rgba(220,38,38,.04)}
+.ut-u{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:12px;cursor:pointer;padding:2px 0;max-width:340px}
+.ut-u span{display:flex;flex-direction:column;min-width:0}.ut-u b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ut-u small{color:#6b7280;font-size:.76rem}
+.ut-u:hover b{color:#5b4bff}.ut-u:focus-visible{outline:2px solid #5b4bff;outline-offset:3px;border-radius:8px}
+/* quick-manage drawer */
+.dw[hidden]{display:none}.dw{position:fixed;inset:0;z-index:1000}
+.dw-bg{position:absolute;inset:0;background:rgba(15,18,40,.45);backdrop-filter:blur(2px);animation:dwf .15s ease}
+.dw-p{position:absolute;top:0;right:0;bottom:0;width:min(460px,100%);background:#fff;color:#1f2340;box-shadow:-12px 0 40px rgba(15,18,40,.18);display:flex;flex-direction:column;animation:dws .2s ease;overflow:hidden}
+#dwBody{overflow-y:auto;padding:22px 22px 26px;flex:1}
+.dw-x{position:absolute;top:12px;right:14px;width:34px;height:34px;border-radius:50%;border:0;background:#f1f2f9;font-size:1.3rem;line-height:1;cursor:pointer;z-index:2}
+.dw-x:hover{background:#e4e6f4}
+@keyframes dws{from{transform:translateX(30px);opacity:0}to{transform:none;opacity:1}}@keyframes dwf{from{opacity:0}to{opacity:1}}
+.dw-load{padding:40px 0;text-align:center;color:#6b7280}
+.dw-head{display:flex;align-items:center;gap:12px;padding-right:36px}.dw-who{display:flex;flex-direction:column;min-width:0;flex:1}.dw-who b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dw-who span{font-size:.78rem;color:#6b7280}
+.dw-bal{margin:18px 0 6px;padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#5b4bff,#8b6bff);color:#fff}
+.dw-bal small{display:block;opacity:.8;font-size:.78rem}.dw-bal b{font-size:1.8rem;letter-spacing:-.5px}
+.dw-tabs{display:flex;gap:4px;margin:16px 0;padding:4px;background:#f1f2f9;border-radius:12px}
+.dw-tabs button{flex:1;border:0;background:none;padding:8px 4px;border-radius:9px;font:inherit;font-size:.82rem;font-weight:600;color:#5b6078;cursor:pointer}
+.dw-tabs button.on{background:#fff;color:#5b4bff;box-shadow:0 1px 3px rgba(15,18,40,.12)}
+.dw-tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}.dw-tiles>div{padding:12px 14px;border:1px solid #e6e8f3;border-radius:12px}
+.dw-tiles small{display:block;color:#6b7280;font-size:.74rem}.dw-tiles b{font-size:1.05rem}
+.dw .pos{color:#16a34a}.dw .neg{color:#dc2626}.dw .mut,.mut{color:#9aa0b8}
+.dw-warn{margin:12px 0;padding:10px 12px;border-radius:10px;background:#fef3c7;color:#92400e;font-size:.82rem;line-height:1.5}
+.dw-info{display:grid;grid-template-columns:110px 1fr;gap:8px 12px;margin:16px 0;font-size:.88rem}.dw-info dt{color:#6b7280}.dw-info dd{margin:0;word-break:break-all}
+.dw h4{margin:22px 0 8px;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:#6b7280}
+.dw-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #eef0f8;font-size:.88rem}
+.dw-row small{display:block;color:#6b7280;font-size:.75rem}.dw-r{text-align:right;font-weight:600;display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.dw-l{display:block;margin:14px 0 6px;font-size:.8rem;font-weight:600;color:#4b5068}.dw-l small{font-weight:400;color:#9aa0b8}
+.dw input[type=text],.dw input[type=number],.dw select,.dw textarea{width:100%;box-sizing:border-box}
+.dw-big{font-size:1.5rem!important;font-weight:700;padding:12px 14px!important}
+.dw-seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:4px;background:#f1f2f9;border-radius:12px}
+.dw-seg input{position:absolute;opacity:0;pointer-events:none}.dw-seg span{display:block;text-align:center;padding:10px;border-radius:9px;font-weight:600;font-size:.88rem;cursor:pointer;color:#5b6078}
+.dw-seg input:checked+span{background:#fff;color:#5b4bff;box-shadow:0 1px 3px rgba(15,18,40,.12)}
+.dw-seg label:nth-child(2) input:checked+span{color:#dc2626}
+.dw-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.dw-chips button{border:1px solid #d9dce8;background:#fff;border-radius:999px;padding:5px 12px;font:inherit;font-size:.8rem;font-weight:600;cursor:pointer;color:#16a34a}
+.dw-chips button.m{color:#dc2626}.dw-chips button:hover{background:#f6f7fd}
+.dw-btn{width:100%;margin-top:16px;justify-content:center}
+.dw-box{padding:14px;border:1px solid #e6e8f3;border-radius:12px}.dw-box.bad{border-color:#fecaca;background:#fff7f7}.dw-box p{margin:4px 0 10px;font-size:.84rem;color:#6b7280}
+.dw-full{display:block;margin-top:24px;text-align:center;font-weight:600;color:#5b4bff;text-decoration:none}
+@media (max-width:640px){#dwBody{padding:18px 16px 24px}.dw-tabs button{font-size:.76rem}}
 </style>
 <?php if ($pu): /* ---------- one user ---------- */
   $banned = (int)$pu['banned'] === 1;
@@ -1191,7 +1345,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   if ($um['rej'] >= 2) $flags[] = $um['rej'] . ' rejected deposits';
   if ($pu['referred_by'] && $um['ref_by'] && $pu['last_ip'] && $um['ref_by'] && $acQ('SELECT 1 FROM users WHERE id = ? AND last_ip = ?', [(int)$pu['referred_by'], $pu['last_ip']])) $flags[] = 'same IP as the user who referred them';
   $rfd = count(array_filter($um['refs'], fn($r) => (int)$r['has_deposited'])); ?>
-<div class="card"><div class="card-h"><h3><?= e($pu['email']) ?> <span class="badge <?= $banned ? 'ban' : 'on' ?>"><?= $banned ? 'Blocked' : 'Active' ?></span></h3><a href="/admin.php?p=users">← All users</a></div>
+<div class="card"><div class="card-h"><h3 style="display:flex;align-items:center;gap:12px"><?= user_avatar($pu['email'], 46) ?><span><?= e($pu['email']) ?></span> <span class="pill <?= $banned ? 'bad' : 'good' ?>"><i></i><?= $banned ? 'Blocked' : 'Active' ?></span></h3><a href="/admin.php?p=users">← All users</a></div>
   <p class="um-note">ID <?= (int)$pu['id'] ?> · Joined <?= e($pu['created_at']) ?> · Last login <?= $pu['last_login_at'] ? e($pu['last_login_at']) : 'not recorded yet' ?><?= $pu['last_ip'] ? ' · IP ' . e($pu['last_ip']) : '' ?><?= $um['ref_by'] ? ' · Referred by <a href="/admin.php?p=users&u=' . (int)$um['ref_by']['id'] . '">' . e($um['ref_by']['email']) . '</a>' : '' ?></p>
   <?php foreach ($flags as $fl): ?><span class="um-flag">⚠ <?= e($fl) ?></span><?php endforeach; ?></div>
 <div class="stats" style="margin-top:14px">
@@ -1275,12 +1429,15 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <a class="btn ghost" href="<?= e('/admin.php?' . http_build_query(array_filter(['export' => 'users', 'q' => $uq2, 'f' => $uf, 's' => $uSort]))) ?>">Download CSV</a>
   </form>
   <p class="um-note"><?= number_format($um['total']) ?> user(s) · page <?= (int)$uPg ?> of <?= (int)$um['pages'] ?></p>
-  <div class="tw"><table><thead><tr><th>#</th><th>Email</th><th>Balance</th><th class="hm">Deposited</th><th class="hm">Spent</th><th class="hm">Orders</th><th class="hm">Refs</th><th>Status</th><th class="hm">Joined</th><th></th></tr></thead><tbody>
+  <div class="tw"><table class="ut"><thead><tr><th>User</th><th>Balance</th><th class="hm">Deposited</th><th class="hm">Spent</th><th class="hm">Orders</th><th>Status</th><th class="hm">Last seen</th><th></th></tr></thead><tbody>
   <?php foreach ($ul as $x): ?>
-  <tr><td><?= (int)$x['id'] ?></td><td><a href="/admin.php?p=users&u=<?= (int)$x['id'] ?>"><?= e($x['email']) ?></a></td><td class="money"><?= money($x['coins']) ?></td><td class="hm money"><?= money($x['dep']) ?></td><td class="hm money"><?= money($x['spent']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td><td class="hm"><?= (int)$x['refs'] ?></td>
-  <td><span class="badge <?= $x['banned'] ? 'ban' : 'on' ?>"><?= $x['banned'] ? 'Blocked' : 'Active' ?></span></td><td class="hm"><?= e(substr((string)$x['created_at'], 0, 10)) ?></td>
-  <td class="ra"><a class="btn sm ghost" href="/admin.php?p=users&u=<?= (int)$x['id'] ?>">Manage</a></td></tr>
-  <?php endforeach; if (!$ul): ?><tr><td colspan="10">No users match.</td></tr><?php endif; ?></tbody></table></div>
+  <tr class="<?= $x['banned'] ? 'is-ban' : '' ?>">
+    <td><button type="button" class="ut-u" data-uq="<?= (int)$x['id'] ?>" data-t="ov"><?= user_avatar($x['email'], 38) ?><span><b><?= e($x['email']) ?></b><small>ID <?= (int)$x['id'] ?> · joined <?= e(substr((string)$x['created_at'], 0, 10)) ?><?= (int)$x['refs'] ? ' · ' . (int)$x['refs'] . ' referral' . ((int)$x['refs'] > 1 ? 's' : '') : '' ?></small></span></button></td>
+    <td class="money"><b><?= money($x['coins']) ?></b></td><td class="hm money"><?= money($x['dep']) ?></td><td class="hm money"><?= money($x['spent']) ?></td><td class="hm"><?= (int)$x['ords'] ?></td>
+    <td><span class="pill <?= $x['banned'] ? 'bad' : 'good' ?>"><i></i><?= $x['banned'] ? 'Blocked' : 'Active' ?></span></td>
+    <td class="hm"><small><?= $x['last_login_at'] ? e(substr((string)$x['last_login_at'], 0, 16)) : '—' ?></small></td>
+    <td class="ra"><div class="acts"><button type="button" class="btn sm" data-uq="<?= (int)$x['id'] ?>" data-t="bal">＋ Balance</button><button type="button" class="btn sm ghost" data-uq="<?= (int)$x['id'] ?>" data-t="ov">Manage</button></div></td></tr>
+  <?php endforeach; if (!$ul): ?><tr><td colspan="8">No users match.</td></tr><?php endif; ?></tbody></table></div>
   <?php if ($um['pages'] > 1): ?><div class="um-pg">
     <?php if ($uPg > 1): ?><a class="btn sm ghost" href="<?= e($uLink(['pg' => $uPg - 1])) ?>">← Prev</a><?php endif; ?>
     <span><?= (int)$uPg ?> / <?= (int)$um['pages'] ?></span>
@@ -1289,6 +1446,32 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 <div class="card" style="margin-top:18px"><h3>Latest admin actions</h3>
 <?php foreach ($um['log'] as $l): ?><div class="mini"><div><b><?= e($l['action']) ?></b> · <?= e((string)$l['email']) ?><small><?= e($l['detail']) ?></small></div><small><?= e($l['created_at']) ?></small></div>
 <?php endforeach; if (!$um['log']) echo '<div class="empty">No actions yet. Blocking a user, changing a balance or giving a discount is recorded here.</div>'; ?></div>
+
+<div class="dw" id="dw" hidden><div class="dw-bg" data-dwclose></div>
+  <aside class="dw-p" role="dialog" aria-label="Manage user"><button type="button" class="dw-x" data-dwclose aria-label="Close">×</button><div id="dwBody"></div></aside></div>
+<script>
+(function(){
+  var dw=document.getElementById('dw'), body=document.getElementById('dwBody'); if(!dw||!body) return;
+  var cur=null;
+  function tab(n){ [].forEach.call(body.querySelectorAll('[data-tab]'),function(b){b.classList.toggle('on',b.dataset.tab===n);}); [].forEach.call(body.querySelectorAll('[data-pane]'),function(p){p.hidden=p.dataset.pane!==n;}); }
+  function openU(id,t){
+    cur=id; dw.hidden=false; document.body.style.overflow='hidden'; body.innerHTML='<div class="dw-load">Loading…</div>';
+    fetch('/admin.php?uq='+encodeURIComponent(id)+'&ret='+encodeURIComponent(location.pathname+location.search),{credentials:'same-origin'})
+      .then(function(r){return r.text();}).then(function(h){ if(cur!==id) return; body.innerHTML=h; tab(t||'ov'); body.scrollTop=0; })
+      .catch(function(){ body.innerHTML='<div class="err" style="margin:20px">Could not load this user. Try again.</div>'; });
+  }
+  function closeU(){ dw.hidden=true; cur=null; document.body.style.overflow=''; }
+  document.addEventListener('click',function(e){
+    var o=e.target.closest('[data-uq]'); if(o){ e.preventDefault(); openU(o.dataset.uq,o.dataset.t); return; }
+    if(e.target.closest('[data-dwclose]')){ closeU(); return; }
+    var tb=e.target.closest('#dwBody [data-tab]'); if(tb){ tab(tb.dataset.tab); return; }
+    var ch=e.target.closest('#dwBody [data-amt]');
+    if(ch){ var a=body.querySelector('input[name=amount]'), r=body.querySelector('input[name=dir][value='+ch.dataset.dir+']'); if(a) a.value=ch.dataset.amt; if(r) r.checked=true; }
+  });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&!dw.hidden) closeU(); });
+  var m=location.search.match(/[?&]open=(\d+)(?:&t=(\w+))?/); if(m) openU(m[1],m[2]||'ov');
+})();
+</script>
 <?php endif; ?>
 
 <?php /* ============================ TRANSACTIONS ============================ */ elseif ($page === 'transactions'):
