@@ -547,13 +547,13 @@ function page_head(string $title, string $bodyClass): void { ?>
 /* Night mode colours live at the end of style.css (html.sx-dark ...) */
 html.sx-dark{color-scheme:dark}
 /* Day / Night switch (side menu) */
-.sx-tm{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;padding:9px 12px;border-radius:12px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.14);font-size:13px;font-weight:600;color:#475569}
-.sx-tm .sx-tl{display:flex;align-items:center;gap:8px}
-.sx-sw{position:relative;flex:none;width:52px;height:28px;border-radius:99px;border:0;padding:0;cursor:pointer;background:linear-gradient(135deg,#fde68a,#fbbf24);transition:background .25s;box-shadow:inset 0 1px 3px rgba(0,0,0,.18)}
+.sx-tm{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px;padding:6px 10px;border-radius:10px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.14);font-size:12px;font-weight:600;color:#475569}
+.sx-tm .sx-tl{display:flex;align-items:center;gap:6px}
+.sx-sw{position:relative;flex:none;width:38px;height:21px;border-radius:99px;border:0;padding:0;cursor:pointer;background:linear-gradient(135deg,#fde68a,#fbbf24);transition:background .25s;box-shadow:inset 0 1px 2px rgba(0,0,0,.18)}
 .sx-sw:focus-visible{outline:2px solid #6366f1;outline-offset:2px}
-.sx-sw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;display:grid;place-items:center;font-style:normal;font-size:13px;line-height:1;transition:transform .25s;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.sx-sw i{position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;display:grid;place-items:center;font-style:normal;font-size:10px;line-height:1;transition:transform .25s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .sx-sw[aria-checked="true"]{background:linear-gradient(135deg,#312e81,#4338ca)}
-.sx-sw[aria-checked="true"] i{transform:translateX(24px)}
+.sx-sw[aria-checked="true"] i{transform:translateX(17px)}
 @media(prefers-reduced-motion:reduce){.sx-sw,.sx-sw i{transition:none}}
 </style>
 </head><body class="<?= e($bodyClass) ?>">
