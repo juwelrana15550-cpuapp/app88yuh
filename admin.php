@@ -1,13 +1,16 @@
 <?php require __DIR__ . '/lib.php';
 require __DIR__ . '/supplier_hot.php';
+require __DIR__ . '/payment_methods.php';
+require_once __DIR__ . '/sms_inbox.php';     // SMS inbox (Admin > Transactions)
+require_once __DIR__ . '/binance_pay.php';   // used Binance / BSC transaction IDs   // payment methods + deposit rules (Admin > Payment methods)
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''; $supTest = null;
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''; $supTest = null; $pmErr = ''; $depErr = ''; $txMsg = ''; $bnErr = ''; $bnTest = null;
 $page = null;      // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'import', 'categories', 'users', 'settings', 'supplier'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings', 'supplier', 'payments', 'transactions'];
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null): void {
@@ -88,7 +91,117 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (!empty($_SESSION['admin'])) {
         $pdo = db();
 
-        if (isset($_POST['save_settings'])) {
+        if (isset($_POST['save_pm'])) {
+            $page = 'payments';
+            $editId = trim((string)($_POST['pm_edit_id'] ?? ''));
+            $isEdit = $editId !== '';
+            if ($isEdit && !isset(pm_all()[$editId])) go('payments');
+            [$f, $pmErr] = pm_fields_from_post($isEdit ? $editId : null);
+            $pmV = [   // values to put back in the dialog if something goes wrong
+                'name' => $f['name'], 'acct' => $f['acct'], 'acct_label' => $f['acct_label'], 'sub' => $f['sub'], 'ussd' => $f['ussd'],
+                'tid_label' => $f['tid_label'], 'color' => $f['color'], 'is_usd' => $f['is_usd'], 'enabled' => $f['enabled'],
+                'min_amt' => trim((string)($_POST['pm_min'] ?? '')), 'max_amt' => trim((string)($_POST['pm_max'] ?? '')),
+                'fee_pct' => trim((string)($_POST['pm_fee'] ?? '')), 'bonus_pct' => trim((string)($_POST['pm_bonus'] ?? '')),
+                'steps' => (string)($_POST['pm_steps'] ?? ''), 'notice' => $f['notice'],
+                'has_logo' => $isEdit ? (int)!empty(pm_all()[$editId]['has_logo']) : 0,
+            ];
+            if ($pmErr !== '') {
+                $reopen = ['t' => 'pm', 'id' => $editId, 'v' => $pmV];
+            } else {
+                $pid = pm_store($isEdit ? $editId : null, $f);
+                $hasFile = ($_FILES['pm_logo']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE;
+                if ($hasFile) {
+                    $logoErr = pm_save_logo($pid, $_FILES['pm_logo']);
+                    if ($logoErr !== '') {
+                        $pmErr = 'The method was saved, but the logo was not: ' . $logoErr;
+                        $pmV['has_logo'] = (int)!empty(pm_all()[$pid]['has_logo']);
+                        $reopen = ['t' => 'pm', 'id' => $pid, 'v' => $pmV];
+                    }
+                } elseif ($isEdit && !empty($_POST['pm_remove_logo'])) {
+                    pm_remove_logo($pid);
+                }
+                if ($pmErr === '') go('payments', $isEdit ? 'Payment method saved.' : 'Payment method added.');
+            }
+
+        } elseif (isset($_POST['pm_toggle'])) {
+            pm_toggle((string)$_POST['pm_toggle']);
+            go('payments', 'Payment method updated.');
+
+        } elseif (isset($_POST['pm_up']) || isset($_POST['pm_down'])) {
+            pm_move((string)($_POST['pm_up'] ?? $_POST['pm_down']), isset($_POST['pm_up']) ? -1 : 1);
+            go('payments');
+
+        } elseif (isset($_POST['pm_delete'])) {
+            pm_delete((string)$_POST['pm_delete']);
+            go('payments', 'Payment method deleted.');
+
+        } elseif (isset($_POST['save_dep'])) {
+            $page = 'payments';
+            $mn = (float)str_replace(',', '', trim((string)($_POST['dep_min'] ?? '')));
+            $mx = (float)str_replace(',', '', trim((string)($_POST['dep_max'] ?? '')));
+            $pn = (int)($_POST['dep_pending'] ?? 0);
+            $chips = [];
+            foreach (explode(',', (string)($_POST['dep_chips'] ?? '')) as $c) {
+                $c = (int)trim($c);
+                if ($c >= 1 && $c <= 10000000 && !in_array($c, $chips, true)) $chips[] = $c;
+            }
+            if ($mn < 1) $depErr = 'Minimum deposit must be at least 1.';
+            elseif ($mx < $mn) $depErr = 'Maximum deposit must be bigger than the minimum.';
+            elseif ($pn < 1 || $pn > 50) $depErr = 'Pending deposits per user must be between 1 and 50.';
+            else {
+                save_setting('dep_on', empty($_POST['dep_on']) ? '0' : '1');
+                save_setting('dep_min', (string)$mn);
+                save_setting('dep_max', (string)$mx);
+                save_setting('dep_max_pending', (string)$pn);
+                save_setting('dep_chips', implode(',', array_slice($chips, 0, 8)));
+                save_setting('dep_notice', mb_substr(trim((string)($_POST['dep_notice'] ?? '')), 0, 300));
+                save_setting('dep_off_msg', mb_substr(trim((string)($_POST['dep_off_msg'] ?? '')), 0, 300));
+                go('payments', 'Deposit rules saved.');
+            }
+
+        } elseif (isset($_POST['save_bn']) || isset($_POST['test_bn'])) {
+            $page = 'payments';
+            $rpc = trim((string)($_POST['bn_rpc'] ?? ''));
+            if ($rpc !== '' && !preg_match('#^https://[^\s]+$#i', $rpc)) {
+                $bnErr = 'The BSC RPC URL must start with https:// (or leave it empty).';
+            } else {
+                $k = trim((string)($_POST['bn_key'] ?? '')); $sc = trim((string)($_POST['bn_secret'] ?? ''));
+                if (!empty($_POST['bn_remove_keys'])) { save_setting('bn_api_key', ''); save_setting('bn_api_secret', ''); }
+                else {
+                    if ($k !== '') save_setting('bn_api_key', $k);
+                    if ($sc !== '') save_setting('bn_api_secret', $sc);
+                }
+                $ids = array_keys(pm_all());
+                foreach (['bn_pay_method', 'bn_bsc_method'] as $sk) {
+                    $v = (string)($_POST[$sk] ?? '');
+                    save_setting($sk, in_array($v, $ids, true) ? $v : '');
+                }
+                save_setting('bn_bsc_conf', (string)max(1, min(200, (int)($_POST['bn_conf'] ?? 15) ?: 15)));
+                save_setting('bn_bsc_rpc', $rpc);
+                $bh = (string)($_POST['bn_base'] ?? '');
+                save_setting('bn_api_base', in_array($bh, BN_HOSTS, true) ? $bh : 'api.binance.com');
+                if (isset($_POST['test_bn'])) $bnTest = bn_test();
+                else go('payments', 'Binance settings saved.');
+            }
+
+        } elseif (isset($_POST['sms_recheck'])) {
+            $page = 'transactions';
+            sms_schema($pdo);
+            $sid = (int)$_POST['sms_recheck'];
+            $did = 0;
+            try { $did = sms_match_pending($pdo, $sid, $bonus); } catch (Throwable $ex) { error_log('[sms recheck] ' . $ex->getMessage()); }
+            if ($did) go('transactions', 'SMS matched: deposit #' . $did . ' was approved and the balance added.');
+            $txMsg = sms_diagnose($pdo, $sid);
+
+        } elseif (isset($_POST['sms_recheck_all'])) {
+            sms_schema($pdo);
+            $n = 0;
+            foreach ($pdo->query('SELECT id FROM sms_inbox WHERE used = 0 ORDER BY id DESC LIMIT 200')->fetchAll(PDO::FETCH_COLUMN) as $sid) {
+                try { if (sms_match_pending($pdo, (int)$sid, $bonus)) $n++; } catch (Throwable $ex) { error_log('[sms recheck] ' . $ex->getMessage()); }
+            }
+            go('transactions', $n ? $n . ' deposit(s) matched an SMS and were approved.' : 'No waiting deposit matches an unused SMS right now.');
+
+        } elseif (isset($_POST['save_settings'])) {
             $page = 'settings';
             $name = trim($_POST['site_name'] ?? '');
             $uploads = []; $removes = [];
@@ -173,27 +286,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $supTest = suphot_call('GET', '/balance', [], null, 15);
             }
-
-        } elseif (isset($_POST['bm_import']) || isset($_POST['bm_add_one']) || isset($_POST['bm_dismiss']) || isset($_POST['bm_check_now'])) {
-            // Import All (ticked list), one-click add from the new-product alert, dismiss alerts, check for new products now
-            $back = in_array($_POST['back'] ?? '', ADMIN_PAGES, true) ? $_POST['back'] : 'import';
-            if (!bm_connected()) { flash('err', 'Connect Supplier 2 first (Admin > Supplier API).'); go($back); }
-            if (isset($_POST['bm_check_now'])) {
-                $n = bm_check_new($pdo);
-                go($back, $n ? $n . ' new product(s) found at Supplier 2.' : 'Checked. No new products at Supplier 2.');
-            }
-            if (isset($_POST['bm_dismiss'])) {
-                if ($_POST['bm_dismiss'] === 'all') $pdo->exec('UPDATE bm_seen SET status = 1 WHERE status = 0');
-                else $pdo->prepare('UPDATE bm_seen SET status = 1 WHERE supplier_id = ?')->execute([(int)$_POST['bm_dismiss']]);
-                go($back, 'Alert dismissed.');
-            }
-            $ids = isset($_POST['bm_add_one']) ? [(int)$_POST['bm_add_one']]
-                 : array_map('intval', array_filter(explode(',', (string)($_POST['ids_csv'] ?? '')), 'strlen'));   // one field, so a long list never hits PHP's max_input_vars
-            $catSel = ((int)($_POST['category_id'] ?? 0)) ?: null;
-            $r = bm_add_products($pdo, $ids, $catSel, isset($_POST['bm_add_one']) ? true : !empty($_POST['publish']));
-            $msg = bm_import_msg($r);
-            if ($r['added'] === 0 && ($r['failed'] || !$ids)) { flash('err', $ids ? $msg : 'Tick at least one product.'); go($back); }
-            go($back, $msg);
 
         } elseif (isset($_POST['add_product']) || isset($_POST['update_product'])) {
             $page = 'products';
@@ -343,10 +435,25 @@ if ($page === null) {
     $page = $_GET['p'] ?? 'overview';
     if (!in_array($page, ADMIN_PAGES, true)) $page = 'overview';
 }
-$bmNew = ['count' => 0, 'items' => []];   // new-product alerts from Supplier 2
-if (bm_connected()) { bm_check_new_soon($pdo); $bmNew = bm_new_alerts($pdo, 5); }
 $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
+$smsC = ['all' => 0, 'unused' => 0, 'used' => 0, 'other' => 0, 'bn' => 0, 'last' => null]; $smsRows = []; $bnRows = [];
+$tf = in_array($_GET['f'] ?? '', ['all', 'unused', 'used', 'other', 'binance'], true) ? $_GET['f'] : 'all';
+try {
+    sms_schema($pdo);
+    $x = $pdo->query("SELECT COUNT(*) a, COALESCE(SUM(kind='in' AND used=0),0) u, COALESCE(SUM(used=1),0) d, COALESCE(SUM(kind<>'in'),0) o, MAX(created_at) m FROM sms_inbox")->fetch();
+    $smsC = ['all' => (int)$x['a'], 'unused' => (int)$x['u'], 'used' => (int)$x['d'], 'other' => (int)$x['o'], 'bn' => 0, 'last' => $x['m']];
+    if ($page === 'transactions') {
+        bn_ensure_table($pdo);
+        $smsC['bn'] = (int)$pdo->query('SELECT COUNT(*) FROM auto_pay_used')->fetchColumn();
+        if ($tf === 'binance') {
+            $bnRows = $pdo->query('SELECT a.*, u.email FROM auto_pay_used a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.created_at DESC LIMIT 200')->fetchAll();
+        } else {
+            $w = ['unused' => "WHERE s.kind = 'in' AND s.used = 0", 'used' => 'WHERE s.used = 1', 'other' => "WHERE s.kind <> 'in'", 'all' => ''][$tf];
+            $smsRows = $pdo->query("SELECT s.*, u.email FROM sms_inbox s LEFT JOIN deposits d ON d.id = s.deposit_id LEFT JOIN users u ON u.id = d.user_id $w ORDER BY s.id DESC LIMIT 200")->fetchAll();
+        }
+    }
+} catch (Throwable $ex) { error_log('[admin transactions] ' . $ex->getMessage()); }
 $pendOrders = $pdo->query("SELECT o.*, u.email, p.supplier_type AS sup_t, p.supplier_id AS sup_id FROM orders o JOIN users u ON u.id = o.user_id LEFT JOIN products p ON p.id = o.product_id WHERE o.status='pending' ORDER BY o.id")->fetchAll();
 $coins = (float)$pdo->query('SELECT COALESCE(SUM(coins),0) FROM users')->fetchColumn();
 $products = $pdo->query('SELECT * FROM products ORDER BY id DESC')->fetchAll();
@@ -369,6 +476,8 @@ $hist = $pdo->query("SELECT d.*, u.email FROM deposits d JOIN users u ON u.id = 
 function ai(string $n): string {
     static $x = [
         'grid'    => '<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
+        'sms'     => '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+        'card'    => '<rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/>',
         'sliders' => '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
         'pencil'  => '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
         'trash'   => '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
@@ -381,8 +490,8 @@ function ai(string $n): string {
 
 $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
-    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']]],
-    'Catalog' => [['products', 'Products', 'bag', 0], ['import', 'Import products', 'download', $bmNew['count']], ['categories', 'Categories', 'grid', 0]],
+    'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']], ['payments', 'Payment methods', 'card', 0], ['transactions', 'Transactions', 'sms', (int)$smsC['unused']]],
+    'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
     'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0], ['supplier', 'Supplier API', 'plug', 0]],
 ];
 $titles = [
@@ -390,10 +499,11 @@ $titles = [
     'orders'     => ['Orders', 'Deliver or cancel pending orders'],
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
-    'import'     => ['Import products', 'Tick the Supplier 2 products you want and add them all at once'],
     'categories' => ['Categories', 'Group products and choose their icons'],
     'users'      => ['Users', 'Latest 100 registered users'],
     'settings'   => ['Site settings', 'Name, headline, support links, logo and banner'],
+    'transactions' => ['Transactions', 'SMS received from your wallets, with used and unused TrxIDs'],
+    'payments'   => ['Payment methods', 'Accounts, limits, fees and the deposit on/off switch'],
     'supplier'   => ['Supplier API', 'Connect two suppliers; each product is bought from the supplier it is linked to'],
 ];
 $sv = fn(string $k) => e($_POST[$k] ?? setting($k));
@@ -434,22 +544,9 @@ $lg = media_url('logo');
   <div><h1><?= e($titles[$page][0]) ?></h1><p><?= e($titles[$page][1]) ?></p></div>
   <?php if ($page === 'products'): ?><button type="button" class="btn" id="addProduct"><?= ai('plus') ?>Add product</button><?php endif; ?>
   <?php if ($page === 'categories'): ?><button type="button" class="btn" id="addCategory"><?= ai('plus') ?>Add category</button><?php endif; ?>
+  <?php if ($page === 'payments'): ?><button type="button" class="btn" id="addPm"><?= ai('plus') ?>Add method</button><?php endif; ?>
 </div>
 <?php flash_html(); ?>
-
-<?php /* ===== NEW PRODUCT ALERT (every admin page except Import, which shows the full list) ===== */ if ($bmNew['count'] && $page !== 'import'): ?>
-<div class="card" style="border-left:4px solid #4f46e5">
-  <div class="card-h"><h3>🔔 <?= (int)$bmNew['count'] ?> new product<?= $bmNew['count'] > 1 ? 's' : '' ?> at Supplier 2</h3><a href="/admin.php?p=import">Review all</a></div>
-  <?php foreach ($bmNew['items'] as $nw): $sp = bm_sell_price((float)$nw['price']); ?>
-    <div class="mini"><div><b><?= e($nw['name'] !== '' ? $nw['name'] : 'Product ' . (int)$nw['supplier_id']) ?></b><small>ID <?= (int)$nw['supplier_id'] ?> · stock <?= number_format((int)$nw['stock']) ?> · <?= $sp > 0 ? 'sell ' . e(money($sp)) : e('$' . rtrim(rtrim(number_format((float)$nw['price'], 4), '0'), '.')) . ' (set the rate to see the ৳ price)' ?></small></div>
-      <form method="post" class="acts"><?= csrf_field() ?><input type="hidden" name="back" value="<?= e($page) ?>">
-        <button class="btn sm ok-b" name="bm_add_one" value="<?= (int)$nw['supplier_id'] ?>">Add</button>
-        <button class="btn sm ghost" name="bm_dismiss" value="<?= (int)$nw['supplier_id'] ?>">Dismiss</button></form></div>
-  <?php endforeach; ?>
-  <?php if ($bmNew['count'] > count($bmNew['items'])): ?><div class="mini"><small>…and <?= (int)($bmNew['count'] - count($bmNew['items'])) ?> more. <a href="/admin.php?p=import">Open the list</a>.</small></div><?php endif; ?>
-  <form method="post" style="margin-top:10px"><?= csrf_field() ?><input type="hidden" name="back" value="<?= e($page) ?>"><button class="btn sm ghost" name="bm_dismiss" value="all">Dismiss all</button></form>
-</div>
-<?php endif; ?>
 
 <?php /* ============================ OVERVIEW ============================ */ if ($page === 'overview'): ?>
 <div class="stats">
@@ -554,51 +651,6 @@ $lg = media_url('logo');
   <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" id="pSave" name="add_product" value="1">Save product</button></div>
 </form></dialog>
 
-<?php /* ============================ IMPORT (Supplier 2) ============================ */ elseif ($page === 'import'): ?>
-<?php if (!bm_connected()): ?>
-<div class="card"><div class="empty">Connect Supplier 2 first. <a href="/admin.php?p=supplier">Open Supplier API</a></div></div>
-<?php else:
-  $imp = bm_list_all(); $impLinked = bm_linked_ids($pdo);
-  $impNew = []; foreach ($pdo->query('SELECT supplier_id FROM bm_seen WHERE status = 0')->fetchAll(PDO::FETCH_COLUMN) as $x) $impNew[(int)$x] = true;
-  $impTodo = 0; foreach ($imp['items'] as $iid => $_) if (!isset($impLinked[$iid])) $impTodo++; ?>
-<?php if (bm_rate() <= 0): ?><div class="err">Set the USD → ৳ rate first, otherwise prices cannot be calculated. <a href="/admin.php?p=supplier">Open Supplier API</a></div><?php endif; ?>
-<?php if (!$imp['ok']): ?><div class="err">Could not read the full Supplier 2 catalogue: <?= e($imp['error']) ?><?= $imp['items'] ? ' Showing the ' . count($imp['items']) . ' products that were read.' : '' ?></div><?php endif; ?>
-<?php if ($imp['items']): ?>
-<form method="post" id="impForm"><?= csrf_field() ?><input type="hidden" name="back" value="import"><input type="hidden" name="ids_csv" id="ids_csv" value="">
-<div class="card">
-  <div class="tb">
-    <div class="srch grow"><?= ai('search') ?><input type="search" id="iq" placeholder="Search by name, ID or domain" autocomplete="off"></div>
-    <label class="chk" style="margin:0"><input type="checkbox" id="ihide" checked> <span>Hide already added</span></label>
-    <label class="chk" style="margin:0"><input type="checkbox" id="istock"> <span>In stock only</span></label>
-    <?php if ($impNew): ?><label class="chk" style="margin:0"><input type="checkbox" id="inew"> <span>New only (<?= count($impNew) ?>)</span></label><?php endif; ?>
-  </div>
-  <p style="margin:8px 0"><small id="icount"><?= count($imp['items']) ?> products at Supplier 2 · <?= $impTodo ?> not in your shop yet</small></p>
-  <div class="tw"><table id="itable"><thead><tr><th style="width:36px"><input type="checkbox" id="iall" aria-label="Select all shown"></th><th>Product</th><th class="hm">Supplier price</th><th>Your price</th><th>Stock</th></tr></thead><tbody>
-  <?php foreach ($imp['items'] as $iid => $it): $added = isset($impLinked[$iid]); $sp = bm_sell_price((float)$it['price']); ?>
-  <tr data-s="<?= e(mb_strtolower($it['name'] . ' ' . $iid . ' ' . $it['domain'])) ?>" data-added="<?= $added ? 1 : 0 ?>" data-stock="<?= (int)$it['stock'] ?>" data-new="<?= isset($impNew[$iid]) && !$added ? 1 : 0 ?>"<?= $added ? ' style="opacity:.55"' : '' ?>>
-    <td><input type="checkbox" class="ichk" value="<?= (int)$iid ?>"<?= ($added || $sp <= 0) ? ' disabled' : '' ?> aria-label="Select <?= e($it['name']) ?>"></td>
-    <td><b><?= e($it['name']) ?></b><?php if ($added): ?><span class="tag">Added</span><?php elseif (isset($impNew[$iid])): ?><span class="tag">New</span><?php endif; ?><small>ID <?= (int)$iid ?><?= $it['domain'] !== '' ? ' · ' . e($it['domain']) : '' ?></small></td>
-    <td class="money hm">$<?= e(rtrim(rtrim(number_format((float)$it['price'], 4, '.', ''), '0'), '.')) ?></td>
-    <td class="money"><?= $sp > 0 ? money($sp) : '<small>—</small>' ?></td>
-    <td><?= number_format((int)$it['stock']) ?></td>
-  </tr>
-  <?php endforeach; ?></tbody></table></div>
-  <div class="empty" id="inone" style="display:none">No products match.</div>
-  <div class="grid2" style="margin-top:14px">
-    <div><label style="margin-top:0">Category for the added products</label><select name="category_id"><?= $catOpts(0) ?></select></div>
-    <div><label style="margin-top:0">&nbsp;</label><label class="chk"><input type="checkbox" name="publish" value="1" checked> <span>Show them in the shop right away</span></label></div>
-  </div>
-  <small>Name, description, domain and price follow Supplier 2 automatically (price = supplier price × rate + profit %). You can still edit any product later.</small>
-  <div class="savebar" style="display:flex;flex-wrap:wrap;gap:8px">
-    <button class="btn" id="iadd" name="bm_import" value="1" disabled>Add selected (0)</button>
-    <button class="btn ghost" name="bm_check_now" value="1" formnovalidate>Check for new products now</button>
-    <?php if ($impNew): ?><button class="btn ghost" name="bm_dismiss" value="all" formnovalidate>Dismiss new-product alerts</button><?php endif; ?>
-  </div>
-</div>
-</form>
-<?php endif; ?>
-<?php endif; ?>
-
 <?php /* ============================ CATEGORIES ============================ */ elseif ($page === 'categories'): ?>
 <div class="card">
   <div class="tw"><table><thead><tr><th>Category</th><th class="hm">Products</th><th class="hm">Sort</th><th>Status</th><th></th></tr></thead><tbody>
@@ -651,6 +703,222 @@ $lg = media_url('logo');
   <?php endforeach; if (!$users): ?><tr><td colspan="5">No users yet.</td></tr><?php endif; ?></tbody></table></div>
   <div class="empty" id="unone" style="display:none">No matching users.</div>
 </div>
+
+<?php /* ============================ TRANSACTIONS ============================ */ elseif ($page === 'transactions'):
+  $provM = [];
+  foreach (pm_all() as $pm_) { $sl = sms_slug((string)$pm_['name']); if ($sl !== '' && !isset($provM[$sl])) $provM[$sl] = $pm_; }
+  $chip = function (string $prov) use ($provM): string {
+      if ($prov === '') return '<small>—</small>';
+      if (isset($provM[$prov])) return '<span class="tx-w">' . pm_logo_html($provM[$prov], 24) . '<b>' . e($provM[$prov]['name']) . '</b></span>';
+      return '<span class="tx-w"><span class="pm-lg" style="width:24px;height:24px;border-radius:7px;font-size:12px;--c:#7a7f99">' . e(strtoupper(substr($prov, 0, 1))) . '</span><b>' . e(ucfirst($prov)) . '</b></span>';
+  };
+  $tabs = ['all' => ['All SMS', $smsC['all']], 'unused' => ['Unused TrxID', $smsC['unused']], 'used' => ['Used TrxID', $smsC['used']], 'other' => ['Other SMS', $smsC['other']], 'binance' => ['Binance / BSC used', $smsC['bn']]];
+  $hook = (string)getenv('SMS_SECRET') !== ''; ?>
+<?= pm_css() ?>
+<style>
+.tx-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.tx-tabs a{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid rgba(128,128,128,.35);text-decoration:none;color:inherit;font-weight:600;font-size:.92em}
+.tx-tabs a.on{background:rgba(91,75,255,.14);border-color:rgba(91,75,255,.65)}
+.tx-tabs a b{font-weight:800}
+.tx-tabs a.al b{color:#e0861a}
+.tx-bar{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:12px}
+.tx-bar .srch{min-width:200px}
+.tx-info{font-size:.88em;opacity:.8;display:flex;align-items:center;gap:6px}
+.tx-sc{max-height:calc(100vh - 330px);min-height:240px;overflow:auto}
+.tx-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:700;letter-spacing:.02em;word-break:break-all}
+.tx-cp{border:0;background:none;color:inherit;opacity:.65;cursor:pointer;font-size:.82em;padding:2px 6px;border-radius:6px}
+.tx-cp:hover{opacity:1;background:rgba(128,128,128,.18)}
+.tx-w{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.tx-t{white-space:nowrap;font-size:.88em;opacity:.85}
+.tx-meta{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin-top:14px;font-size:.95em}
+.tx-meta span:nth-child(odd){opacity:.65}
+.tx-msg{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;padding:12px;border:1px solid rgba(128,128,128,.3);border-radius:10px;font:inherit;font-size:.93em}
+</style>
+<?php if ($txMsg): ?><div class="err"><?= e($txMsg) ?></div><?php endif; ?>
+<nav class="tx-tabs">
+<?php foreach ($tabs as $k => [$lb, $n]): ?>
+  <a href="/admin.php?p=transactions&amp;f=<?= $k ?>" class="<?= $tf === $k ? 'on' : '' ?><?= $k === 'unused' && $n ? ' al' : '' ?>"><?= e($lb) ?> <b><?= (int)$n ?></b></a>
+<?php endforeach; ?>
+</nav>
+<div class="tx-bar">
+  <div class="srch grow"><?= ai('search') ?><input type="search" id="txq" placeholder="Search TrxID, amount, sender, user…" autocomplete="off"></div>
+  <span class="tx-info"><?= $smsC['last'] ? 'Last SMS: ' . e(date('d M, h:i A', strtotime((string)$smsC['last']))) : 'No SMS received yet' ?></span>
+  <label class="chk" style="margin:0"><input type="checkbox" id="txauto" checked> <span>Auto-refresh</span></label>
+  <?php if ($tf !== 'binance' && $smsC['unused']): ?><form method="post" class="inl"><?= csrf_field() ?><button class="btn sm" name="sms_recheck_all" value="1">Re-check all unused</button></form><?php endif; ?>
+</div>
+
+<div class="card" style="padding-bottom:6px">
+<?php if ($tf === 'binance'): ?>
+  <div class="tw tx-sc"><table id="txtable"><thead><tr><th>Time</th><th>Type</th><th>Transaction ID</th><th>Credited</th><th class="hm">User</th><th>Status</th></tr></thead><tbody>
+  <?php foreach ($bnRows as $b): ?>
+  <tr data-s="<?= e(mb_strtolower($b['txid'] . ' ' . $b['provider'] . ' ' . ($b['email'] ?? ''))) ?>">
+    <td class="tx-t"><?= e(date('d M, h:i A', strtotime((string)$b['created_at']))) ?></td>
+    <td><?= $b['provider'] === 'bsc' ? 'USDT BEP-20' : 'Binance Pay' ?></td>
+    <td><span class="tx-id"><?= e($b['txid']) ?></span> <button type="button" class="tx-cp" data-copy="<?= e($b['txid']) ?>">copy</button></td>
+    <td class="money"><?= money((float)$b['amount']) ?></td>
+    <td class="hm"><?= e($b['email'] ?? ('#' . (int)$b['user_id'])) ?></td>
+    <td><span class="badge on">Used</span></td>
+  </tr>
+  <?php endforeach; ?></tbody></table>
+  <div class="empty" id="txnone" <?= $bnRows ? 'style="display:none"' : '' ?>>No Binance / BSC transaction has been credited yet.</div></div>
+<?php else: ?>
+  <div class="tw tx-sc"><table id="txtable"><thead><tr><th>Time</th><th>Wallet</th><th>TrxID</th><th>Amount</th><th>Status</th><th class="hm">Sender</th><th></th></tr></thead><tbody>
+  <?php foreach ($smsRows as $s): $isIn = $s['kind'] === 'in'; $used = (int)$s['used'] === 1;
+    $sj = ['id' => (int)$s['id'], 'time' => date('d M Y, h:i:s A', strtotime((string)$s['created_at'])), 'wallet' => ucfirst((string)$s['provider']) ?: '—',
+           'trx' => (string)($s['trx'] ?? ''), 'amount' => $s['amount'] === null ? '' : money((float)$s['amount']), 'sender' => (string)$s['sender'], 'contact' => (string)$s['contact'],
+           'status' => $used ? 'Used for deposit #' . (int)$s['deposit_id'] . ($s['used_at'] ? ' at ' . date('d M, h:i A', strtotime((string)$s['used_at'])) : '') : ($isIn ? 'Unused: waiting for the customer to submit this TrxID' : 'Not recognised as an incoming payment'),
+           'body' => (string)$s['body']]; ?>
+  <tr data-s="<?= e(mb_strtolower($s['provider'] . ' ' . ($s['trx'] ?? '') . ' ' . ($s['amount'] ?? '') . ' ' . $s['sender'] . ' ' . ($s['email'] ?? '') . ' ' . $s['body'])) ?>">
+    <td class="tx-t"><?= e(date('d M, h:i A', strtotime((string)$s['created_at']))) ?></td>
+    <td><?= $chip((string)$s['provider']) ?></td>
+    <td><?php if ($s['trx'] !== null && $s['trx'] !== ''): ?><span class="tx-id"><?= e($s['trx']) ?></span> <button type="button" class="tx-cp" data-copy="<?= e($s['trx']) ?>">copy</button><?php else: ?><small>—</small><?php endif; ?></td>
+    <td class="money"><?= $s['amount'] !== null ? money((float)$s['amount']) : '<small>—</small>' ?></td>
+    <td><?php if ($used): ?><span class="badge on">Used</span><small style="display:block">#<?= (int)$s['deposit_id'] ?><?= !empty($s['email']) ? ' · ' . e($s['email']) : '' ?></small>
+        <?php elseif ($isIn): ?><span class="badge pending">Unused</span>
+        <?php else: ?><span class="badge off">Other</span><?php endif; ?></td>
+    <td class="hm"><?= e($s['sender']) ?></td>
+    <td class="ra"><div class="acts">
+      <?php if (!$used): ?><form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="sms_recheck" value="<?= (int)$s['id'] ?>" title="Look for a waiting deposit that matches this SMS">Re-check</button></form><?php endif; ?>
+      <button type="button" class="btn sm ghost" data-view="<?= e(json_encode($sj, JSON_UNESCAPED_UNICODE)) ?>">View</button>
+    </div></td>
+  </tr>
+  <?php endforeach; ?></tbody></table>
+  <div class="empty" id="txnone" <?= $smsRows ? 'style="display:none"' : '' ?>><?= $smsC['all'] ? 'Nothing here.' : 'No SMS yet. Once your SMS Forwarder app sends a message to sms.php it will appear here.' ?></div></div>
+<?php endif; ?>
+</div>
+
+<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:600">SMS forwarder setup</summary>
+  <p style="margin:10px 0 4px">App URL: <b><?= e('https://' . ($_SERVER['HTTP_HOST'] ?? 'your-site') . '/sms.php?key=YOUR_SECRET') ?></b></p>
+  <p style="margin:4px 0">Secret (<code>SMS_SECRET</code> variable on the server): <?= $hook ? '<span class="badge on">Set</span>' : '<span class="badge off">Not set: sms.php rejects every message</span>' ?></p>
+  <small>Unused = the SMS arrived but no customer has submitted its TrxID yet. Used = it already credited a deposit (the same TrxID can never be used twice).</small>
+</details>
+
+<dialog id="sdlg"><div class="dlg">
+  <div class="dlg-h"><h3>SMS details</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
+  <div class="tx-meta" id="sdMeta"></div>
+  <label>Message</label><pre class="tx-msg" id="sdText"></pre>
+  <div class="dlg-f"><button type="button" class="btn ghost" data-close>Close</button></div>
+</div></dialog>
+
+<?php /* ============================ PAYMENT METHODS ============================ */ elseif ($page === 'payments'):
+  $pms = pm_all(); $dc = dep_cfg();
+  $num = fn($v) => rtrim(rtrim(number_format((float)$v, 2, '.', ''), '0'), '.');
+  $pv = fn(string $k, $d) => e($_POST[$k] ?? $d); ?>
+<?= pm_css() ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><h3>Deposit rules</h3>
+  <?php if ($depErr): ?><div class="err"><?= e($depErr) ?></div><?php endif; ?>
+  <label class="chk" style="margin-top:0"><input type="checkbox" name="dep_on" value="1"<?= (isset($_POST['save_dep']) ? !empty($_POST['dep_on']) : $dc['on']) ? ' checked' : '' ?>> <span>Deposits are open (untick to close the deposit page for everyone)</span></label>
+  <div class="grid2">
+    <div><label>Minimum deposit (৳)</label><input type="number" name="dep_min" min="1" step="0.01" required value="<?= $pv('dep_min', $num($dc['min'])) ?>"></div>
+    <div><label>Maximum deposit (৳)</label><input type="number" name="dep_max" min="1" step="0.01" required value="<?= $pv('dep_max', $num($dc['max'])) ?>"></div>
+  </div>
+  <div class="grid2">
+    <div><label>Pending deposits allowed per user</label><input type="number" name="dep_pending" min="1" max="50" step="1" required value="<?= $pv('dep_pending', (int)$dc['pending']) ?>"></div>
+    <div><label>Quick amount buttons <small>(comma separated, max 8)</small></label><input type="text" name="dep_chips" value="<?= $pv('dep_chips', implode(',', $dc['chips'])) ?>"></div>
+  </div>
+  <label>Notice on the deposit page <small>(optional)</small></label><input type="text" name="dep_notice" maxlength="300" value="<?= $pv('dep_notice', $dc['notice']) ?>">
+  <label>Message shown while deposits are closed <small>(optional)</small></label><input type="text" name="dep_off_msg" maxlength="300" value="<?= $pv('dep_off_msg', $dc['off_msg']) ?>">
+  <div class="savebar"><button class="btn" name="save_dep" value="1">Save deposit rules</button></div>
+</div>
+</form>
+
+<div class="card"><h3>Payment methods</h3>
+  <div class="tw"><table><thead><tr><th>Method</th><th class="hm">Account</th><th class="hm">Limits</th><th class="hm">Fee / Bonus</th><th>Status</th><th></th></tr></thead><tbody>
+  <?php $pmIds = array_keys($pms); foreach ($pms as $m):
+    $has = pm_acct_ok((string)$m['acct']); [$lo, $hi] = pm_limits($m, $dc); $pos = array_search($m['id'], $pmIds, true);
+    $pj = ['id' => $m['id'], 'name' => $m['name'], 'acct' => (string)$m['acct'], 'acct_label' => $m['acct_label'], 'sub' => $m['sub'], 'ussd' => $m['ussd'],
+           'tid_label' => $m['tid_label'], 'color' => $m['color'], 'is_usd' => (int)$m['is_usd'], 'enabled' => (int)$m['enabled'],
+           'min_amt' => $m['min_amt'] === null ? '' : $num($m['min_amt']), 'max_amt' => $m['max_amt'] === null ? '' : $num($m['max_amt']),
+           'fee_pct' => $num($m['fee_pct']), 'bonus_pct' => $num($m['bonus_pct']), 'steps' => (string)$m['steps'], 'notice' => (string)$m['notice'],
+           'has_logo' => (int)$m['has_logo']]; ?>
+  <tr>
+    <td><div class="pn"><?= pm_logo_html($m, 36) ?><div><b><?= e($m['name']) ?></b><?php if ($m['is_usd']): ?><span class="tag">USD</span><?php endif; ?><small><?= e($m['sub']) ?></small></div></div></td>
+    <td class="hm"><?= $has ? e($m['acct']) : '<small>— not set —</small>' ?></td>
+    <td class="hm"><?= money($lo) ?> – <?= money($hi) ?></td>
+    <td class="hm"><?= $num($m['fee_pct']) ?>% / <?= $num($m['bonus_pct']) ?>%</td>
+    <td><?php if ((int)$m['enabled'] && $has): ?><span class="badge on">Live</span><?php elseif ((int)$m['enabled']): ?><span class="badge pending">Needs account</span><?php else: ?><span class="badge off">Hidden</span><?php endif; ?></td>
+    <td class="ra"><div class="acts">
+      <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="pm_up" value="<?= e($m['id']) ?>" title="Move up"<?= $pos === 0 ? ' disabled' : '' ?>>↑</button></form>
+      <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="pm_down" value="<?= e($m['id']) ?>" title="Move down"<?= $pos === count($pmIds) - 1 ? ' disabled' : '' ?>>↓</button></form>
+      <button type="button" class="btn sm ghost" data-edit-m="<?= e(json_encode($pj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('pencil') ?>Edit</button>
+      <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="pm_toggle" value="<?= e($m['id']) ?>"><?= (int)$m['enabled'] ? 'Hide' : 'Show' ?></button></form>
+      <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm red" name="pm_delete" value="<?= e($m['id']) ?>" onclick="return confirm('Delete this payment method?')"><?= ai('trash') ?></button></form>
+    </div></td>
+  </tr>
+  <?php endforeach; ?></tbody></table></div>
+  <?php if (!$pms): ?><div class="empty">No payment methods yet. Click “Add method” to create the first one.</div><?php endif; ?>
+  <small style="display:block;margin-top:12px">A method is shown to customers only when it is switched on <b>and</b> has a real account number (not a placeholder like 01XXXXXXXXX).</small>
+</div>
+
+<?php
+  $bnKeySet = bn_key() !== ''; $bnSecSet = bn_secret() !== '';
+  $bnEnv = $bnKeySet && trim((string)setting('bn_api_key', '')) === '';
+  $bnLastErr = trim((string)setting('bn_last_error', ''));
+  $bnOpt = function (string $name, string $cur) use ($pms): string {
+      $h = '<option value="">— detect by name —</option>';
+      foreach ($pms as $m) $h .= '<option value="' . e($m['id']) . '"' . ($cur === (string)$m['id'] ? ' selected' : '') . '>' . e($m['name']) . '</option>';
+      return '<select name="' . $name . '">' . $h . '</select>';
+  }; ?>
+<form method="post"><?= csrf_field() ?>
+<div class="card"><h3>Binance auto-verification</h3>
+  <p style="margin:0 0 6px"><span class="badge <?= ($bnKeySet && $bnSecSet) ? 'on' : 'off' ?>"><?= ($bnKeySet && $bnSecSet) ? 'API connected' : 'API key / secret missing' ?></span>
+    <?php if ($bnKeySet): ?> Key: <b><?= e(bn_mask(bn_key())) ?></b><?= $bnEnv ? ' <small>(from server environment)</small>' : '' ?><?php endif; ?></p>
+  <?php if ($bnErr): ?><div class="err"><?= e($bnErr) ?></div><?php endif; ?>
+  <?php if ($bnTest): ?><div class="<?= $bnTest[0] ? 'ok' : 'err' ?>" <?= $bnTest[0] ? 'style="padding:12px 14px;border-radius:10px;background:rgba(40,170,90,.14);margin:10px 0"' : '' ?>><?= e($bnTest[1]) ?></div>
+  <?php elseif ($bnLastErr !== ''): ?><div class="err">Last automatic check problem: <?= e($bnLastErr) ?></div><?php endif; ?>
+  <div class="grid2">
+    <div><label>API key <small>(leave empty to keep the saved one)</small></label><input type="password" name="bn_key" autocomplete="off" placeholder="<?= $bnKeySet ? e(bn_mask(bn_key())) : 'Paste the Binance API key' ?>"></div>
+    <div><label>API secret <small>(leave empty to keep the saved one)</small></label><input type="password" name="bn_secret" autocomplete="off" placeholder="<?= $bnSecSet ? e(bn_mask(bn_secret())) : 'Paste the Binance API secret' ?>"></div>
+  </div>
+  <small>Read-only permission is enough. You can also set BINANCE_API_KEY / BINANCE_API_SECRET on the server.</small>
+  <?php if ($bnKeySet && !$bnEnv): ?><label class="chk"><input type="checkbox" name="bn_remove_keys" value="1"> <span>Remove the saved API key and secret</span></label><?php endif; ?>
+  <div class="grid2">
+    <div><label>Which method is “Binance Pay”?</label><?= $bnOpt('bn_pay_method', (string)setting('bn_pay_method', '')) ?></div>
+    <div><label>Which method is “USDT BEP-20”? <small>(its account = your receiving wallet)</small></label><?= $bnOpt('bn_bsc_method', (string)setting('bn_bsc_method', '')) ?></div>
+  </div>
+  <div class="grid2">
+    <div><label>BSC confirmations required</label><input type="number" name="bn_conf" min="1" max="200" step="1" value="<?= (int)max(1, min(200, (int)setting('bn_bsc_conf', '15'))) ?>"></div>
+    <div><label>Binance API server</label><select name="bn_base"><?php foreach (BN_HOSTS as $h): ?><option value="<?= e($h) ?>"<?= (string)setting('bn_api_base', 'api.binance.com') === $h ? ' selected' : '' ?>><?= e($h) ?></option><?php endforeach; ?></select></div>
+  </div>
+  <label>Own BSC RPC URL <small>(optional, https://…)</small></label><input type="text" name="bn_rpc" value="<?= e($_POST['bn_rpc'] ?? (string)setting('bn_bsc_rpc', '')) ?>" placeholder="https://…">
+  <div class="savebar" style="display:flex;flex-wrap:wrap;gap:8px"><button class="btn" name="save_bn" value="1">Save Binance settings</button><button class="btn ghost" name="test_bn" value="1">Save &amp; test connection</button></div>
+  <small style="display:block;margin-top:10px">Binance Pay needs the key + secret and the dollar rate (Admin &gt; Settings). Each transaction ID can only be credited once.</small>
+</div>
+</form>
+
+<dialog id="mdlg"><form method="post" enctype="multipart/form-data" class="dlg"><?= csrf_field() ?><input type="hidden" name="pm_edit_id" id="m_id" value="">
+  <div class="dlg-h"><h3 id="mTitle">Add payment method</h3><button type="button" class="dlg-x" data-close aria-label="Close"><?= ai('x') ?></button></div>
+  <?php if ($pmErr): ?><div class="err" style="margin-top:12px"><?= e($pmErr) ?></div><?php endif; ?>
+  <div class="grid2">
+    <div><label>Name</label><input type="text" name="pm_name" id="m_name" maxlength="40" required placeholder="e.g. bKash"></div>
+    <div><label>Brand colour</label><input type="color" name="pm_color" id="m_color" value="#5b4bff" style="height:42px;padding:3px"></div>
+  </div>
+  <div class="grid2">
+    <div><label>Account number / ID <small>(customers send money here)</small></label><input type="text" name="pm_acct" id="m_acct" maxlength="80" placeholder="01XXXXXXXXX"></div>
+    <div><label>Label above the number</label><input type="text" name="pm_acct_label" id="m_acct_label" maxlength="40" placeholder="Send money to"></div>
+  </div>
+  <div class="grid2">
+    <div><label>Short description</label><input type="text" name="pm_sub" id="m_sub" maxlength="60" placeholder="Send Money · Personal"></div>
+    <div><label>USSD code <small>(optional)</small></label><input type="text" name="pm_ussd" id="m_ussd" maxlength="20" placeholder="*247#"></div>
+  </div>
+  <label>Transaction ID label</label><input type="text" name="pm_tid_label" id="m_tid_label" maxlength="30" placeholder="TrxID">
+  <div class="grid2">
+    <div><label>Minimum (৳) <small>(blank = global)</small></label><input type="number" name="pm_min" id="m_min_amt" min="0" step="0.01"></div>
+    <div><label>Maximum (৳) <small>(blank = global)</small></label><input type="number" name="pm_max" id="m_max_amt" min="0" step="0.01"></div>
+  </div>
+  <div class="grid2">
+    <div><label>Fee % <small>(taken from the deposit)</small></label><input type="number" name="pm_fee" id="m_fee_pct" min="0" max="50" step="0.01" value="0"></div>
+    <div><label>Bonus % <small>(added to the deposit)</small></label><input type="number" name="pm_bonus" id="m_bonus_pct" min="0" max="100" step="0.01" value="0"></div>
+  </div>
+  <label>Steps shown to the customer <small>(one per line, max 8)</small></label><textarea name="pm_steps" id="m_steps" rows="4" placeholder="Open the bKash app&#10;Choose Send Money&#10;Enter the number above"></textarea>
+  <label>Notice <small>(optional)</small></label><input type="text" name="pm_notice" id="m_notice" maxlength="200">
+  <label>Logo <small>(PNG/JPG/WEBP, up to 1 MB — optional)</small></label><input type="file" name="pm_logo" id="m_logo" accept="image/png,image/jpeg,image/webp,image/gif">
+  <label class="chk" id="m_rmwrap" hidden><input type="checkbox" name="pm_remove_logo" id="m_rmlogo" value="1"> <span>Remove the current logo</span></label>
+  <label class="chk" style="margin-top:14px"><input type="checkbox" name="pm_usd" id="m_is_usd" value="1"> <span>This is a dollar (USD) method, e.g. Binance Pay</span></label>
+  <label class="chk"><input type="checkbox" name="pm_enabled" id="m_enabled" value="1" checked> <span>Show this method to customers</span></label>
+  <div class="dlg-f"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn" name="save_pm" value="1">Save method</button></div>
+</form></dialog>
 
 <?php /* ============================ SETTINGS ============================ */ elseif ($page === 'settings'): ?>
 <?php if ($setErr): ?><div class="err"><?= e($setErr) ?></div><?php endif; ?>
@@ -794,30 +1062,53 @@ $lg = media_url('logo');
     q.addEventListener('input',filt); c.addEventListener('change',filt);
   }
 
-  /* ---------- import from Supplier 2: filter, tick, add all ---------- */
-  var imp=$('#impForm');
-  if(imp){
-    var irows=$$('#itable tbody tr'), iq=$('#iq'), ihide=$('#ihide'), istock=$('#istock'), inew=$('#inew'), iall=$('#iall'), iadd=$('#iadd'), ids=$('#ids_csv'), ino=$('#inone'), icnt=$('#icount');
-    var ichecked=function(){ return $$('.ichk:checked',imp); };
-    var isync=function(){ var n=ichecked().length; iadd.textContent='Add selected ('+n+')'; iadd.disabled=!n; };
-    var iapply=function(){
-      var t=iq.value.trim().toLowerCase(), shown=0;
-      irows.forEach(function(r){
-        var ok=(!t||r.dataset.s.indexOf(t)>-1)&&!(ihide.checked&&r.dataset.added==='1')&&!(istock.checked&&+r.dataset.stock<=0)&&!(inew&&inew.checked&&r.dataset.new!=='1');
-        r.style.display=ok?'':'none'; if(ok) shown++; else { var c=$('.ichk',r); if(c) c.checked=false; }   // a hidden row is never submitted by accident
-      });
-      ino.style.display=shown?'none':''; iall.checked=false; isync();
-    };
-    [iq].forEach(function(x){ x.addEventListener('input',iapply); });
-    [ihide,istock,inew].forEach(function(x){ if(x) x.addEventListener('change',iapply); });
-    iall.addEventListener('change',function(){ irows.forEach(function(r){ var c=$('.ichk',r); if(c&&!c.disabled&&r.style.display!=='none') c.checked=iall.checked; }); isync(); });
-    $('#itable').addEventListener('change',function(e){ if(e.target.classList.contains('ichk')) isync(); });
-    iadd.addEventListener('click',function(){ ids.value=ichecked().map(function(c){return c.value;}).join(','); });
-    imp.addEventListener('submit',function(e){
-      var s=e.submitter; if(s&&s.name!=='bm_import') ids.value='';
-      if(s&&s.name==='bm_import'&&!confirm('Add '+ichecked().length+' product(s) to your shop?')) e.preventDefault();
+  /* ---------- transactions ---------- */
+  var tq=$('#txq');
+  if(tq){
+    var tn=$('#txnone');
+    tq.addEventListener('input',function(){
+      var t=tq.value.trim().toLowerCase(), n=0, rows=$$('#txtable tbody tr[data-s]');
+      rows.forEach(function(r){ var ok=!t||r.dataset.s.indexOf(t)>-1; r.style.display=ok?'':'none'; if(ok)n++; });
+      tn.textContent='No match for your search.'; tn.style.display=(rows.length&&!n)?'':'none';
     });
-    iapply();
+    $$('[data-copy]').forEach(function(b){ b.addEventListener('click',function(){
+      var v=b.dataset.copy, done=function(){ var o=b.textContent; b.textContent='copied'; setTimeout(function(){ b.textContent=o; },1000); };
+      if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(v).then(done,function(){}); }
+      else { var ta=document.createElement('textarea'); ta.value=v; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy'); done();}catch(e){} document.body.removeChild(ta); }
+    }); });
+    var sd=$('#sdlg');
+    $$('[data-view]').forEach(function(b){ b.addEventListener('click',function(){
+      var v=JSON.parse(b.dataset.view), m=$('#sdMeta'); m.textContent='';
+      [['Received',v.time],['Wallet',v.wallet],['TrxID',v.trx||'—'],['Amount',v.amount||'—'],['Sender',v.sender+(v.contact?' ('+v.contact+')':'')],['Status',v.status]].forEach(function(p){
+        var k=document.createElement('span'), d=document.createElement('span'); k.textContent=p[0]; d.textContent=p[1]; m.appendChild(k); m.appendChild(d);
+      });
+      $('#sdText').textContent=v.body||'(empty)'; sd.showModal();
+    }); });
+    /* new SMS: reload the list (as a plain GET) every 30 s unless the admin is searching or has a window open */
+    var auto=$('#txauto');
+    setInterval(function(){
+      if(auto.checked && !tq.value && !sd.open && !document.hidden) location.href = location.pathname + location.search;
+    }, 30000);
+  }
+
+  /* ---------- payment methods ---------- */
+  var md=$('#mdlg');
+  if(md){
+    var fillM=function(v,id){
+      $('#mTitle').textContent = id ? 'Edit payment method' : 'Add payment method';
+      $('#m_id').value = id || '';
+      var set=function(k,d){ $('#m_'+k).value = (v[k]===undefined||v[k]===null) ? (d||'') : v[k]; };
+      set('name'); set('acct'); set('acct_label'); set('sub'); set('ussd'); set('tid_label'); set('min_amt'); set('max_amt');
+      set('fee_pct','0'); set('bonus_pct','0'); set('steps'); set('notice');
+      $('#m_color').value = /^#[0-9a-f]{6}$/i.test(v.color||'') ? v.color : '#5b4bff';
+      $('#m_is_usd').checked = !!+v.is_usd;
+      $('#m_enabled').checked = (v.enabled===undefined||v.enabled===null) ? true : !!+v.enabled;
+      $('#m_logo').value=''; $('#m_rmlogo').checked=false; $('#m_rmwrap').hidden = !(+v.has_logo);
+      md.showModal();
+    };
+    $('#addPm').addEventListener('click',function(){ fillM({},0); });
+    $$('[data-edit-m]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editM); fillM(v,v.id); }); });
+    if(REOPEN && REOPEN.t==='pm') fillM(REOPEN.v, REOPEN.id);
   }
 
   /* ---------- users ---------- */
