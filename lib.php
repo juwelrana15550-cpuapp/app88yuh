@@ -907,7 +907,7 @@ function catalog_list_html(array $cats, array $rows, int $c, string $q): void {
       <?php if (!empty($p['popular'])): ?><span class="ribbon">★ POPULAR</span><?php endif; ?>
       <div class="pc-h"><span class="pc-ic"><?= ico_html($icon) ?></span><div class="pc-t"><h4 title="<?= e($p['name']) ?>"><?= e($p['name']) ?></h4><span class="pc-c"><?= $k ? e($k['name']) : '&nbsp;' ?></span></div></div>
       <?php if ($anyBody): ?>
-      <div class="pc-bd<?= $domOn ? ' hd' : '' ?>">
+      <div class="pc-bd<?= $domOn ? ' hd' : '' ?><?= (!$descLines && !$domOn) ? ' em' : '' ?>">
         <?php if ($mid && $descLines): ?>
           <?php // Midnight rows: skip blank lines and "Key:" lines with no value, so only what the admin really wrote is shown
           $kvRows = [];
@@ -1029,6 +1029,41 @@ function catalog_html(array $cats, array $rows, int $c, string $q, int $total, f
 .catalog .inst{margin:0!important;min-height:1.3em;color:#0f9d6b;font-weight:600;font-size:12.5px}
 .catalog .inst.ph{visibility:hidden}
 .catalog .pc .btn.buy{width:100%;min-height:40px;display:flex;align-items:center;justify-content:center}
+/* Phones only: no empty gaps. Cards shrink to their own content. Desktop keeps the equal-height cards above. */
+@media(max-width:699px){
+.catalog{align-items:start}
+.catalog .pc{height:auto}
+.catalog .pc-bd{height:auto;overflow:visible}
+.catalog .pc-bd.em{display:none}
+.catalog .inst.ph{display:none}
+.catalog .pc h4{min-height:0}
+.catalog .pc-ft{margin-top:0}
+/* slightly smaller cards */
+.catalog{--rh:18px;gap:7px!important}
+.catalog .pc{padding:9px 11px 10px!important;gap:5px!important;border-radius:13px!important}
+.catalog .pc-ic{width:32px!important;height:32px!important;border-radius:10px!important}
+.catalog .pc-ic svg{width:20px!important;height:20px!important}
+.catalog .pc h4{font-size:13.5px!important}
+.catalog .pc-c{font-size:10.5px!important;min-height:0}
+.catalog .pc-d{font-size:11.5px!important}
+.catalog .pc-dl{font-size:11.5px!important}
+.catalog .pc-price{font-size:1.1rem!important;min-height:0}
+.catalog .pc-ft{gap:5px}
+.catalog .pc .btn.buy,.pc .btn.buy{min-height:30px!important;height:30px!important;font-size:12.5px!important}
+}
+/* Desktop: a bit smaller too, all cards still the same size */
+@media(min-width:700px){
+.catalog{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.catalog{--rh:20px}
+.catalog .pc{padding:13px;gap:9px;border-radius:16px}
+.catalog .pc-ic{width:38px;height:38px;border-radius:12px;font-size:1.2rem}
+.catalog .pc-ic svg{width:24px;height:24px}
+.catalog .pc h4{font-size:.9rem}
+.catalog .pc-d,.catalog .pc-dl{font-size:.78rem}
+.catalog .pc-price{font-size:1.3rem;min-height:30px}
+.catalog .pc-ft{gap:6px}
+.catalog .pc .btn.buy,.pc .btn.buy{min-height:30px!important;height:30px}
+}
 /* Custom (uploaded) image icons */
 .ico-img{display:block;width:100%;height:100%;object-fit:contain;border-radius:inherit}
 .bx-ic .ico-img{width:36px;height:36px;border-radius:9px}
