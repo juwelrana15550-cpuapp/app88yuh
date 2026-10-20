@@ -431,6 +431,48 @@ function notice_html(): void {
 <script>(function(){var n=document.getElementById('sxNotice');if(!n)return;var k='sxn_'+n.getAttribute('data-v');try{if(localStorage.getItem(k)){n.parentNode.removeChild(n);return;}}catch(e){}var b=n.querySelector('.nt-x');if(b)b.addEventListener('click',function(){n.parentNode.removeChild(n);try{localStorage.setItem(k,'1');}catch(e){}});})();</script>
 <?php }
 
+/** Update / notice POPUP (Admin > Site settings > Update notice popup). A centred window with an OK button; shown once per update per browser. */
+function notice_popup_html(): void {
+    if (setting('popup_on', '0') !== '1') return;
+    $msg = trim(setting('popup_text', ''));
+    if ($msg === '') return;
+    $title = trim(setting('popup_title', '')); if ($title === '') $title = 'Notice';
+    $btn = trim(setting('popup_btn', '')); if ($btn === '') $btn = 'OK';
+    $ty = setting('popup_type', 'info');
+    if (!in_array($ty, ['info', 'success', 'warning', 'danger'], true)) $ty = 'info';
+    $ic = ['info' => 'ℹ️', 'success' => '✅', 'warning' => '⚠️', 'danger' => '🚨'][$ty];
+    $accent = ['info' => '#4f46e5', 'success' => '#16a34a', 'warning' => '#d97706', 'danger' => '#dc2626'][$ty]; ?>
+<style>
+.sxp-ov{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(15,23,42,.55);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+.sxp-ov.show{display:flex;animation:sxpF .18s ease-out}
+.sxp-box{width:100%;max-width:420px;max-height:86vh;display:flex;flex-direction:column;background:#fff;color:#1e293b;border-radius:18px;box-shadow:0 25px 60px -12px rgba(0,0,0,.45);overflow:hidden;animation:sxpU .22s ease-out}
+.sxp-bar{height:5px;background:var(--sxp,#4f46e5);flex:none}
+.sxp-h{display:flex;align-items:center;gap:10px;padding:18px 20px 6px;flex:none}
+.sxp-h i{font-style:normal;font-size:1.5rem;line-height:1}
+.sxp-h h3{margin:0;font-size:1.12rem;font-weight:800;line-height:1.3;color:#0f172a}
+.sxp-b{padding:6px 20px 14px;overflow:auto;font-size:.98rem;line-height:1.6;word-break:break-word;-webkit-overflow-scrolling:touch}
+.sxp-f{padding:6px 20px 20px;flex:none}
+.sxp-ok{display:block;width:100%;border:0;border-radius:12px;padding:12px 16px;font:inherit;font-weight:700;font-size:1rem;color:#fff;background:var(--sxp,#4f46e5);cursor:pointer}
+.sxp-ok:hover{filter:brightness(1.08)}.sxp-ok:focus-visible{outline:3px solid rgba(79,70,229,.35);outline-offset:2px}
+body.sxp-lock{overflow:hidden}
+@keyframes sxpF{from{opacity:0}to{opacity:1}}@keyframes sxpU{from{transform:translateY(14px) scale(.97);opacity:0}to{transform:none;opacity:1}}
+</style>
+<div class="sxp-ov" id="sxPop" role="dialog" aria-modal="true" aria-labelledby="sxpT" data-v="<?= e(setting('popup_v', '1')) ?>" style="--sxp:<?= $accent ?>">
+  <div class="sxp-box"><div class="sxp-bar"></div>
+    <div class="sxp-h"><i><?= $ic ?></i><h3 id="sxpT"><?= e($title) ?></h3></div>
+    <div class="sxp-b"><?= nl2br(e($msg)) ?></div>
+    <div class="sxp-f"><button type="button" class="sxp-ok" id="sxpOk"><?= e($btn) ?></button></div>
+  </div>
+</div>
+<script>(function(){var o=document.getElementById('sxPop');if(!o)return;var k='sxp_'+o.getAttribute('data-v');
+try{if(localStorage.getItem(k)==='1'){o.parentNode.removeChild(o);return;}}catch(e){}
+document.body.appendChild(o);document.body.classList.add('sxp-lock');o.classList.add('show');
+var b=document.getElementById('sxpOk');try{b.focus();}catch(e){}
+function close(){try{localStorage.setItem(k,'1');}catch(e){}document.body.classList.remove('sxp-lock');if(o.parentNode)o.parentNode.removeChild(o);document.removeEventListener('keydown',kd,true);}
+function kd(ev){if(ev.key==='Escape'||ev.key==='Enter'){ev.preventDefault();ev.stopPropagation();close();}}
+b.addEventListener('click',close);document.addEventListener('keydown',kd,true);})();</script>
+<?php }
+
 function icon(string $n): string {
     static $p = [
         'user'    => '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
@@ -518,7 +560,7 @@ function header_html(string $title, ?array $user = null, string $variant = 'app'
 <?php endif; ?>
 </div></nav>
 <main class="<?= $variant === 'auth' ? 'narrow' : 'wide' ?>">
-<?php if (!$admin) notice_html(); flash_html(); }
+<?php if (!$admin) { notice_html(); notice_popup_html(); } flash_html(); }
 
 function footer_html(bool $closeMain = true): void { if ($closeMain) echo "</main>\n"; ?>
 <script>
@@ -590,7 +632,7 @@ function user_start(string $title, array $u, string $active): void {
   </div>
 </aside>
 <main class="wide with-side">
-<?php notice_html(); flash_html(); }
+<?php notice_html(); notice_popup_html(); flash_html(); }
 
 function user_end(): void {
     $tg = setting('telegram_url'); $wa = setting('whatsapp_url');

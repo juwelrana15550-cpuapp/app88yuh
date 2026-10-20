@@ -554,6 +554,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $v = trim($_POST[$k] ?? '');
                     save_setting($k, preg_match('#^https?://#i', $v) ? $v : '');
                 }
+                // Update notice popup
+                $pTitle = mb_substr(trim((string)($_POST['popup_title'] ?? '')), 0, 80);
+                $pText  = mb_substr(trim((string)($_POST['popup_text'] ?? '')), 0, 1500);
+                $pBtn   = mb_substr(trim((string)($_POST['popup_btn'] ?? '')), 0, 20);
+                $pType  = in_array($_POST['popup_type'] ?? '', ['info', 'success', 'warning', 'danger'], true) ? $_POST['popup_type'] : 'info';
+                $pOn    = (!empty($_POST['popup_on']) && $pText !== '') ? '1' : '0';
+                $pChanged = $pTitle !== setting('popup_title', '') || $pText !== setting('popup_text', '') || $pType !== setting('popup_type', 'info');
+                save_setting('popup_title', $pTitle); save_setting('popup_text', $pText);
+                save_setting('popup_btn', $pBtn);     save_setting('popup_type', $pType);
+                save_setting('popup_on', $pOn);
+                // a new version number makes every visitor see the popup again (new text, or "show again" ticked)
+                if ($pOn === '1' && ($pChanged || !empty($_POST['popup_again']) || setting('popup_v', '') === '')) save_setting('popup_v', (string)time());
                 foreach ($removes as $k) $pdo->prepare('DELETE FROM media WHERE k = ?')->execute([$k]);
                 foreach ($uploads as $k => [$mime, $bin]) {
                     $st = $pdo->prepare('REPLACE INTO media (k, mime, data) VALUES (?,?,?)');
@@ -1702,6 +1714,15 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <label style="margin-top:0">Telegram support link</label><input type="text" name="telegram_url" value="<?= $sv('telegram_url') ?>" placeholder="https://t.me/your_username">
   <label>WhatsApp support link</label><input type="text" name="whatsapp_url" value="<?= $sv('whatsapp_url') ?>" placeholder="https://wa.me/8801XXXXXXXXX">
   <label>Footer support link <small>(optional)</small></label><input type="text" name="support_url" value="<?= $sv('support_url') ?>">
+</div>
+<div class="card"><h3>Update notice popup</h3>
+  <small>Visitors see this as a window in the middle of the screen. After they press OK it closes and they stay on the same page.</small>
+  <label class="chk"><input type="checkbox" name="popup_on" value="1"<?= (isset($_POST['save_settings']) ? !empty($_POST['popup_on']) : setting('popup_on', '0') === '1') ? ' checked' : '' ?>> <span>Show the popup to visitors</span></label>
+  <label>Title <small>(e.g. New update)</small></label><input type="text" name="popup_title" maxlength="80" value="<?= $sv('popup_title') ?>" placeholder="Notice">
+  <label>Message</label><textarea name="popup_text" rows="5" maxlength="1500" placeholder="Write your notice or update here…"><?= $sv('popup_text') ?></textarea>
+  <label>Style</label><select name="popup_type"><?php $pty = (string)($_POST['popup_type'] ?? setting('popup_type', 'info')); foreach (['info' => 'ℹ️ Info (blue)', 'success' => '✅ Success (green)', 'warning' => '⚠️ Warning (orange)', 'danger' => '🚨 Important (red)'] as $pk => $pl): ?><option value="<?= $pk ?>"<?= $pty === $pk ? ' selected' : '' ?>><?= e($pl) ?></option><?php endforeach; ?></select>
+  <label>Button text <small>(default: OK)</small></label><input type="text" name="popup_btn" maxlength="20" value="<?= $sv('popup_btn') ?>" placeholder="OK">
+  <label class="chk"><input type="checkbox" name="popup_again" value="1"> <span>Show again to everyone who already pressed OK <small>(changing the title or message does this automatically)</small></span></label>
 </div>
 <div class="card"><h3>Branding</h3>
   <label style="margin-top:0">Logo <small>(PNG/JPG/WEBP, up to 1 MB)</small></label>
