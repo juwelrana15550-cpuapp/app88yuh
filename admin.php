@@ -6,11 +6,89 @@ require_once __DIR__ . '/binance_pay.php';   // used Binance / BSC transaction I
 $adminPw = getenv('ADMIN_PASSWORD');
 if (!$adminPw) { http_response_code(503); exit('Set ADMIN_PASSWORD env variable.'); }
 $bonus = (float)(getenv('REFERRAL_BONUS') ?: 10);
-$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''; $supTest = null; $pmErr = ''; $depErr = ''; $txMsg = ''; $bnErr = ''; $bnTest = null;
-$page = null;      // which admin page to show (set on errors so the user stays where they were)
+$err = ''; $setErr = ''; $prodErr = ''; $catErr = ''; $ordErr = ''; $supErr = ''; $supTest = null; $pmErr = ''; $depErr = ''; $txMsg = ''; $bnErr = ''; $bnTest = null; $expErr = '';
+$page = null;     // which admin page to show (set on errors so the user stays where they were)
 $reopen = null;    // re-open the edit dialog with the submitted values after a validation error
 
-const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings', 'supplier', 'payments', 'transactions'];
+const ADMIN_PAGES = ['overview', 'orders', 'deposits', 'products', 'categories', 'users', 'settings', 'supplier', 'payments', 'transactions', 'reports', 'allorders', 'expenses'];
+
+/* ============================ ACCOUNTS (profit / cost / expenses) ============================ */
+
+/** One-time schema upgrade: products.cost_price, orders.cost, expenses table. Safe to run repeatedly. */
+function acct_schema(PDO $pdo): void {
+    if (setting('acct_v', '') === '1') return;
+    try {
+        $has = function (string $t, string $c) use ($pdo): bool {
+            $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+            $s->execute([$t, $c]);
+            return (int)$s->fetchColumn() > 0;
+        };
+        if (!$has('products', 'cost_price')) $pdo->exec('ALTER TABLE products ADD COLUMN cost_price DECIMAL(12,2) NULL DEFAULT NULL');
+        if (!$has('orders', 'cost'))         $pdo->exec('ALTER TABLE orders ADD COLUMN cost DECIMAL(12,2) NULL DEFAULT NULL');
+        $pdo->exec('CREATE TABLE IF NOT EXISTS expenses (id INT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(120) NOT NULL, amount DECIMAL(12,2) NOT NULL, spent_on DATE NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY (spent_on)) DEFAULT CHARSET=utf8mb4');
+        save_setting('acct_v', '1');
+    } catch (Throwable $ex) { error_log('[acct schema] ' . $ex->getMessage()); }
+}
+
+/**
+ * Fill orders.cost for orders that do not have one yet.
+ * Manual cost (products.cost_price) wins; otherwise a Supplier 2 product uses supplier USD price x rate.
+ * (Cost is recorded the first time the admin panel sees the order, using the cost at that moment.)
+ */
+function acct_backfill(PDO $pdo): void {
+    try {
+        $rows = $pdo->query('SELECT o.id, p.supplier_id, p.cost_price FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.cost IS NULL ORDER BY o.id DESC LIMIT 300')->fetchAll();
+        if (!$rows) return;
+        $rate = function_exists('bm_rate') ? (float)bm_rate() : 0.0;
+        $bmOk = $rate > 0 && function_exists('bm_connected') && bm_connected();
+        $cache = []; $calls = 0;
+        $up = $pdo->prepare('UPDATE orders SET cost = ? WHERE id = ? AND cost IS NULL');
+        foreach ($rows as $r) {
+            $c = $r['cost_price'] !== null ? (float)$r['cost_price'] : null;
+            $sid = (int)($r['supplier_id'] ?? 0);
+            if ($c === null && $sid > 0 && $bmOk) {
+                if (!array_key_exists($sid, $cache)) {
+                    $cache[$sid] = null;
+                    if ($calls < 15) {
+                        $calls++;
+                        $d = bm_product($sid, 10);
+                        if (!isset($d['error']) && (float)$d['price'] > 0) $cache[$sid] = round((float)$d['price'] * $rate, 2);
+                    }
+                }
+                $c = $cache[$sid];
+            }
+            if ($c !== null) $up->execute([$c, (int)$r['id']]);
+        }
+    } catch (Throwable $ex) { error_log('[acct backfill] ' . $ex->getMessage()); }
+}
+
+/** Delivered-order totals for an inclusive date range (Y-m-d .. Y-m-d). profit only counts orders whose cost is known. */
+function acct_kpi(PDO $pdo, string $from, string $to): array {
+    $s = $pdo->prepare("SELECT COUNT(*) n, COALESCE(SUM(price),0) rev, COALESCE(SUM(cost),0) cost,
+        COALESCE(SUM(CASE WHEN cost IS NOT NULL THEN price - cost ELSE 0 END),0) profit, COALESCE(SUM(cost IS NULL),0) unk
+        FROM orders WHERE status = 'delivered' AND created_at >= ? AND created_at < ?");
+    $s->execute([$from . ' 00:00:00', date('Y-m-d', strtotime($to . ' +1 day')) . ' 00:00:00']);
+    return $s->fetch() ?: ['n' => 0, 'rev' => 0, 'cost' => 0, 'profit' => 0, 'unk' => 0];
+}
+
+function acct_date($v, string $def): string {
+    $v = (string)$v;
+    return (preg_match('/^\d{4}-\d{2}-\d{2}$/', $v) && strtotime($v) !== false) ? $v : $def;
+}
+
+/** Orders list used by the "All orders" page and its CSV export. */
+function acct_orders(PDO $pdo, array $g, int $limit): array {
+    $w = []; $a = [];
+    $st = in_array($g['st'] ?? '', ['pending', 'delivered', 'cancelled'], true) ? $g['st'] : '';
+    if ($st !== '') { $w[] = 'o.status = ?'; $a[] = $st; }
+    $q = trim((string)($g['q'] ?? ''));
+    if ($q !== '') { $w[] = '(u.email LIKE ? OR o.product_name LIKE ? OR o.id = ?)'; $l = '%' . $q . '%'; array_push($a, $l, $l, (int)$q); }
+    if (($g['from'] ?? '') !== '') { $w[] = 'o.created_at >= ?'; $a[] = acct_date($g['from'], '1970-01-01') . ' 00:00:00'; }
+    if (($g['to'] ?? '') !== '')   { $w[] = 'o.created_at < ?';  $a[] = date('Y-m-d', strtotime(acct_date($g['to'], date('Y-m-d')) . ' +1 day')) . ' 00:00:00'; }
+    $s = $pdo->prepare('SELECT o.*, u.email FROM orders o LEFT JOIN users u ON u.id = o.user_id' . ($w ? ' WHERE ' . implode(' AND ', $w) : '') . ' ORDER BY o.id DESC LIMIT ' . (int)$limit);
+    $s->execute($a);
+    return $s->fetchAll();
+}
 
 /** Redirect to an admin page, optionally with a success message. */
 function go(string $p, ?string $ok = null): void {
@@ -35,6 +113,7 @@ function product_fields(): array {
         'stock'   => $st === '' ? null : max(0, (int)$st),   // blank = unlimited
         'unit'    => mb_substr(trim($_POST['unit'] ?? ''), 0, 20),
         'popular' => empty($_POST['popular']) ? 0 : 1,
+        'cost'    => trim((string)($_POST['pcost'] ?? '')) === '' ? null : max(0.0, round((float)$_POST['pcost'], 2)),   // blank = unknown / follow supplier
         'sup_t'   => $okSp ? $sp[0] : null,
         'sup_a'   => $okSp ? $sp[1] : null,
         // Supplier 2 only: keep name / description + Possible Domain in step with the supplier; show the domain line (default on)
@@ -60,7 +139,19 @@ function category_fields(): array {
     ];
 }
 
-if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); }
+if (!empty($_SESSION['admin'])) { suphot_schema(); bm_schema(db()); acct_schema(db()); }
+// CSV export of orders (All orders page): cost and profit included, opens fine in Excel
+if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'orders') {
+    $pdoX = db(); acct_backfill($pdoX);
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="orders-' . date('Y-m-d') . '.csv"');
+    $o = fopen('php://output', 'w'); fwrite($o, "\xEF\xBB\xBF");
+    fputcsv($o, ['Order', 'Date', 'User', 'Product', 'Status', 'Price', 'Cost', 'Profit']);
+    foreach (acct_orders($pdoX, $_GET, 50000) as $r) {
+        fputcsv($o, [$r['id'], $r['created_at'], $r['email'], $r['product_name'], $r['status'], $r['price'], $r['cost'], $r['cost'] === null ? '' : round((float)$r['price'] - (float)$r['cost'], 2)]);
+    }
+    fclose($o); exit;
+}
 // Live lookup for the product form: Supplier 2 product id -> name / price / description (used to auto-fill the dialog)
 if (!empty($_SESSION['admin']) && isset($_GET['bm_lookup'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -201,6 +292,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             go('transactions', $n ? $n . ' deposit(s) matched an SMS and were approved.' : 'No waiting deposit matches an unused SMS right now.');
 
+        } elseif (isset($_POST['add_expense'])) {
+            $page = 'expenses';
+            $t = mb_substr(trim((string)($_POST['ex_title'] ?? '')), 0, 120);
+            $a = round((float)str_replace(',', '', (string)($_POST['ex_amount'] ?? '0')), 2);
+            $d = acct_date($_POST['ex_date'] ?? '', date('Y-m-d'));
+            if ($t === '' || $a <= 0) $expErr = 'Enter a title and an amount above 0.';
+            else {
+                $pdo->prepare('INSERT INTO expenses (title, amount, spent_on) VALUES (?,?,?)')->execute([$t, $a, $d]);
+                go('expenses', 'Expense added.');
+            }
+
+        } elseif (isset($_POST['del_expense'])) {
+            $pdo->prepare('DELETE FROM expenses WHERE id = ?')->execute([(int)$_POST['del_expense']]);
+            go('expenses', 'Expense deleted.');
+
         } elseif (isset($_POST['save_settings'])) {
             $page = 'settings';
             $name = trim($_POST['site_name'] ?? '');
@@ -302,7 +408,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prodErr = $linkErr !== '' ? $linkErr : 'Enter a product name (max 80 chars) and a price above 0.';
                 $reopen = ['t' => 'product', 'id' => $isEdit ? (int)$_POST['update_product'] : 0, 'v' => [
                     'name' => $f['name'], 'desc' => $f['desc'], 'price' => (string)($_POST['pprice'] ?? ''), 'unit' => $f['unit'],
-                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'],
+                    'cat' => $f['cat'] ?? '', 'stock' => $f['stock'] ?? '', 'pop' => $f['popular'], 'cost' => $f['cost'] ?? '',
                     'src' => $f['src'], 'sup' => $f['sup_t'] ? $f['sup_t'] . '|' . $f['sup_a'] : '', 'bmid' => $f['sup_id'] ?? '', 'an' => $f['an'], 'ad' => $f['ad'], 'sd' => $f['sd'], 'ap' => $f['ap'], 'mk' => $f['mk'],
                 ]];
             } else {
@@ -310,12 +416,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($f['src'] === 'bm') { $f['sup_t'] = null; $f['sup_a'] = null; } else { $f['sup_id'] = null; }
                 if ($f['src'] === 'bm' && $f['stock'] === null) $f['stock'] = (int)($chk['stock'] ?? 0);   // live stock is synced from the supplier anyway
                 if ($isEdit) {
-                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=? WHERE id=?')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], (int)$_POST['update_product']]);
+                    $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=?, cost_price=? WHERE id=?')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], (int)$_POST['update_product']]);
                     $msg = 'Product saved.';
                 } else {
-                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk']]);
+                    $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup, cost_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                        ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost']]);
                     $msg = 'Product added.';
                 }
                 $syncBm = $f['src'] === 'bm'; $syncHot = $f['src'] === 'hot';
@@ -448,6 +554,55 @@ if ($page === null) {
     $page = $_GET['p'] ?? 'overview';
     if (!in_array($page, ADMIN_PAGES, true)) $page = 'overview';
 }
+/* ---- accounts data ---- */
+$today = (string)$pdo->query('SELECT CURDATE()')->fetchColumn();
+$ac = []; $rp = [];
+if (in_array($page, ['overview', 'reports', 'allorders', 'expenses'], true)) acct_backfill($pdo);
+$acQ = function (string $sql, array $a = []) use ($pdo): array { $s = $pdo->prepare($sql); $s->execute($a); return $s->fetchAll(); };
+$knownProfit = 'COALESCE(SUM(CASE WHEN o.cost IS NOT NULL THEN o.price - o.cost ELSE 0 END),0)';
+if ($page === 'overview') {
+    $ac['today'] = acct_kpi($pdo, $today, $today);
+    $ac['month'] = acct_kpi($pdo, substr($today, 0, 8) . '01', $today);
+}
+if ($page === 'reports') {
+    $rp['from'] = acct_date($_GET['from'] ?? '', substr($today, 0, 8) . '01');
+    $rp['to']   = acct_date($_GET['to'] ?? '', $today);
+    if ($rp['from'] > $rp['to']) [$rp['from'], $rp['to']] = [$rp['to'], $rp['from']];
+    $rf = $rp['from'] . ' 00:00:00'; $rt = date('Y-m-d', strtotime($rp['to'] . ' +1 day')) . ' 00:00:00';
+    $rp['k'] = acct_kpi($pdo, $rp['from'], $rp['to']);
+    $rg = "o.status = 'delivered' AND o.created_at >= ? AND o.created_at < ?";
+    $rp['daily'] = $acQ("SELECT DATE(o.created_at) d, COUNT(*) n, SUM(o.price) rev, $knownProfit profit FROM orders o WHERE $rg GROUP BY DATE(o.created_at) ORDER BY d DESC", [$rf, $rt]);
+    $rp['prod'] = $acQ("SELECT o.product_id, MAX(o.product_name) nm, COUNT(*) n, SUM(o.price) rev, $knownProfit profit, COALESCE(SUM(o.cost IS NULL),0) unk FROM orders o WHERE $rg GROUP BY o.product_id ORDER BY profit DESC, rev DESC LIMIT 50", [$rf, $rt]);
+    $rp['cat'] = $acQ("SELECT c.name nm, COUNT(*) n, SUM(o.price) rev, $knownProfit profit FROM orders o LEFT JOIN products p ON p.id = o.product_id LEFT JOIN categories c ON c.id = p.category_id WHERE $rg GROUP BY c.id, c.name ORDER BY rev DESC", [$rf, $rt]);
+    $rp['sup'] = $acQ("SELECT CASE WHEN p.supplier_id > 0 THEN 'Supplier 2' WHEN p.supplier_type IS NOT NULL AND p.supplier_type <> '' THEN 'Supplier 1' ELSE 'Manual' END src, COUNT(*) n, SUM(o.price) rev, COALESCE(SUM(o.cost),0) cost, $knownProfit profit FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE $rg GROUP BY src ORDER BY rev DESC", [$rf, $rt]);
+    $rp['buyers'] = $acQ("SELECT u.email, COUNT(*) n, SUM(o.price) rev, $knownProfit profit FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE $rg GROUP BY o.user_id, u.email ORDER BY rev DESC LIMIT 10", [$rf, $rt]);
+    // cash flow
+    $x = $acQ("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deposits WHERE status = 'approved' AND created_at >= ? AND created_at < ?", [$rf, $rt])[0];
+    $rp['dep'] = ['n' => (int)$x['n'], 's' => (float)$x['s']];
+    $x = $acQ("SELECT COUNT(*) n, COALESCE(SUM(price),0) s FROM orders WHERE status = 'cancelled' AND created_at >= ? AND created_at < ?", [$rf, $rt])[0];
+    $rp['ref'] = ['n' => (int)$x['n'], 's' => (float)$x['s']];
+    $x = $acQ("SELECT COUNT(*) n, COALESCE(SUM(price),0) s FROM orders WHERE status = 'pending'")[0];
+    $rp['pend'] = ['n' => (int)$x['n'], 's' => (float)$x['s']];
+    $rp['bonus'] = null;   // referral bonuses paid (only if the wallet log table is readable)
+    try { $rp['bonus'] = (float)$acQ("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type = 'bonus' AND created_at >= ? AND created_at < ?", [$rf, $rt])[0]['s']; } catch (Throwable $ex) { $rp['bonus'] = null; }
+    $rp['pm'] = [];   // deposits by payment method (only if deposits has a method column)
+    try {
+        $cols = $pdo->query('SHOW COLUMNS FROM deposits')->fetchAll(PDO::FETCH_COLUMN);
+        foreach (['method', 'payment_method', 'pm', 'method_id', 'gateway'] as $mc) {
+            if (in_array($mc, $cols, true)) { $rp['pm'] = $acQ("SELECT `$mc` m, COUNT(*) n, SUM(amount) s FROM deposits WHERE status = 'approved' AND created_at >= ? AND created_at < ? GROUP BY `$mc` ORDER BY s DESC", [$rf, $rt]); break; }
+        }
+    } catch (Throwable $ex) { $rp['pm'] = []; }
+    $rp['exp'] = (float)$acQ('SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE spent_on BETWEEN ? AND ?', [$rp['from'], $rp['to']])[0]['s'];
+    $rp['stockval'] = (float)$acQ('SELECT COALESCE(SUM(stock * cost_price),0) s FROM products WHERE stock IS NOT NULL AND cost_price IS NOT NULL')[0]['s'];
+    $rp['lowstock'] = $acQ('SELECT id, name, stock FROM products WHERE stock IS NOT NULL AND stock <= 5 AND active = 1 AND supplier_id IS NULL AND (supplier_type IS NULL OR supplier_type = \'\') ORDER BY stock, id LIMIT 20');
+    $rp['dead'] = $acQ("SELECT p.id, p.name FROM products p WHERE p.active = 1 AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.product_id = p.id AND $rg) ORDER BY p.id DESC LIMIT 20", [$rf, $rt]);
+}
+$aoRows = []; $expRows = []; $expMonth = 0.0;
+if ($page === 'allorders') $aoRows = acct_orders($pdo, $_GET, 300);
+if ($page === 'expenses') {
+    $expRows = $acQ('SELECT * FROM expenses ORDER BY spent_on DESC, id DESC LIMIT 200');
+    $expMonth = (float)$acQ('SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE spent_on BETWEEN ? AND ?', [substr($today, 0, 8) . '01', $today])[0]['s'];
+}
 $totalUsers = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
 $pend = $pdo->query("SELECT COUNT(*) c FROM deposits WHERE status='pending'")->fetch();
 $smsC = ['all' => 0, 'unused' => 0, 'used' => 0, 'other' => 0, 'bn' => 0, 'last' => null]; $smsRows = []; $bnRows = [];
@@ -504,12 +659,16 @@ function ai(string $n): string {
 $nav = [
     ''        => [['overview', 'Overview', 'gauge', 0]],
     'Sales'   => [['orders', 'Orders', 'cart', count($pendOrders)], ['deposits', 'Deposits', 'coins', (int)$pend['c']], ['payments', 'Payment methods', 'card', 0], ['transactions', 'Transactions', 'sms', (int)$smsC['unused']]],
+    'Accounts' => [['reports', 'Reports', 'gauge', 0], ['allorders', 'All orders', 'cart', 0], ['expenses', 'Expenses', 'coins', 0]],
     'Catalog' => [['products', 'Products', 'bag', 0], ['categories', 'Categories', 'grid', 0]],
     'Manage'  => [['users', 'Users', 'users', 0], ['settings', 'Site settings', 'sliders', 0], ['supplier', 'Supplier API', 'plug', 0]],
 ];
 $titles = [
     'overview'   => ['Overview', 'Store activity at a glance'],
     'orders'     => ['Orders', 'Deliver or cancel pending orders'],
+    'reports'    => ['Reports', 'Sales, cost, profit and cash flow for any date range'],
+    'allorders'  => ['All orders', 'Every order with cost and profit, searchable, with CSV export'],
+    'expenses'   => ['Expenses', 'Running costs (hosting, ads, SMS...) that are taken off your profit'],
     'deposits'   => ['Deposits', 'Approve or reject wallet deposits'],
     'products'   => ['Products', 'Add, edit, hide and organise what you sell'],
     'categories' => ['Categories', 'Group products and choose their icons'],
@@ -574,6 +733,13 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <a class="stat <?= count($pendOrders) ? 'alert' : '' ?>" href="/admin.php?p=orders"><span>Pending orders</span><b><?= count($pendOrders) ?></b></a>
   <div class="stat"><span>Balance in wallets</span><b><?= money($coins) ?></b></div>
 </div>
+<div class="stats" style="margin-top:14px">
+  <a class="stat" href="/admin.php?p=reports&from=<?= e($today) ?>&to=<?= e($today) ?>"><span>Today's sales (<?= (int)$ac['today']['n'] ?> orders)</span><b><?= money($ac['today']['rev']) ?></b></a>
+  <a class="stat" href="/admin.php?p=reports&from=<?= e($today) ?>&to=<?= e($today) ?>"><span>Today's profit</span><b><?= money($ac['today']['profit']) ?></b></a>
+  <a class="stat" href="/admin.php?p=reports"><span>This month's sales (<?= (int)$ac['month']['n'] ?> orders)</span><b><?= money($ac['month']['rev']) ?></b></a>
+  <a class="stat" href="/admin.php?p=reports"><span>This month's profit</span><b><?= money($ac['month']['profit']) ?></b></a>
+</div>
+<?php if ((int)$ac['month']['unk'] > 0): ?><p style="margin:10px 2px;color:#b45309;font-size:.85rem">⚠ <?= (int)$ac['month']['unk'] ?> delivered order(s) this month have no cost, so their profit is not counted. Set a Cost price on those products (Products → Edit).</p><?php endif; ?>
 <div class="cols">
   <div class="card"><div class="card-h"><h3>Pending orders</h3><a href="/admin.php?p=orders">Open all</a></div>
   <?php foreach (array_slice($pendOrders, 0, 5) as $o): ?>
@@ -603,6 +769,133 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 </div>
 <?php endforeach; if (!$pendOrders): ?><div class="card"><div class="empty">No pending orders. 🎉</div></div><?php endif; ?>
 
+<?php /* ============================ REPORTS ============================ */ elseif ($page === 'reports'):
+  $k = $rp['k']; $net = (float)$k['profit'] - $rp['exp'];
+  $d1 = fn($n) => date('Y-m-d', strtotime($today . ' ' . $n));
+  $presets = ['Today' => [$today, $today], 'Yesterday' => [$d1('-1 day'), $d1('-1 day')], 'Last 7 days' => [$d1('-6 days'), $today], 'This month' => [substr($today, 0, 8) . '01', $today], 'Last 30 days' => [$d1('-29 days'), $today]];
+  $maxRev = 0; foreach ($rp['daily'] as $dy) $maxRev = max($maxRev, (float)$dy['rev']);
+  $pct = fn($p, $r) => (float)$r > 0 ? number_format($p / $r * 100, 1) . '%' : '—'; ?>
+<style>
+.rp-pre{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.rp-pre a{padding:6px 12px;border-radius:999px;border:1px solid #d9dce8;font-size:.82rem;text-decoration:none;color:inherit}
+.rp-pre a.on{background:#5b4bff;color:#fff;border-color:#5b4bff}
+.rp-bar{height:10px;border-radius:5px;background:#e8e9f5;min-width:90px;position:relative;overflow:hidden}.rp-bar i{position:absolute;left:0;top:0;bottom:0;background:#c7c3ff}.rp-bar b{position:absolute;left:0;top:0;bottom:0;background:#16a34a}
+.rp-neg{color:#dc2626}.rp-pos{color:#16a34a}.rp-note{font-size:.82rem;color:#6b7280;margin:8px 2px}
+</style>
+<div class="card"><form method="get" class="tb" style="flex-wrap:wrap;gap:10px;align-items:flex-end"><input type="hidden" name="p" value="reports">
+  <div><label style="margin-top:0">From</label><input type="date" name="from" value="<?= e($rp['from']) ?>"></div>
+  <div><label style="margin-top:0">To</label><input type="date" name="to" value="<?= e($rp['to']) ?>"></div>
+  <button class="btn">Show</button>
+  <a class="btn ghost" href="/admin.php?p=allorders&from=<?= e($rp['from']) ?>&to=<?= e($rp['to']) ?>">View orders</a></form>
+  <div class="rp-pre"><?php foreach ($presets as $lb => [$pf, $pt]): ?><a class="<?= ($rp['from'] === $pf && $rp['to'] === $pt) ? 'on' : '' ?>" href="/admin.php?p=reports&from=<?= e($pf) ?>&to=<?= e($pt) ?>"><?= e($lb) ?></a><?php endforeach; ?></div></div>
+
+<div class="stats" style="margin-top:14px">
+  <div class="stat"><span>Sales (<?= (int)$k['n'] ?> delivered)</span><b><?= money($k['rev']) ?></b></div>
+  <div class="stat"><span>Cost</span><b><?= money($k['cost']) ?></b></div>
+  <div class="stat"><span>Gross profit · margin <?= $pct((float)$k['profit'], (float)$k['rev'] - 0) ?></span><b class="<?= (float)$k['profit'] < 0 ? 'rp-neg' : 'rp-pos' ?>"><?= money($k['profit']) ?></b></div>
+  <div class="stat"><span>Expenses</span><b><?= money($rp['exp']) ?></b></div>
+</div>
+<div class="stats" style="margin-top:14px">
+  <div class="stat"><span>NET PROFIT (gross − expenses)</span><b class="<?= $net < 0 ? 'rp-neg' : 'rp-pos' ?>"><?= money($net) ?></b></div>
+  <div class="stat"><span>Avg profit / order</span><b><?= money((int)$k['n'] > (int)$k['unk'] ? (float)$k['profit'] / ((int)$k['n'] - (int)$k['unk']) : 0) ?></b></div>
+  <div class="stat"><span>Cancelled &amp; refunded (<?= (int)$rp['ref']['n'] ?>)</span><b><?= money($rp['ref']['s']) ?></b></div>
+  <div class="stat"><span>Pending orders now (<?= (int)$rp['pend']['n'] ?>)</span><b><?= money($rp['pend']['s']) ?></b></div>
+</div>
+<?php if ((int)$k['unk'] > 0): ?><p class="rp-note" style="color:#b45309">⚠ <?= (int)$k['unk'] ?> delivered order(s) have no cost (shown in orange below), so their profit is not counted. Set a Cost price on the product (Products → Edit) and they are filled in automatically.</p><?php endif; ?>
+
+<div class="card" style="margin-top:18px"><h3>Daily sales</h3>
+<div class="tw"><table><thead><tr><th>Date</th><th>Orders</th><th>Sales</th><th>Profit</th><th class="hm">Sales vs profit</th></tr></thead><tbody>
+<?php foreach ($rp['daily'] as $dy): $w1 = $maxRev > 0 ? (float)$dy['rev'] / $maxRev * 100 : 0; $w2 = $maxRev > 0 ? max(0, (float)$dy['profit']) / $maxRev * 100 : 0; ?>
+<tr><td><?= e($dy['d']) ?></td><td><?= (int)$dy['n'] ?></td><td class="money"><?= money($dy['rev']) ?></td><td class="money <?= (float)$dy['profit'] < 0 ? 'rp-neg' : '' ?>"><?= money($dy['profit']) ?></td>
+<td class="hm"><div class="rp-bar"><i style="width:<?= round($w1, 1) ?>%"></i><b style="width:<?= round($w2, 1) ?>%"></b></div></td></tr>
+<?php endforeach; if (!$rp['daily']): ?><tr><td colspan="5">No delivered orders in this range.</td></tr><?php endif; ?></tbody></table></div></div>
+
+<div class="cols" style="margin-top:18px">
+<div class="card"><h3>By product <small>(best profit first)</small></h3>
+<div class="tw"><table><thead><tr><th>Product</th><th>Sold</th><th>Sales</th><th>Profit</th></tr></thead><tbody>
+<?php foreach ($rp['prod'] as $r): ?>
+<tr><td><?= e($r['nm']) ?><?php if ((int)$r['unk']): ?> <small style="color:#b45309">(<?= (int)$r['unk'] ?> no cost)</small><?php endif; ?></td><td><?= (int)$r['n'] ?></td><td class="money"><?= money($r['rev']) ?></td><td class="money <?= (float)$r['profit'] < 0 ? 'rp-neg' : '' ?>"><?= money($r['profit']) ?></td></tr>
+<?php endforeach; if (!$rp['prod']): ?><tr><td colspan="4">No sales.</td></tr><?php endif; ?></tbody></table></div></div>
+<div class="card"><h3>By category</h3>
+<div class="tw"><table><thead><tr><th>Category</th><th>Sold</th><th>Sales</th><th>Profit</th></tr></thead><tbody>
+<?php foreach ($rp['cat'] as $r): ?>
+<tr><td><?= e($r['nm'] ?? 'Uncategorised') ?></td><td><?= (int)$r['n'] ?></td><td class="money"><?= money($r['rev']) ?></td><td class="money"><?= money($r['profit']) ?></td></tr>
+<?php endforeach; if (!$rp['cat']): ?><tr><td colspan="4">No sales.</td></tr><?php endif; ?></tbody></table></div></div>
+</div>
+
+<div class="cols" style="margin-top:18px">
+<div class="card"><h3>By supplier</h3>
+<div class="tw"><table><thead><tr><th>Source</th><th>Sold</th><th>Sales</th><th>Cost</th><th>Profit</th></tr></thead><tbody>
+<?php foreach ($rp['sup'] as $r): ?>
+<tr><td><?= e($r['src']) ?></td><td><?= (int)$r['n'] ?></td><td class="money"><?= money($r['rev']) ?></td><td class="money"><?= money($r['cost']) ?></td><td class="money"><?= money($r['profit']) ?></td></tr>
+<?php endforeach; if (!$rp['sup']): ?><tr><td colspan="5">No sales.</td></tr><?php endif; ?></tbody></table></div></div>
+<div class="card"><h3>Top buyers</h3>
+<div class="tw"><table><thead><tr><th>User</th><th>Orders</th><th>Spent</th><th>Profit</th></tr></thead><tbody>
+<?php foreach ($rp['buyers'] as $r): ?>
+<tr><td><?= e((string)$r['email']) ?></td><td><?= (int)$r['n'] ?></td><td class="money"><?= money($r['rev']) ?></td><td class="money"><?= money($r['profit']) ?></td></tr>
+<?php endforeach; if (!$rp['buyers']): ?><tr><td colspan="4">No sales.</td></tr><?php endif; ?></tbody></table></div></div>
+</div>
+
+<div class="card" style="margin-top:18px"><h3>Wallet &amp; cash flow</h3>
+<div class="tw"><table><tbody>
+<tr><td>Approved deposits in range (<?= (int)$rp['dep']['n'] ?>)</td><td class="money"><?= money($rp['dep']['s']) ?></td></tr>
+<tr><td>Refunds to wallets (cancelled orders)</td><td class="money"><?= money($rp['ref']['s']) ?></td></tr>
+<?php if ($rp['bonus'] !== null): ?><tr><td>Referral bonuses paid</td><td class="money"><?= money($rp['bonus']) ?></td></tr><?php endif; ?>
+<tr><td>Total balance users hold right now (you owe this in goods)</td><td class="money"><?= money($coins) ?></td></tr>
+<tr><td>Value of manual stock at cost</td><td class="money"><?= money($rp['stockval']) ?></td></tr>
+</tbody></table></div>
+<?php if ($rp['pm']): $pmN = pm_all(); ?>
+<h3 style="margin-top:18px">Deposits by payment method</h3>
+<div class="tw"><table><thead><tr><th>Method</th><th>Deposits</th><th>Amount</th></tr></thead><tbody>
+<?php foreach ($rp['pm'] as $r): ?><tr><td><?= e((string)($pmN[(string)$r['m']]['name'] ?? $r['m'])) ?></td><td><?= (int)$r['n'] ?></td><td class="money"><?= money($r['s']) ?></td></tr><?php endforeach; ?></tbody></table></div>
+<?php endif; ?></div>
+
+<div class="cols" style="margin-top:18px">
+<div class="card"><h3>Low stock <small>(manual products, 5 or fewer)</small></h3>
+<?php foreach ($rp['lowstock'] as $r): ?><div class="mini"><div><b><?= e($r['name']) ?></b><small>ID <?= (int)$r['id'] ?></small></div><span class="money"><?= (int)$r['stock'] ?> left</span></div>
+<?php endforeach; if (!$rp['lowstock']): ?><div class="empty">Nothing is running low.</div><?php endif; ?></div>
+<div class="card"><h3>No sales in this range</h3>
+<?php foreach ($rp['dead'] as $r): ?><div class="mini"><div><b><?= e($r['name']) ?></b><small>ID <?= (int)$r['id'] ?></small></div></div>
+<?php endforeach; if (!$rp['dead']): ?><div class="empty">Every visible product sold at least once.</div><?php endif; ?></div>
+</div>
+<p class="rp-note">Sales = delivered orders only. Profit = price − cost, counted only for orders whose cost is known.</p>
+
+<?php /* ============================ ALL ORDERS ============================ */ elseif ($page === 'allorders'):
+  $qs = http_build_query(array_filter(['st' => $_GET['st'] ?? '', 'q' => $_GET['q'] ?? '', 'from' => $_GET['from'] ?? '', 'to' => $_GET['to'] ?? ''], fn($v) => $v !== '')); ?>
+<div class="card">
+  <form method="get" class="tb" style="flex-wrap:wrap;gap:10px;align-items:flex-end"><input type="hidden" name="p" value="allorders">
+    <div class="srch grow"><?= ai('search') ?><input type="search" name="q" value="<?= e($_GET['q'] ?? '') ?>" placeholder="Search email, product or order #" autocomplete="off"></div>
+    <select name="st" style="width:auto"><option value="">All statuses</option><?php foreach (['pending', 'delivered', 'cancelled'] as $s): ?><option value="<?= $s ?>"<?= ($_GET['st'] ?? '') === $s ? ' selected' : '' ?>><?= ucfirst($s) ?></option><?php endforeach; ?></select>
+    <input type="date" name="from" value="<?= e($_GET['from'] ?? '') ?>" style="width:auto"><input type="date" name="to" value="<?= e($_GET['to'] ?? '') ?>" style="width:auto">
+    <button class="btn">Filter</button>
+    <a class="btn ghost" href="/admin.php?export=orders<?= $qs ? '&' . e($qs) : '' ?>">Download CSV</a>
+  </form>
+  <div class="tw"><table><thead><tr><th>#</th><th class="hm">Date</th><th>User</th><th>Product</th><th>Status</th><th>Price</th><th class="hm">Cost</th><th>Profit</th></tr></thead><tbody>
+  <?php $sumP = 0; $sumPr = 0; foreach ($aoRows as $o): $pr = $o['cost'] === null ? null : (float)$o['price'] - (float)$o['cost'];
+    if ($o['status'] === 'delivered') { $sumP += (float)$o['price']; $sumPr += (float)$pr; } ?>
+  <tr><td><?= (int)$o['id'] ?></td><td class="hm"><?= e($o['created_at']) ?></td><td><?= e((string)$o['email']) ?></td><td><?= e($o['product_name']) ?></td>
+  <td><span class="badge <?= e($o['status']) ?>"><?= e($o['status']) ?></span></td><td class="money"><?= money($o['price']) ?></td>
+  <td class="hm money"><?= $o['cost'] === null ? '<small>—</small>' : money($o['cost']) ?></td>
+  <td class="money"><?= $pr === null ? '<small style="color:#b45309">no cost</small>' : ($o['status'] === 'cancelled' ? '<small>—</small>' : money($pr)) ?></td></tr>
+  <?php endforeach; if (!$aoRows): ?><tr><td colspan="8">No orders match.</td></tr><?php endif; ?></tbody></table></div>
+  <p class="rp-note">Showing the latest <?= count($aoRows) ?> (max 300). Delivered in this list: sales <b><?= money($sumP) ?></b>, profit <b><?= money($sumPr) ?></b>. The CSV download has every matching order.</p>
+</div>
+
+<?php /* ============================ EXPENSES ============================ */ elseif ($page === 'expenses'): ?>
+<?php if ($expErr): ?><div class="err"><?= e($expErr) ?></div><?php endif; ?>
+<div class="card"><h3>Add expense</h3>
+<form method="post"><?= csrf_field() ?>
+  <div class="grid2"><div><label style="margin-top:0">What for</label><input type="text" name="ex_title" maxlength="120" placeholder="e.g. Railway hosting, Facebook ads" required></div>
+  <div><label style="margin-top:0">Amount (৳)</label><input type="number" name="ex_amount" step="0.01" min="0.01" required></div></div>
+  <label>Date</label><input type="date" name="ex_date" value="<?= e($today) ?>">
+  <div class="savebar"><button class="btn" name="add_expense" value="1">Add expense</button></div>
+</form></div>
+<div class="card" style="margin-top:18px"><div class="card-h"><h3>Expenses</h3><span class="money">This month: <?= money($expMonth) ?></span></div>
+<div class="tw"><table><thead><tr><th>Date</th><th>What for</th><th>Amount</th><th></th></tr></thead><tbody>
+<?php foreach ($expRows as $x2): ?>
+<tr><td><?= e($x2['spent_on']) ?></td><td><?= e($x2['title']) ?></td><td class="money"><?= money($x2['amount']) ?></td>
+<td class="ra"><form method="post" class="acts"><?= csrf_field() ?><button class="btn sm red" name="del_expense" value="<?= (int)$x2['id'] ?>" onclick="return confirm('Delete this expense?')" aria-label="Delete"><?= ai('trash') ?></button></form></td></tr>
+<?php endforeach; if (!$expRows): ?><tr><td colspan="4">No expenses yet.</td></tr><?php endif; ?></tbody></table></div></div>
+
 <?php /* ============================ DEPOSITS ============================ */ elseif ($page === 'deposits'): ?>
 <div class="card"><h3>Pending deposits</h3>
 <div class="tw"><table><thead><tr><th>User</th><th>Amount</th><th class="hm">Note</th><th class="hm">Date</th><th></th></tr></thead><tbody>
@@ -625,9 +918,9 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <select id="pcat" style="width:auto;min-width:170px"><option value="">All categories</option><option value="0">Uncategorised</option>
       <?php foreach ($cats as $k): ?><option value="<?= (int)$k['id'] ?>"><?= e(trim(cat_icon_text($k['icon']) . ' ' . $k['name'])) ?></option><?php endforeach; ?></select>
   </div>
-  <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
+  <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Cost</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
   <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
-    $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'],
+    $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'], 'cost' => $p['cost_price'] ?? '',
            'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'],
            'src' => !empty($p['supplier_id']) ? 'bm' : (!empty($p['supplier_type']) ? 'hot' : ''),
            'sup' => !empty($p['supplier_type']) ? $p['supplier_type'] . '|' . $p['supplier_account'] : '',
@@ -637,6 +930,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if (!empty($p['supplier_id'])): ?><span class="tag">Supplier 2</span><?php elseif (!empty($p['supplier_type'])): ?><span class="tag">Supplier 1</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?= money($p['price']) ?></td>
+    <td class="hm"><?= ($p['cost_price'] ?? null) !== null ? money($p['cost_price']) : '<small>' . (!empty($p['supplier_id']) ? 'auto' : '—') . '</small>' ?></td>
     <td class="hm"><?= $p['stock'] === null ? 'Unlimited' : number_format((int)$p['stock']) ?></td>
     <td><span class="badge <?= $p['active'] ? 'on' : 'off' ?>"><?= $p['active'] ? 'Visible' : 'Hidden' ?></span></td>
     <td class="ra"><div class="acts">
@@ -655,6 +949,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   <label>Description <small>(optional)</small></label><input type="text" name="pdesc" id="p_desc" maxlength="500">
   <div class="grid2"><div><label>Price (৳)</label><input type="number" name="pprice" id="p_price" step="0.01" min="0.01" required></div>
   <div><label>Unit <small>(e.g. email)</small></label><input type="text" name="unit" id="p_unit" maxlength="20" placeholder="email"></div></div>
+  <label>Cost price (৳) <small>(what you pay to get it, used for profit reports. Blank = Supplier 2 products use supplier price × rate automatically)</small></label><input type="number" name="pcost" id="p_cost" step="0.01" min="0">
   <div class="grid2"><div><label>Category</label><select name="category_id" id="p_cat"><?= $catOpts(0) ?></select></div>
   <div><label>Stock <small>(blank = unlimited)</small></label><input type="number" name="stock" id="p_stock" min="0" step="1"></div></div>
   <label>Supplier <small>(orders for this product are bought from the chosen supplier)</small></label>
@@ -1081,7 +1376,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     $('#p_src').addEventListener('change',showSrc);
     var fill=function(v,id){
       $('#pTitle').textContent = id ? 'Edit product' : 'Add product';
-      $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||'';
+      $('#p_name').value=v.name||''; $('#p_desc').value=v.desc||''; $('#p_price').value=v.price||''; $('#p_cost').value=(v.cost===null||v.cost===undefined)?'':v.cost;
       $('#p_unit').value=v.unit||''; $('#p_cat').value=(v.cat===null||v.cat===undefined)?'':v.cat;
       $('#p_stock').value=(v.stock===null||v.stock===undefined)?'':v.stock; $('#p_pop').checked=!!+v.pop; $('#p_sup').value=v.sup||'';
       $('#p_src').value=v.src||''; $('#p_bmid').value=v.bmid||'';
@@ -1113,7 +1408,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     ['#p_bmid'].forEach(function(q){ $(q).addEventListener('input',bmSoon); });
     ['#p_an','#p_ad','#p_ap','#p_src'].forEach(function(q){ $(q).addEventListener('change',bmSoon); });
     $('#addProduct').addEventListener('click',function(){ fill({},0); bmNote.textContent=''; });
-    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd,ap:v.ap,mk:v.mk}, v.id); }); });
+    $$('[data-edit-p]').forEach(function(b){ b.addEventListener('click',function(){ var v=JSON.parse(b.dataset.editP); fill({name:v.name,desc:v.desc,price:v.price,cost:v.cost,unit:v.unit,cat:v.cat,stock:v.stock,pop:v.pop,src:v.src,sup:v.sup,bmid:v.bmid,an:v.an,ad:v.ad,sd:v.sd,ap:v.ap,mk:v.mk}, v.id); }); });
     if(REOPEN && REOPEN.t==='product') fill(REOPEN.v, REOPEN.id);
 
     var q=$('#pq'), c=$('#pcat'), none=$('#pnone');
