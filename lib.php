@@ -542,6 +542,20 @@ function page_head(string $title, string $bodyClass): void { ?>
 <title><?= e($title) ?> - <?= e(site_name()) ?></title>
 <?= css_link() ?>
 <?= icon_tags() ?>
+<script>try{if(localStorage.getItem('sx_theme')==='dark')document.documentElement.classList.add('sx-dark')}catch(e){}</script>
+<style>
+/* Night mode colours live at the end of style.css (html.sx-dark ...) */
+html.sx-dark{color-scheme:dark}
+/* Day / Night switch (side menu) */
+.sx-tm{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;padding:9px 12px;border-radius:12px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.14);font-size:13px;font-weight:600;color:#475569}
+.sx-tm .sx-tl{display:flex;align-items:center;gap:8px}
+.sx-sw{position:relative;flex:none;width:52px;height:28px;border-radius:99px;border:0;padding:0;cursor:pointer;background:linear-gradient(135deg,#fde68a,#fbbf24);transition:background .25s;box-shadow:inset 0 1px 3px rgba(0,0,0,.18)}
+.sx-sw:focus-visible{outline:2px solid #6366f1;outline-offset:2px}
+.sx-sw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;display:grid;place-items:center;font-style:normal;font-size:13px;line-height:1;transition:transform .25s;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.sx-sw[aria-checked="true"]{background:linear-gradient(135deg,#312e81,#4338ca)}
+.sx-sw[aria-checked="true"] i{transform:translateX(24px)}
+@media(prefers-reduced-motion:reduce){.sx-sw,.sx-sw i{transition:none}}
+</style>
 </head><body class="<?= e($bodyClass) ?>">
 <?php }
 
@@ -573,6 +587,13 @@ var fb=document.getElementById('fab');if(fb){fb.querySelector('.fab-main').addEv
 document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
   var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
   b.textContent=i.type==='password'?'Show':'Hide';});});
+(function(){var sw=document.getElementById('sxSw');if(!sw)return;var h=document.documentElement;
+  function paint(){var d=h.classList.contains('sx-dark');sw.setAttribute('aria-checked',d?'true':'false');
+    document.getElementById('sxKnob').textContent=d?'\uD83C\uDF19':'\u2600\uFE0F';
+    document.getElementById('sxTmI').textContent=d?'\uD83C\uDF19':'\u2600\uFE0F';
+    document.getElementById('sxTmT').textContent=d?'Night mode':'Day mode';}
+  sw.addEventListener('click',function(){var d=h.classList.toggle('sx-dark');try{localStorage.setItem('sx_theme',d?'dark':'light')}catch(e){}paint();});
+  paint();})();
 document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){document.body.classList.remove('menu');if(fb)fb.classList.remove('open');}});
 document.querySelectorAll('.cur a').forEach(function(a){a.addEventListener('click',function(e){
   e.preventDefault();if(a.classList.contains('on'))return;
@@ -623,6 +644,8 @@ function user_start(string $title, array $u, string $active): void {
   <?php endforeach; ?>
   </nav>
   <div class="sd-foot">
+    <div class="sx-tm"><span class="sx-tl"><span id="sxTmI" aria-hidden="true">&#9728;&#65039;</span><span id="sxTmT">Day mode</span></span>
+      <button type="button" class="sx-sw" id="sxSw" role="switch" aria-checked="false" aria-label="Night mode"><i id="sxKnob">&#9728;&#65039;</i></button></div>
   <?php if ($tg || $wa): ?>
     <div class="sd-sup"><span>Need help?</span>
       <?php if ($tg): ?><a href="<?= e($tg) ?>" target="_blank" rel="noopener"><?= icon('send') ?>Telegram</a><?php endif; ?>
