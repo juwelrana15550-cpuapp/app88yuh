@@ -788,3 +788,14 @@ a.wt-c:hover{transform:translateY(-2px);border-color:#c7d2fe;box-shadow:0 2px 4p
 .wt-pg span{opacity:.45}
 .wt-pg b{font-size:.84rem;color:var(--mut);font-weight:600}
 @media(max-width:380px){.wt-hero{padding:16px}.wt-bal b{font-size:1.6rem}.wt-c{gap:10px;padding:11px}.wt-i{width:40px;height:40px}.wt-s b{font-size:.95rem}}
+
+/* ===== fix: long item data must never widen the Order page ===== */
+.od{grid-template-columns:minmax(0,1fr);width:100%;max-width:100%}
+.od>*{min-width:0;max-width:100%}
+.od-box{overflow:hidden}
+.od-box .dl,.od-box .fmt{min-width:0;max-width:100%}
+.od-box .fmt select{width:100%;min-width:0}
+.od-box .dl-b{grid-template-columns:repeat(2,minmax(0,1fr))}
+.od-box .dv.mono{display:block;width:100%;max-width:100%;overflow-x:auto;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.od-hd .od-hm{min-width:0}
+.od-hd .od-hm p{overflow-wrap:anywhere}
