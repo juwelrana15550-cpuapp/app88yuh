@@ -397,6 +397,7 @@ function maintenance_gate(): void {
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
 <meta http-equiv="refresh" content="60">
+<script>try{if(localStorage.getItem('sx_theme')==='dark')document.documentElement.classList.add('sx-dark')}catch(e){}</script>
 <title>Maintenance - <?= e(site_name()) ?></title>
 <style>
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(135deg,#eef2ff,#f5f3ff);color:#1e293b;font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Bengali","Hind Siliguri",sans-serif}
@@ -407,6 +408,9 @@ h1{margin:14px 0 8px;font-size:23px}p{margin:0 0 14px;color:#475569;word-break:b
 .sup{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:16px}.sup a{padding:8px 14px;border-radius:10px;background:#f1f5f9;color:#334155;text-decoration:none;font-weight:600;font-size:14px}
 button{display:block;width:100%;padding:12px;border:0;border-radius:12px;background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 small{display:block;margin-top:12px;color:#94a3b8}
+html.sx-dark{color-scheme:dark}html.sx-dark body{background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#e2e8f0}
+html.sx-dark .box{background:#1e293b;box-shadow:0 20px 50px -20px rgba(0,0,0,.7)}html.sx-dark p{color:#94a3b8}
+html.sx-dark .eta{background:rgba(129,140,248,.16);color:#c7d2fe}html.sx-dark .sup a{background:#334155;color:#e2e8f0}
 </style></head><body>
 <div class="box">
 <?php if ($lg): ?><img src="<?= e($lg) ?>" alt=""><?php else: ?><div class="ic">🛠️</div><?php endif; ?>
@@ -535,6 +539,114 @@ function require_login(): array {
     return $u;
 }
 
+/**
+ * Night mode for everything that carries its own inline colours (catalog, buy dialog, popups, bottom bar,
+ * deposits, Get OTP card ...). Every rule starts with html.sx-dark, so it beats the light rules without
+ * !important and only applies while the Night switch is on. Pages that live in style.css keep using style.css.
+ */
+function dark_css(): string { return <<<'CSS'
+<style id="sxDark">
+/* ---- palette used below: page #0f172a · surface #1e293b · inset #162033 · line #2a3650/#334155 · text #e2e8f0 · muted #94a3b8 ---- */
+html.sx-dark .sx-tm{background:rgba(129,140,248,.12);border-color:rgba(129,140,248,.22);color:#cbd5e1}
+html.sx-dark .top .brand .bn b{color:#e0e7ff}
+
+/* Bottom bar + support button */
+html.sx-dark body .tabbar{background:rgba(15,23,42,.8);border-color:rgba(129,140,248,.22);box-shadow:0 12px 32px -12px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.05)}
+html.sx-dark body .tabbar a{color:#94a3b8}
+html.sx-dark body .tabbar a:hover{color:#c7d2fe}
+html.sx-dark body .tabbar a.on{background:rgba(129,140,248,.16);color:#c7d2fe;box-shadow:inset 0 0 0 1px rgba(129,140,248,.22)}
+html.sx-dark body .tabbar a.dep{color:#34d399}
+html.sx-dark body .tabbar a.dep .tl{color:#34d399}
+html.sx-dark body .tabbar a.dep .ico{box-shadow:0 10px 20px -6px rgba(5,150,105,.6),0 0 0 4px rgba(15,23,42,.9)}
+html.sx-dark body .fab .fab-i b{background:rgba(30,41,59,.92);border-color:rgba(148,163,184,.25);box-shadow:0 8px 18px -8px rgba(0,0,0,.7)}
+
+/* Notice popup */
+html.sx-dark .sxp-box{background:#1e293b;color:#e2e8f0;box-shadow:0 25px 60px -12px rgba(0,0,0,.8)}
+html.sx-dark .sxp-h h3{color:#f1f5f9}
+
+/* Category chips */
+html.sx-dark .sx-cat:not(.on){background:#1e293b;border-color:#334155;color:#cbd5e1;box-shadow:none}
+html.sx-dark .sx-cat:not(.on):hover{border-color:#6366f1;color:#c7d2fe}
+html.sx-dark .sx-cat:not(.on):active{background-color:#27324b;border-color:#6366f1}
+html.sx-dark .sx-cat:not(.on) .sx-ci{background:#334155}
+
+/* Product cards (classic style; the Midnight style is already dark) */
+html.sx-dark .sx-stk{background:rgba(22,163,74,.16);color:#4ade80;border-color:rgba(74,222,128,.3)}
+html.sx-dark .sx-stk.low{background:rgba(245,158,11,.16);color:#fbbf24;border-color:rgba(251,191,36,.3)}
+html.sx-dark .sx-stk.out{background:rgba(220,38,38,.16);color:#f87171;border-color:rgba(248,113,113,.3)}
+html.sx-dark .sx-pid{background:#27324b;color:#94a3b8}
+html.sx-dark .catalog .pc:not(.pc-mid) .pc-dl li{border-bottom-color:#2a3650!important}
+html.sx-dark .catalog .pc:not(.pc-mid) .pc-dom{color:#fbbf24}
+html.sx-dark .catalog .pc:not(.pc-mid) .inst{color:#34d399}
+
+/* Loading skeleton */
+html.sx-dark .sx-ld{color:#a5b4fc}
+html.sx-dark .sx-sp{border-color:#334155;border-top-color:#818cf8}
+html.sx-dark .sx-sk .pc{background:#1e293b;border-color:#2a3650}
+html.sx-dark .sx-b{background:linear-gradient(90deg,#27324b 0,#334155 100px,#27324b 200px);background-size:400px 100%}
+
+/* Buy Now dialog */
+html.sx-dark .bx-bd{background:rgba(2,6,23,.65)}
+html.sx-dark .bx-sh{background:#1e293b;color:#e2e8f0;box-shadow:0 20px 50px rgba(0,0,0,.6)}
+html.sx-dark .bx-t small,html.sx-dark .bx-row span,html.sx-dark .bx-bal{color:#94a3b8}
+html.sx-dark .bx-x{background:#334155;color:#cbd5e1}
+html.sx-dark .bx-rows{background:#162033}
+html.sx-dark .bx-row+.bx-row{border-top-color:#2a3650}
+html.sx-dark .bx-l{color:#cbd5e1}
+html.sx-dark .bx-qty button,html.sx-dark .bx-qty input{background:#162033;border-color:#334155;color:#e2e8f0}
+html.sx-dark .bx-qc button{background:#162033;border-color:#334155;color:#cbd5e1}
+html.sx-dark .bx-qc button.on{background:rgba(99,102,241,.22);border-color:#818cf8;color:#c7d2fe}
+html.sx-dark .bx-tot{border-top-color:#334155}
+html.sx-dark .bx-tot b{color:#a5b4fc}
+html.sx-dark .bx.low .bx-bal b{color:#f87171}
+html.sx-dark .bx-msg{background:rgba(220,38,38,.14);color:#fca5a5}
+html.sx-dark .bx-msg a{color:#a5b4fc}
+html.sx-dark .bx-no{background:#334155;color:#e2e8f0}
+html.sx-dark .bx-ld{background:rgba(30,41,59,.96)}
+html.sx-dark .bx-ld b{color:#e2e8f0}
+html.sx-dark .bx-ld small{color:#94a3b8}
+
+/* Deposits page: the whole .dp block runs on variables, so redefining them is enough */
+html.sx-dark .dp{--bg:#162033;--bg2:#1e293b;--ink:#e2e8f0;--mute:#94a3b8;--line:#2a3650;--acc:#7c6cff;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--sh:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3)}
+html.sx-dark .dp .dp-mth.on{background:color-mix(in srgb,var(--c) 18%,#162033)}
+html.sx-dark .dp .dp-usd{color:#34d399;background:rgba(52,211,153,.1);border-color:rgba(52,211,153,.25)}
+html.sx-dark .dp .dp-usd small{color:#6ee7b7}
+/* Deposit result popup (sits outside .dp, so its colours are set directly) */
+html.sx-dark .dp-ok{background:#1e293b;color:#e2e8f0;box-shadow:0 24px 60px rgba(0,0,0,.7)}
+html.sx-dark .dp-ok .sub,html.sx-dark .dp-ok .rows span{color:#94a3b8}
+html.sx-dark .dp-ok .sub b{color:#e2e8f0}
+html.sx-dark .dp-ok .big{color:#34d399}
+html.sx-dark .dp-ok .rows{background:#162033;border-color:#2a3650}
+html.sx-dark .dp-ok .rows div{border-bottom-color:#2a3650}
+html.sx-dark .dp-ok .badge2{color:#fbbf24}
+html.sx-dark .dp-ok button.ghost{background:#27324b;color:#e2e8f0;border-color:#334155}
+html.sx-dark .dp-ok .lock{color:#64748b}
+html.sx-dark .stp{background:#162033;border-color:#2a3650}
+html.sx-dark .stp li{color:#64748b}
+html.sx-dark .stp li i{border-color:#475569}
+html.sx-dark .stp li.on{color:#e2e8f0}
+html.sx-dark .stp li.on i{border-color:#818cf8;border-top-color:transparent}
+html.sx-dark .stp li.done{color:#34d399}
+html.sx-dark .stp li.done i{background:#12a36b;border-color:#12a36b}
+html.sx-dark .spin{border-color:rgba(129,140,248,.2);border-top-color:#818cf8}
+html.sx-dark .spin-ic svg{stroke:#818cf8}
+
+/* Get OTP card */
+html.sx-dark .otp-card{background:#1e293b;color:#e2e8f0;box-shadow:0 4px 20px rgba(0,0,0,.45)}
+html.sx-dark .otp-h small,html.sx-dark .otp-meta .mask{color:#94a3b8}
+html.sx-dark .otp-ta{background:#162033;border-color:#334155;color:#e2e8f0}
+html.sx-dark .otp-ta::placeholder{color:#64748b}
+html.sx-dark .otp-ta:focus{background:#0f172a;border-color:#818cf8;box-shadow:0 0 0 4px rgba(129,140,248,.18)}
+html.sx-dark .otp-meta .cnt{color:#64748b}
+html.sx-dark .otp-note{background:rgba(220,38,38,.14);border-color:rgba(248,113,113,.35);color:#fca5a5}
+html.sx-dark .otp-info{background:linear-gradient(180deg,rgba(99,102,241,.14),rgba(124,58,237,.1));border-color:rgba(129,140,248,.25)}
+html.sx-dark .otp-info h4{color:#c7d2fe}
+html.sx-dark .otp-info li{color:#cbd5e1}
+html.sx-dark .otp-code,html.sx-dark .otp-host{background:#162033;border-color:#334155;color:#a5b4fc}
+</style>
+CSS;
+}
+
 function page_head(string $title, string $bodyClass): void { ?>
 <!DOCTYPE html>
 <html lang="en"><head>
@@ -556,6 +668,7 @@ html.sx-dark{color-scheme:dark}
 .sx-sw[aria-checked="true"] i{transform:translateX(17px)}
 @media(prefers-reduced-motion:reduce){.sx-sw,.sx-sw i{transition:none}}
 </style>
+<?= dark_css() ?>
 </head><body class="<?= e($bodyClass) ?>">
 <?php }
 
