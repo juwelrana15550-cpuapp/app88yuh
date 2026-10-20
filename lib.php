@@ -724,6 +724,12 @@ function product_icon_value(array $p, ?array $cat = null): string {
     return (string)($cat['icon'] ?? '');
 }
 
+/** Product icon markup for order pages: the product's own icon, else an automatic guess from its name, else the category icon, else a box. */
+function ord_ico_html(string $own, string $cat, string $name): string {
+    $v = product_icon_value(['icon' => $own, 'name' => $name], ['icon' => $cat]);
+    return $v !== '' ? ico_html($v) : icon('box');
+}
+
 function catalog_url(array $x): string {
     $x = array_filter($x, fn($v) => $v !== '' && $v !== 0 && $v !== null);
     return '/dashboard.php' . ($x ? '?' . http_build_query($x) : '');
