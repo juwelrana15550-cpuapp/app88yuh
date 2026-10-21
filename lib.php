@@ -506,6 +506,8 @@ function icon(string $n): string {
         'download'=> '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
         'copy'    => '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
         'box'     => '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+        'wallet'  => '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
+        'bolt'    => '<path d="M13 2 3 14h9l-1 8 10-12h-9z"/>',
         'bag'     =>'<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
     ];
     return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' . ($p[$n] ?? '') . '</svg>';
@@ -939,7 +941,7 @@ function user_start(string $title, array $u, string $active): void {
   <div class="sd-head">
     <div class="sd-top"><span>My account</span><button type="button" class="x sd-x" aria-label="Close menu" onclick="document.body.classList.remove('menu')"><?= icon('x') ?></button></div>
     <div class="sd-user"><div class="sd-av"><?= e(mb_strtoupper(mb_substr($name, 0, 1))) ?></div><div class="sd-id"><b><?= e($name) ?></b><small><?= e($u['email']) ?></small></div></div>
-    <div class="sd-bal"><div><span>Wallet balance</span><b><?= money($u['coins']) ?></b></div><a class="sd-add" href="/deposits.php"><?= icon('plus') ?>Add funds</a></div>
+    <div class="sd-bal"><div><span>Wallet balance</span><b><?= money($u['coins']) ?></b></div><a class="sd-add" href="/deposits.php"><?= icon('wallet') ?>Add funds</a></div>
   </div>
   <nav class="sd-nav">
   <?php foreach ($groups as $grp => $items): ?>
@@ -972,7 +974,7 @@ function user_end(): void {
     $tabs = [
         'dashboard'    => ['/dashboard.php', 'Home', 'home'],
         'orders'       => ['/orders.php', 'Orders', 'cart'],
-        'deposits'     => ['/deposits.php', 'Deposit', 'plus'],
+        'deposits'     => ['/deposits.php', 'Deposit', 'wallet'],
         'live'         => ['/live.php', 'Live View', 'live'],
         'otp'          => ['/otp.php', 'Get OTP', 'key'],
     ]; ?>
@@ -988,7 +990,7 @@ body .tabbar a.dep{background:transparent;box-shadow:none;color:#059669}
 body .tabbar a.dep .ico{position:relative;display:flex;align-items:center;justify-content:center;width:46px;height:46px;margin-top:-22px;border-radius:50%;color:#fff;
   background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 10px 20px -6px rgba(5,150,105,.75),0 0 0 4px rgba(255,255,255,.75)}
 body .tabbar a.dep .ico:after{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 0 rgba(16,185,129,.55);animation:depPulse 2.2s ease-out infinite}
-body .tabbar a.dep .ico svg.i{width:24px;height:24px;stroke-width:2.8}
+body .tabbar a.dep .ico svg.i{width:23px;height:23px;stroke-width:2.1;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25))}
 body .tabbar a.dep .tl{color:#047857;font-weight:700}
 body .tabbar a.dep.on{background:transparent;box-shadow:none}
 @keyframes depPulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,.5)}70%,100%{box-shadow:0 0 0 12px rgba(16,185,129,0)}}
@@ -1021,6 +1023,28 @@ body .fab .fab-i b{width:46px;height:46px;background:rgba(255,255,255,.88);-webk
 body .fab .fab-i b svg.i{width:22px;height:22px}
 body .fab .fab-i.tg b{color:#229ed9}
 body .fab .fab-i.wa b{color:#16a34a}
+
+/* Premium deposit button: emerald-gold gradient, glossy shine sweep */
+body .tabbar a.dep .ico{background:linear-gradient(145deg,#34d399 0%,#059669 55%,#047857 100%);box-shadow:0 10px 22px -6px rgba(5,150,105,.8),0 0 0 4px rgba(255,255,255,.75),0 0 0 5.5px rgba(251,191,36,.55),inset 0 1px 1px rgba(255,255,255,.55);overflow:hidden}
+body .tabbar a.dep .ico:before{content:"";position:absolute;top:-30%;left:-60%;width:40%;height:160%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.65),transparent);transform:rotate(12deg);animation:depShine 3.6s ease-in-out infinite;pointer-events:none}
+@keyframes depShine{0%,55%{left:-60%}100%{left:130%}}
+@media(prefers-reduced-motion:reduce){body .tabbar a.dep .ico:before{animation:none}}
+
+/* Premium support button: lightning-style glowing ring + sparkle */
+body .fab .fab-main{position:relative;isolation:isolate;overflow:visible;background:linear-gradient(145deg,#818cf8 0%,#4f46e5 55%,#7c3aed 100%);border:1px solid rgba(255,255,255,.45);box-shadow:0 8px 22px -6px rgba(79,70,229,.75),inset 0 1px 1px rgba(255,255,255,.5);animation:fabPulse 2.6s ease-in-out infinite}
+body .fab .fab-main:before{content:"";position:absolute;inset:-4px;border-radius:50%;z-index:-1;background:conic-gradient(from 0deg,#22d3ee,#818cf8,#c084fc,#f0abfc,#fde68a,#22d3ee);animation:fabSpin 3.2s linear infinite;filter:blur(.4px)}
+body .fab .fab-main:after{content:"";position:absolute;inset:-8px;border-radius:50%;z-index:-2;background:conic-gradient(from 0deg,#22d3ee,#818cf8,#c084fc,#f0abfc,#fde68a,#22d3ee);animation:fabSpin 3.2s linear infinite;filter:blur(12px);opacity:.55}
+body .fab .fab-main svg.i{filter:drop-shadow(0 0 6px rgba(255,255,255,.85));stroke-width:2.2}
+@keyframes fabSpin{to{transform:rotate(360deg)}}
+@keyframes fabPulse{0%,100%{box-shadow:0 8px 22px -6px rgba(79,70,229,.75),inset 0 1px 1px rgba(255,255,255,.5)}50%{box-shadow:0 8px 30px -2px rgba(168,85,247,.85),inset 0 1px 1px rgba(255,255,255,.6)}}
+body .fab.open .fab-main{animation:none;box-shadow:0 8px 26px -4px rgba(168,85,247,.8),inset 0 1px 1px rgba(255,255,255,.6)}
+body .fab .fab-i b{position:relative;background:linear-gradient(145deg,rgba(255,255,255,.96),rgba(241,245,249,.9));border:1px solid rgba(255,255,255,.9)}
+body .fab .fab-i b:after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid currentColor;opacity:0;animation:fabRing 2.4s ease-out infinite;pointer-events:none}
+body .fab .fab-i.wa b:after{animation-delay:1.2s}
+@keyframes fabRing{0%{transform:scale(.85);opacity:.55}100%{transform:scale(1.35);opacity:0}}
+body .fab .fab-i.tg b{box-shadow:0 8px 20px -6px rgba(34,158,217,.75),0 0 14px rgba(34,158,217,.45),inset 0 1px 0 #fff}
+body .fab .fab-i.wa b{box-shadow:0 8px 20px -6px rgba(22,163,74,.75),0 0 14px rgba(34,197,94,.45),inset 0 1px 0 #fff}
+@media(prefers-reduced-motion:reduce){body .fab .fab-main,body .fab .fab-main:before,body .fab .fab-main:after,body .fab .fab-i b:after{animation:none}}
 </style>
 <nav class="tabbar" aria-label="Quick navigation">
 <?php foreach ($tabs as $k => $t): ?>
@@ -1514,6 +1538,7 @@ function buy_modal_html(float $balance, int $c, string $q): void {
   var res=document.getElementById('cat-res'), row=document.getElementById('catRow'), form=document.getElementById('catF'), buy=null;
   if(!res||!row||!form||!window.fetch) return;   // without fetch the tiles are normal links and still work
   var qIn=form.elements.q, state={c:0,q:''}, ctl=null, seq=0, tmo=null;
+  var cache={}, CK=function(c,q){return c+'|'+q;};
   var on=row.querySelector('.sx-cat.on'); state.c=on?parseInt(on.dataset.c,10)||0:0; state.q=qIn.value.trim();
   if(on) row.scrollLeft+=on.getBoundingClientRect().left-row.getBoundingClientRect().left-16;
   function qs(c,q){ var p=[]; if(c) p.push('c='+c); if(q) p.push('q='+encodeURIComponent(q)); return p.join('&'); }
@@ -1537,12 +1562,14 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
     clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);
     var y0=window.pageYOffset; res.style.minHeight=res.offsetHeight+'px'; res.classList.add('busy'); res.setAttribute('aria-busy','true');
-    if(!live) res.innerHTML=skeleton();   // loading interface until the products arrive (while typing the old list stays until the new one is ready)
+    var hit=cache[CK(c,q)];
+    if(hit&&!live){ res.innerHTML=hit; res.classList.remove('busy'); res.removeAttribute('aria-busy'); res.style.minHeight=''; window.scrollTo(0,y0); }   // already loaded: products appear instantly, fresh data is fetched silently below
+    else if(!live) res.innerHTML=skeleton();   // loading interface until the products arrive (while typing the old list stays until the new one is ready)
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
       .then(function(h){
         if(my!==seq) return;
-        clearTimeout(tmo); res.innerHTML=h; res.classList.remove('busy'); res.removeAttribute('aria-busy'); window.scrollTo(0,y0);
+        clearTimeout(tmo); cache[CK(c,q)]=h; if(!hit||live||h!==hit){ res.innerHTML=h; } res.classList.remove('busy'); res.removeAttribute('aria-busy'); window.scrollTo(0,y0);
         res.style.minHeight=Math.max(160,Math.round(window.innerHeight-res.getBoundingClientRect().top))+'px';   // list never gets shorter than the screen, so the page can't jump up
       })
       .catch(function(e){ if(my!==seq) return; if(e&&e.name==='AbortError'&&!timedOut) return; clearTimeout(tmo); location.href=url; });
@@ -1554,6 +1581,21 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     load(c,qIn.value.trim(),true,false);
   });
   form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim(),true,true); });
+  /* prefetch all categories (quietly, one by one) so every tap shows its products instantly */
+  function prefetch(){
+    var ids=[0].concat(Array.prototype.map.call(row.querySelectorAll('.sx-cat'),function(a){return parseInt(a.dataset.c,10)||0;})).filter(function(v,i,a){return a.indexOf(v)===i;});
+    var cur=state.c; cache[CK(cur,state.q)]=cache[CK(cur,state.q)]||res.innerHTML;
+    (function next(i){
+      if(i>=ids.length) return;
+      var c=ids[i], q=state.q;
+      if(cache[CK(c,q)]) return next(i+1);
+      fetch('/dashboard.php?'+(qs(c,q)?qs(c,q)+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'}})
+        .then(function(r){ return r.ok?r.text():''; }).then(function(h){ if(h&&!cache[CK(c,q)]) cache[CK(c,q)]=h; }).catch(function(){})
+        .then(function(){ setTimeout(function(){ next(i+1); },120); });
+    })(0);
+  }
+  if(window.requestIdleCallback) requestIdleCallback(prefetch,{timeout:1500}); else setTimeout(prefetch,600);
+
   /* live search: products update while you type */
   var liveT=null;
   qIn.addEventListener('input',function(e){
