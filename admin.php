@@ -1464,29 +1464,6 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 
 <div class="dw" id="dw" hidden><div class="dw-bg" data-dwclose></div>
   <aside class="dw-p" role="dialog" aria-label="Manage user"><button type="button" class="dw-x" data-dwclose aria-label="Close">×</button><div id="dwBody"></div></aside></div>
-<script>
-(function(){
-  var dw=document.getElementById('dw'), body=document.getElementById('dwBody'); if(!dw||!body) return;
-  var cur=null;
-  function tab(n){ [].forEach.call(body.querySelectorAll('[data-tab]'),function(b){b.classList.toggle('on',b.dataset.tab===n);}); [].forEach.call(body.querySelectorAll('[data-pane]'),function(p){p.hidden=p.dataset.pane!==n;}); }
-  function openU(id,t){
-    cur=id; dw.hidden=false; document.body.style.overflow='hidden'; body.innerHTML='<div class="dw-load">Loading…</div>';
-    fetch('/admin.php?uq='+encodeURIComponent(id)+'&ret='+encodeURIComponent(location.pathname+location.search),{credentials:'same-origin'})
-      .then(function(r){return r.text();}).then(function(h){ if(cur!==id) return; body.innerHTML=h; tab(t||'ov'); body.scrollTop=0; })
-      .catch(function(){ body.innerHTML='<div class="err" style="margin:20px">Could not load this user. Try again.</div>'; });
-  }
-  function closeU(){ dw.hidden=true; cur=null; document.body.style.overflow=''; }
-  document.addEventListener('click',function(e){
-    var o=e.target.closest('[data-uq]'); if(o){ e.preventDefault(); openU(o.dataset.uq,o.dataset.t); return; }
-    if(e.target.closest('[data-dwclose]')){ closeU(); return; }
-    var tb=e.target.closest('#dwBody [data-tab]'); if(tb){ tab(tb.dataset.tab); return; }
-    var ch=e.target.closest('#dwBody [data-amt]');
-    if(ch){ var a=body.querySelector('input[name=amount]'), r=body.querySelector('input[name=dir][value='+ch.dataset.dir+']'); if(a) a.value=ch.dataset.amt; if(r) r.checked=true; }
-  });
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&!dw.hidden) closeU(); });
-  var m=location.search.match(/[?&]open=(\d+)(?:&t=(\w+))?/); if(m) openU(m[1],m[2]||'ov');
-})();
-</script>
 <?php endif; ?>
 
 <?php /* ============================ TRANSACTIONS ============================ */ elseif ($page === 'transactions'):
@@ -1798,35 +1775,140 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 
   document.addEventListener('keydown',function(e){ if(e.key==='Escape') document.body.classList.remove('menu'); });
 
-  /* ---------- no page reloads: links and forms are sent in the background and only the page content is swapped ---------- */
-  var busy=false;
+  /* ---------- no page reloads: links and forms are sent in the background and only the page content is swapped ----------
+     Admin pages are also prefetched and kept in memory, so a menu click shows the page instantly (it is refreshed quietly afterwards). */
+  var inflight=0, saving=false, gen=0, cgen=0, cache={}, pend={}, TTL=5000, warming=false;
   var readReopen=function(){ var el=$('#reopenData'); try{ return el&&el.dataset.v ? JSON.parse(el.dataset.v) : null; }catch(x){ return null; } };
+  var keyOf=function(u){ var x=new URL(u,location.href); return x.pathname+x.search; };
+
+  /* swap the page content */
+  var render=function(t,u,opt){
+    var doc=new DOMParser().parseFromString(t,'text/html'), sh=doc.querySelector('.shell'), cur=$('.shell');
+    if(!sh||!cur){ location.href=u; return false; }   /* e.g. the login page: do a normal load */
+    var y=window.pageYOffset;
+    cur.innerHTML=sh.innerHTML;
+    document.title=doc.title;
+    document.body.classList.remove('menu');
+    if(opt.push) history.pushState(null,'',u); else history.replaceState(null,'',u);
+    initPage();
+    window.scrollTo(0,opt.top?0:y);
+    return true;
+  };
+  /* keep a fetched page (only real admin pages, and only if no data was changed in the meantime) */
+  var store=function(k,r,cg){
+    if(cg!==cgen||!r.ok||r.t.indexOf('class="shell"')<0) return null;
+    try{ if(new URL(r.u,location.href).pathname!=='/admin.php') return null; }catch(x){ return null; }
+    return (cache[k]={t:r.t,u:r.u,at:Date.now()});
+  };
+  var getPage=function(k){
+    if(pend[k]) return pend[k];
+    var cg=cgen;
+    var p=fetch(k,{credentials:'same-origin',headers:{'X-Requested-With':'fetch'}}).then(function(r){
+      return r.text().then(function(t){ return store(k,{t:t,u:r.url,ok:r.ok},cg); });
+    });
+    pend[k]=p; var d=function(){ delete pend[k]; }; p.then(d,d);
+    return p;
+  };
+
   var soft=function(url,opt){
     opt=opt||{};
-    if(busy) return;
-    busy=true; if(!opt.quiet) document.body.classList.add('ld');
+    if((opt.quiet&&inflight>0)||(opt.body&&saving)) return;
+    if(opt.body) saving=true;
+    var g=++gen, cg=cgen, k=keyOf(url);
+    inflight++; if(!opt.quiet&&!opt.body) document.body.classList.add('ld');
+    if(opt.body){ cache={}; cgen++; }        /* data is about to change: forget every saved page */
+    var pill=null, pillT=null;
+    if(opt.body){ pillT=setTimeout(function(){ pill=document.createElement('div'); pill.textContent='Saving…'; pill.style.cssText='position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#111827;color:#fff;padding:8px 16px;border-radius:99px;font-size:13px;z-index:9999;opacity:.92;pointer-events:none'; document.body.appendChild(pill); },900); }
     var init={credentials:'same-origin',headers:{'X-Requested-With':'fetch'}};
     if(opt.body){ init.method='POST'; init.body=opt.body; }
-    fetch(url,init).then(function(r){ return r.text().then(function(t){ return {t:t,u:r.url}; }); }).then(function(r){
-      busy=false; document.body.classList.remove('ld');
-      var doc=new DOMParser().parseFromString(r.t,'text/html'), sh=doc.querySelector('.shell'), cur=$('.shell');
-      if(!sh||!cur){ location.href=r.u; return; }   /* e.g. the login page: do a normal load */
-      var y=window.pageYOffset;
-      cur.innerHTML=sh.innerHTML;
-      document.title=doc.title;
-      document.body.classList.remove('menu');
-      if(opt.push) history.pushState(null,'',r.u); else history.replaceState(null,'',r.u);
-      initPage();
-      window.scrollTo(0,opt.top?0:y);
-    }).catch(function(){ busy=false; document.body.classList.remove('ld'); if(!opt.quiet) alert('Connection problem. Please try again.'); });
+    var fdone=false, fin=function(){ if(fdone) return; fdone=true; inflight--; if(opt.body) saving=false; if(!inflight) document.body.classList.remove('ld'); clearTimeout(pillT); if(pill&&pill.parentNode) pill.parentNode.removeChild(pill); };
+    fetch(url,init).then(function(r){ return r.text().then(function(t){ return {t:t,u:r.url,ok:r.ok}; }); }).then(function(r){
+      fin();
+      if(g!==gen) return;                      /* a newer click took over */
+      if(!opt.body) store(k,r,cg);
+      if(render(r.t,r.u,opt)&&opt.body) setTimeout(warm,600);
+    }).catch(function(){ fin(); if(g===gen&&!opt.quiet) alert('Connection problem. Please try again.'); if(opt.body) soft(location.href,{quiet:true}); });
   };
+
+  /* highlight the menu item at once (before the page is even there) */
+  var mark=function(k){
+    var p; try{ p=new URL(k,location.href).searchParams.get('p')||''; }catch(x){ return; }
+    $$('.s-nav a').forEach(function(a){
+      var q; try{ q=new URL(a.href,location.href).searchParams.get('p')||''; }catch(x){ return; }
+      a.classList.toggle('on',q===p); if(q===p) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current');
+    });
+  };
+  /* show the saved copy now, then quietly fetch a fresh one and swap it in only if it changed */
+  var reval=function(k,prev){
+    var g=gen;
+    getPage(k).then(function(e){
+      if(!e||g!==gen||e.t===prev) return;
+      var kc=keyOf(location.href); if(kc!==k&&kc!==keyOf(e.u)) return;
+      var a=document.activeElement;
+      if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)&&a.closest&&a.closest('.main')) return;
+      if(document.querySelector('dialog[open]')) return;
+      var dwEl=$('#dw'); if(dwEl&&!dwEl.hidden) return;
+      render(e.t,e.u,{push:false,top:false});
+    }).catch(function(){});
+  };
+  var nav=function(url,opt){
+    var k=keyOf(url), c=cache[k];
+    document.body.classList.remove('menu'); mark(k);
+    if(c){ gen++; if(render(c.t,c.u,opt)&&Date.now()-c.at>TTL) reval(k,c.t); return; }
+    soft(url,opt);
+  };
+  /* warm the cache with every menu page, one at a time */
+  var warm=function(){
+    if(warming||(navigator.connection&&navigator.connection.saveData)) return;
+    warming=true;
+    var ks=[], seen={}, here=keyOf(location.href);
+    $$('.s-nav a').forEach(function(a){ try{ var u=new URL(a.href,location.href); var k=u.pathname+u.search; if(u.pathname==='/admin.php'&&!seen[k]){ seen[k]=1; if(k!==here) ks.push(k); } }catch(x){} });
+    ks.push(here);
+    var i=0;
+    (function nx(){
+      if(i>=ks.length){ warming=false; return; }
+      var k=ks[i++];
+      if(cache[k]){ nx(); return; }
+      getPage(k).catch(function(){}).then(function(){ setTimeout(nx,400); });
+    })();
+  };
+  var pf=function(e){
+    var a=e.target.closest&&e.target.closest('.s-nav a'); if(!a) return;
+    try{ var k=keyOf(a.href); if(!cache[k]) getPage(k).catch(function(){}); }catch(x){}
+  };
+  document.addEventListener('touchstart',pf,{passive:true});
+  document.addEventListener('mouseover',pf);
+
+  /* ---------- user quick-manage drawer (Users page); works after in-place page swaps ---------- */
+  var dwCur=null;
+  var dwTab=function(n){ var b=$('#dwBody'); if(!b) return; $$('[data-tab]',b).forEach(function(x){ x.classList.toggle('on',x.dataset.tab===n); }); $$('[data-pane]',b).forEach(function(p){ p.hidden=p.dataset.pane!==n; }); };
+  var dwOpen=function(id,t){
+    var dw=$('#dw'), b=$('#dwBody'); if(!dw||!b) return;
+    dwCur=id; dw.hidden=false; document.body.style.overflow='hidden'; b.innerHTML='<div class="dw-load">Loading…</div>';
+    fetch('/admin.php?uq='+encodeURIComponent(id)+'&ret='+encodeURIComponent(location.pathname+location.search),{credentials:'same-origin'})
+      .then(function(r){return r.text();}).then(function(h){ var b2=$('#dwBody'); if(dwCur!==id||!b2) return; b2.innerHTML=h; dwTab(t||'ov'); b2.scrollTop=0; })
+      .catch(function(){ var b2=$('#dwBody'); if(b2) b2.innerHTML='<div class="err" style="margin:20px">Could not load this user. Try again.</div>'; });
+  };
+  var dwClose=function(){ var dw=$('#dw'); if(dw) dw.hidden=true; dwCur=null; document.body.style.overflow=''; };
+  document.addEventListener('click',function(e){
+    var o=e.target.closest('[data-uq]'); if(o){ e.preventDefault(); dwOpen(o.dataset.uq,o.dataset.t); return; }
+    if(e.target.closest('[data-dwclose]')){ dwClose(); return; }
+    var tb=e.target.closest('#dwBody [data-tab]'); if(tb){ dwTab(tb.dataset.tab); return; }
+    var ch=e.target.closest('#dwBody [data-amt]');
+    if(ch){ var b=$('#dwBody'), a=b.querySelector('input[name=amount]'), r=b.querySelector('input[name=dir][value='+ch.dataset.dir+']'); if(a) a.value=ch.dataset.amt; if(r) r.checked=true; }
+  });
+  document.addEventListener('keydown',function(e){ var dw=$('#dw'); if(e.key==='Escape'&&dw&&!dw.hidden) dwClose(); });
+
   document.addEventListener('click',function(e){
     if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey) return;
     var a=e.target.closest&&e.target.closest('a[href]');
     if(!a||a.target||a.hasAttribute('download')||a.getAttribute('href').charAt(0)==='#') return;
     var u; try{ u=new URL(a.href,location.href); }catch(x){ return; }
     if(u.origin!==location.origin||u.pathname!=='/admin.php') return;
-    e.preventDefault(); soft(u.href,{push:true,top:true});
+    if(u.searchParams.has('export')) return;                       /* file downloads: normal browser handling */
+    e.preventDefault();
+    if(keyOf(u.href)===keyOf(location.href)){ window.scrollTo(0,0); reval(keyOf(u.href),cache[keyOf(u.href)]&&cache[keyOf(u.href)].t); if(!cache[keyOf(u.href)]) soft(u.href,{top:true}); return; }
+    nav(u.href,{push:true,top:true});
   });
   document.addEventListener('submit',function(e){
     var f=e.target;
@@ -1836,12 +1918,79 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     e.preventDefault();
     var fd=new FormData(f), s=e.submitter;
     if(s&&s.name&&!fd.has(s.name)) fd.append(s.name,s.value);
+    if(saving) return;                                              /* a save is still running */
+    optimistic(f,s);
     soft(u.href,{body:fd});
   });
-  window.addEventListener('popstate',function(){ soft(location.href,{top:true}); });
+  /* show the result of a save/edit/delete at once; the server's answer then replaces it with the real data (and fixes it if something failed) */
+  var optimistic=function(f,s){
+    var dl=f.closest&&f.closest('dialog'); if(dl&&dl.open){ try{ dl.close(); }catch(x){} return; }
+    var n=s&&s.name; if(!n) return;
+    var row;
+    if(n==='deliver'||n==='cancel_order'){ row=f.closest('.ord'); if(row) row.style.display='none'; }
+    else if(n==='del_expense'||n==='pm_delete'||n==='delete_category'||n==='u_disc_del'){ row=f.closest('tr,.mini'); if(row) row.style.display='none'; }
+    else if(n==='toggle_product'||n==='pm_toggle'||n==='toggle_category'){ var t=(s.textContent||'').trim(); if(t==='Hide') s.textContent='Show'; else if(t==='Show') s.textContent='Hide'; }
+  };
+
+  /* ---------- live search / filters: results appear while you type (the search box itself is never replaced, so the keyboard stays open) ---------- */
+  var lt=null, lseq=0;
+  var keepSwap=function(t,u,keep){
+    var doc=new DOMParser().parseFromString(t,'text/html'), sh=doc.querySelector('.shell'), cur=$('.shell');
+    if(!sh||!cur||!cur.contains(keep)) return false;
+    var sync=function(o,n){
+      var oc=Array.prototype.slice.call(o.childNodes), nc=Array.prototype.slice.call(n.childNodes), ki=-1, i, j;
+      for(i=0;i<oc.length;i++){ if(oc[i]===keep||(oc[i].contains&&oc[i].contains(keep))){ ki=i; break; } }
+      if(ki<0||ki>=nc.length||oc[ki].nodeName!==nc[ki].nodeName) return false;
+      for(j=oc.length-1;j>ki;j--) o.removeChild(oc[j]);
+      for(j=ki+1;j<nc.length;j++) o.appendChild(document.importNode(nc[j],true));
+      for(j=0;j<ki;j++) o.removeChild(oc[j]);
+      for(j=0;j<ki;j++) o.insertBefore(document.importNode(nc[j],true),oc[ki]);
+      return oc[ki]===keep ? true : sync(oc[ki],nc[ki]);
+    };
+    var y=window.pageYOffset;
+    if(!sync(cur,sh)) return false;
+    document.title=doc.title;
+    history.replaceState(null,'',u);
+    initPage();
+    window.scrollTo(0,y);
+    return true;
+  };
+  var liveFilter=function(form,keep,now){
+    clearTimeout(lt);
+    lt=setTimeout(function(){
+      var ps=new URLSearchParams(), fd=new FormData(form);
+      fd.forEach(function(v,k){ if(typeof v==='string'&&v!=='') ps.append(k,v); });
+      var url='/admin.php?'+ps.toString(), my=++lseq, cg=cgen;
+      fetch(url,{credentials:'same-origin',headers:{'X-Requested-With':'fetch'}})
+        .then(function(r){ return r.text().then(function(t){ return {t:t,u:r.url,ok:r.ok}; }); })
+        .then(function(r){
+          if(my!==lseq||!document.body.contains(keep)) return;
+          store(keyOf(url),r,cg);
+          if(!keepSwap(r.t,r.u,keep)) render(r.t,r.u,{push:false,top:false});
+        }).catch(function(){});
+    }, now?0:220);
+  };
+  var isFilterForm=function(f){ return f&&f.tagName==='FORM'&&(f.getAttribute('method')||'get').toLowerCase()==='get'&&f.querySelector('input[type=hidden][name=p]')&&$('.main')&&$('.main').contains(f); };
+  document.addEventListener('input',function(e){
+    var i=e.target; if(e.isComposing||!i||!i.matches||!i.matches('input[type=search][name]')||!isFilterForm(i.form)) return;
+    liveFilter(i.form,i,false);
+  });
+  document.addEventListener('change',function(e){
+    var i=e.target; if(!i||!i.matches||!i.matches('select,input[type=date]')||!isFilterForm(i.form)) return;
+    liveFilter(i.form,i,true);
+  });
+  document.addEventListener('submit',function(e){
+    var f=e.target; if(!isFilterForm(f)) return;
+    e.preventDefault();
+    var i=f.querySelector('input[type=search][name]')||f.elements[0];
+    liveFilter(f,document.activeElement&&f.contains(document.activeElement)?document.activeElement:i,true);
+  });
+  window.addEventListener('popstate',function(){ nav(location.href,{top:true}); });
 
   function initPage(){
   REOPEN=readReopen();
+  dwCur=null; document.body.style.overflow='';
+  var dm=location.search.match(/[?&]open=(\d+)(?:&t=(\w+))?/); if(dm&&$('#dw')) dwOpen(dm[1],dm[2]||'ov');
 
   /* dialogs: close buttons + click on backdrop */
   $$('dialog').forEach(function(d){
@@ -1999,6 +2148,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
   }
   }
   initPage();
+  setTimeout(warm,1200);
 })();
 </script>
 </body></html>

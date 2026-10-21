@@ -1528,15 +1528,16 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     return '<div class="sx-ld" role="status"><span class="sx-sp"></span>Loading products…</div><div class="catalog sx-sk">'+card+card+card+card+'</div>';
   }
   function toResults(){ try{ res.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} }
-  function load(c,q,push,scroll){
-    state.c=c; state.q=q; qIn.value=q; sync();
+  function load(c,q,push,scroll,live){
+    state.c=c; state.q=q; if(!live) qIn.value=q; sync();
     var s=qs(c,q), url='/dashboard.php'+(s?'?'+s:'');
-    if(push!==false) try{ history.pushState({c:c,q:q},'',url); }catch(e){}
+    if(push==='replace') try{ history.replaceState({c:c,q:q},'',url); }catch(e){}
+    else if(push!==false) try{ history.pushState({c:c,q:q},'',url); }catch(e){}
     var my=++seq, timedOut=false;
     if(ctl) ctl.abort(); ctl=window.AbortController?new AbortController():null;
     clearTimeout(tmo); tmo=setTimeout(function(){ timedOut=true; if(ctl) ctl.abort(); else if(my===seq) location.href=url; }, 12000);
     var y0=window.pageYOffset; res.style.minHeight=res.offsetHeight+'px'; res.classList.add('busy'); res.setAttribute('aria-busy','true');
-    res.innerHTML=skeleton();   // loading interface until the products arrive
+    if(!live) res.innerHTML=skeleton();   // loading interface until the products arrive (while typing the old list stays until the new one is ready)
     fetch('/dashboard.php?'+(s?s+'&':'')+'ajax=1',{credentials:'same-origin',headers:{'X-Requested-With':'fetch'},signal:ctl?ctl.signal:undefined})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.text(); })
       .then(function(h){
@@ -1553,6 +1554,13 @@ function buy_modal_html(float $balance, int $c, string $q): void {
     load(c,qIn.value.trim(),true,false);
   });
   form.addEventListener('submit',function(e){ e.preventDefault(); load(state.c,qIn.value.trim(),true,true); });
+  /* live search: products update while you type */
+  var liveT=null;
+  qIn.addEventListener('input',function(e){
+    if(e.isComposing) return;
+    clearTimeout(liveT);
+    liveT=setTimeout(function(){ var q=qIn.value.trim(); if(q===state.q) return; load(state.c,q,'replace',false,true); },200);
+  });
   res.addEventListener('click',function(e){ var a=e.target.closest('.res a'); if(!a) return; e.preventDefault(); load(state.c,'',true,false); });
   window.addEventListener('popstate',function(){
     var p=new URLSearchParams(location.search); load(parseInt(p.get('c'),10)||0,(p.get('q')||'').slice(0,80),false,false);
