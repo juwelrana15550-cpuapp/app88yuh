@@ -655,6 +655,20 @@ function page_head(string $title, string $bodyClass): void { ?>
 <?= css_link() ?>
 <?= icon_tags() ?>
 <script>try{if(localStorage.getItem('sx_theme')==='dark')document.documentElement.classList.add('sx-dark')}catch(e){}</script>
+<script>
+/* Smooth-nav support: remembers timers/listeners a page registers so they can be cleaned up when the next page is swapped in */
+(function(){var W=window,S=W.__sx={T:new Set(),L:[],P:location.pathname,on:true,run:false,err:false,st:W.setTimeout,ct:W.clearTimeout,ci:W.clearInterval,si:W.setInterval};
+W.setTimeout=function(f,d){var a=[].slice.call(arguments),id;if(typeof f==='function')a[0]=function(){S.T.delete(id);return f.apply(this,arguments)};id=S.st.apply(W,a);S.T.add(id);return id};
+W.setInterval=function(){var id=S.si.apply(W,arguments);S.T.add(id);return id};
+[W,document].forEach(function(t){var o=t.addEventListener;t.addEventListener=function(ty,fn,op){
+  if(S.run&&(ty==='DOMContentLoaded'||ty==='load')&&typeof fn==='function'){var th=this;S.st.call(W,function(){fn.call(th,new Event(ty))},0);return}
+  if(S.on&&typeof fn==='function'){
+    if(ty==='popstate'){var f0=fn;fn=function(e){if(location.pathname===S.P)return f0.call(this,e)}}
+    S.L.push({t:t,ty:ty,fn:fn,op:op});
+  }
+  return o.call(this,ty,fn,op);};});
+})();
+</script>
 <style>
 /* Night mode colours live at the end of style.css (html.sx-dark ...) */
 html.sx-dark{color-scheme:dark}
@@ -692,14 +706,18 @@ function header_html(string $title, ?array $user = null, string $variant = 'app'
 
 function footer_html(bool $closeMain = true): void { if ($closeMain) echo "</main>\n"; ?>
 <script>
-document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
+if(window.__sx)__sx.on=false;   // from here on, listeners/timers belong to the page frame, not to a swappable page
+window.sxBind=function(r){r=r||document;
+r.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
   var t=document.querySelector(b.dataset.copy);t.select();
   try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand('copy')}
   var o=b.textContent;b.textContent='Copied!';setTimeout(function(){b.textContent=o},1500);});});
-var fb=document.getElementById('fab');if(fb){fb.querySelector('.fab-main').addEventListener('click',function(){fb.classList.toggle('open')});}
-document.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
+r.querySelectorAll('[data-toggle]').forEach(function(b){b.addEventListener('click',function(){
   var i=document.querySelector(b.dataset.toggle);i.type=i.type==='password'?'text':'password';
   b.textContent=i.type==='password'?'Show':'Hide';});});
+};
+window.sxBind(document);
+var fb=document.getElementById('fab');if(fb){fb.querySelector('.fab-main').addEventListener('click',function(){fb.classList.toggle('open')});}
 (function(){var sw=document.getElementById('sxSw');if(!sw)return;var h=document.documentElement;
   function paint(){var d=h.classList.contains('sx-dark');sw.setAttribute('aria-checked',d?'true':'false');
     document.getElementById('sxKnob').textContent=d?'\uD83C\uDF19':'\u2600\uFE0F';
@@ -712,6 +730,181 @@ document.querySelectorAll('.cur a').forEach(function(a){a.addEventListener('clic
   e.preventDefault();if(a.classList.contains('on'))return;
   var u=new URL(location.href);u.searchParams.set('cur',a.dataset.cur);location.href=u.toString();});});
 </script>
+<?php if (isset($GLOBALS['__active'])): ?>
+<script>
+/* Instant navigation: Home / Orders / Deposit / Live View / Get OTP (and the other account pages) swap in place, no page reload.
+   Pages are prefetched in the background; any problem falls back to a normal page load. */
+(function(){
+var S=window.__sx;
+if(!S||!window.fetch||!window.DOMParser||!window.URL||!history.pushState)return;
+var D=document,B=D.body,main=D.querySelector('main.with-side'),bar=D.querySelector('.tabbar');
+if(!main||!bar)return;
+var PAGES={'/dashboard.php':1,'/orders.php':1,'/order.php':1,'/deposits.php':1,'/live.php':1,'/otp.php':1,'/transactions.php':1,'/referrals.php':1,'/api_keys.php':1,'/profile.php':1};
+var cache={},pend={},scr={},seq=0,TTL=5000,noop=function(){};
+var curKey=location.pathname+location.search;
+var RM=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
+try{history.scrollRestoration='manual'}catch(e){}
+
+/* nodes that stay for the whole visit: everything except <main> and what sits between it and the tab bar */
+var keep=new Set();
+(function(){var r=new Set(),n=main;while(n&&n!==bar){r.add(n);n=n.nextElementSibling}
+  Array.prototype.forEach.call(B.children,function(c){if(!r.has(c))keep.add(c)});})();
+
+/* thin progress line (only appears if a page is not ready within 120ms) */
+var pb=D.createElement('div');
+pb.style.cssText='position:fixed;left:0;top:0;height:2px;width:0;background:#6366f1;z-index:99999;opacity:0;pointer-events:none;transition:width .35s ease,opacity .25s';
+B.appendChild(pb);keep.add(pb);
+var pt=null,shown=false;
+function prog(on){
+  if(pt){S.ct.call(window,pt);pt=null}
+  if(on){shown=false;pt=S.st.call(window,function(){shown=true;pb.style.opacity='1';pb.style.width='70%'},120)}
+  else if(shown){shown=false;pb.style.width='100%';pt=S.st.call(window,function(){pb.style.opacity='0';pt=S.st.call(window,function(){pb.style.width='0'},260)},120)}
+}
+function hard(u,rep){if(rep)location.replace(u);else location.href=u}
+function keyOf(u){return u.pathname+u.search}
+
+function fetchPage(key){
+  if(pend[key])return pend[key];
+  var p=fetch(key,{credentials:'same-origin',headers:{'X-Requested-With':'fetch','X-SX-Nav':'1'}}).then(function(r){
+    var ru=new URL(r.url,location.href);
+    if(!r.ok||!PAGES[ru.pathname])throw new Error('nav');
+    if((r.headers.get('content-type')||'').indexOf('html')<0)throw new Error('nav');
+    return r.text().then(function(t){var k2=keyOf(ru),e={html:t,t:Date.now(),key:k2};cache[key]=e;cache[k2]=e;return e});
+  });
+  pend[key]=p;var done=function(){delete pend[key]};p.then(done,done);
+  return p;
+}
+
+function mark(p){
+  Array.prototype.forEach.call(D.querySelectorAll('.tabbar a,.sd-nav a'),function(a){
+    var on=false;try{on=new URL(a.href,location.href).pathname===p}catch(e){}
+    a.classList.toggle('on',on);
+    if(on)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');
+  });
+}
+
+function teardown(){
+  S.T.forEach(function(id){S.ct.call(window,id);S.ci.call(window,id)});S.T.clear();
+  S.L.forEach(function(x){x.t.removeEventListener(x.ty,x.fn,x.op)});S.L.length=0;
+  Array.prototype.slice.call(B.children).forEach(function(c){if(!keep.has(c))B.removeChild(c)});
+  B.classList.remove('menu','sxp-lock');D.documentElement.style.overflow='';
+}
+
+function runScripts(list,i,done){
+  for(;i<list.length;i++){
+    var o=list[i],s=D.createElement('script'),t=o.getAttribute('data-sx-t')||'';
+    for(var j=0;j<o.attributes.length;j++){var n=o.attributes[j].name;if(n!=='type'&&n!=='data-sx-t')s.setAttribute(n,o.attributes[j].value)}
+    if(t)s.setAttribute('type',t);
+    if(o.getAttribute('src')){
+      var nx=i+1;s.onload=s.onerror=function(){runScripts(list,nx,done)};
+      o.parentNode.replaceChild(s,o);return;
+    }
+    s.text=o.text;o.parentNode.replaceChild(s,o);
+  }
+  done();
+}
+
+function apply(e,push,y){
+  var doc=new DOMParser().parseFromString(e.html,'text/html');
+  var nm=doc.querySelector('main.with-side'),nb=doc.querySelector('.tabbar');
+  if(!nm||!nb||!doc.querySelector('.sd-nav')){hard(e.key);return}
+  var nn=[];for(var n=nm;n&&n!==nb;n=n.nextElementSibling)nn.push(n);
+  /* park the scripts (so the browser does not run them on insert); they are run one by one below */
+  nn.forEach(function(x){
+    var l=x.tagName==='SCRIPT'?[x]:Array.prototype.slice.call(x.querySelectorAll('script'));
+    l.forEach(function(s){s.setAttribute('data-sx-t',s.getAttribute('type')||'');s.setAttribute('type','text/x-sx')});
+  });
+  if(push)history.pushState({sx:1},'',e.key);
+  S.P=location.pathname;
+  teardown();
+  if(doc.title)D.title=doc.title;
+  ['.tabbar','.sd-nav','.sd-bal'].forEach(function(s){var a=D.querySelector(s),b=doc.querySelector(s);if(a&&b)a.innerHTML=b.innerHTML});
+  var tp=D.querySelector('.tp-prof'),tn=doc.querySelector('.tp-prof');if(tp&&tn)tp.className=tn.className;
+  var ins=nn.map(function(x){var c=D.importNode(x,true);bar.parentNode.insertBefore(c,bar);return c});
+  var sc=[];ins.forEach(function(x){if(x.tagName==='SCRIPT')sc.push(x);else Array.prototype.push.apply(sc,x.querySelectorAll('script'))});
+  S.err=false;S.on=true;S.run=true;
+  runScripts(sc,0,function(){
+    S.on=false;S.run=false;
+    if(S.err){hard(location.href,true);return}
+    ins.forEach(function(x){if(x.nodeType===1)window.sxBind(x)});
+    window.scrollTo(0,y||0);
+    if(!RM&&ins[0]&&ins[0].animate)try{ins[0].animate([{opacity:.45},{opacity:1}],{duration:160,easing:'ease-out'})}catch(er){}
+  });
+}
+
+function refresh(key,my){
+  var old=cache[key]&&cache[key].html;
+  fetchPage(key).then(function(e){
+    if(my!==seq||e.html===old)return;
+    var a=D.activeElement;
+    if(a&&/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(a.tagName)&&a.closest&&a.closest('main'))return;
+    var m=D.getElementById('buyM');if(m&&m.classList.contains('open'))return;
+    apply(e,false,window.pageYOffset);
+  }).catch(noop);
+}
+
+function go(url,push){
+  var u=new URL(url,location.href),key=keyOf(u),my=++seq;
+  scr[curKey]=window.pageYOffset;curKey=key;
+  B.classList.remove('menu');
+  mark(u.pathname);
+  var y=push?0:(scr[key]||0);
+  function show(e){if(my!==seq)return;curKey=e.key;apply(e,push,y)}
+  var c=cache[key];
+  if(c){show(c);if(Date.now()-c.t>TTL)refresh(key,my)}
+  else{prog(true);fetchPage(key).then(function(e){prog(false);show(e)},function(){prog(false);if(my===seq)hard(u.href)})}
+}
+
+D.addEventListener('click',function(e){
+  if(e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;
+  var a=e.target.closest&&e.target.closest('a[href]');
+  if(!a||(a.target&&a.target!=='_self')||a.hasAttribute('download'))return;
+  var u;try{u=new URL(a.href,location.href)}catch(er){return}
+  if(u.origin!==location.origin||!PAGES[u.pathname])return;
+  if(u.pathname===location.pathname&&u.search===location.search){
+    e.preventDefault();if(u.hash)return;
+    try{window.scrollTo({top:0,behavior:RM?'auto':'smooth'})}catch(er){window.scrollTo(0,0)}
+    refresh(keyOf(u),seq);return;
+  }
+  e.preventDefault();go(u.href,true);
+});
+
+window.addEventListener('popstate',function(){
+  if(location.pathname===S.P)return;                       /* same page: its own code (category tiles) handles it */
+  if(!PAGES[location.pathname]){location.reload();return}
+  go(location.href,false);
+});
+
+window.addEventListener('error',function(){if(S.run)S.err=true},true);
+
+function pf(e){
+  var a=e.target.closest&&e.target.closest('a[href]');if(!a)return;
+  try{var u=new URL(a.href,location.href);if(u.origin===location.origin&&PAGES[u.pathname]&&!cache[keyOf(u)])fetchPage(keyOf(u)).catch(noop)}catch(er){}
+}
+D.addEventListener('touchstart',pf,{passive:true});D.addEventListener('mouseover',pf);
+
+/* warm the cache with the bar pages (and this page, so coming back to it is instant) */
+var warming=false;
+function idle(){
+  if(warming||(navigator.connection&&navigator.connection.saveData))return;
+  warming=true;
+  var ls=[],seen={};
+  Array.prototype.forEach.call(D.querySelectorAll('.tabbar a,.sd-nav a,.sd-add'),function(a){
+    try{var u=new URL(a.href,location.href);if(u.origin===location.origin&&PAGES[u.pathname]&&!seen[keyOf(u)]){seen[keyOf(u)]=1;if(keyOf(u)!==curKey)ls.push(keyOf(u))}}catch(er){}
+  });
+  ls.push(curKey);
+  var i=0;(function nx(){
+    if(i>=ls.length){warming=false;return}var k=ls[i++];
+    if(cache[k]){nx();return}
+    fetchPage(k).catch(noop).then(function(){S.st.call(window,nx,350)});
+  })();
+}
+var bg=D.querySelector('.burger');if(bg)bg.addEventListener('click',function(){S.st.call(window,idle,0)});
+if(D.readyState==='complete')S.st.call(window,idle,800);
+else window.addEventListener('load',function(){S.st.call(window,idle,800)});
+})();
+</script>
+<?php endif; ?>
 </body></html>
 <?php }
 
