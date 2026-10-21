@@ -290,6 +290,23 @@ if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'users') {
     foreach ($st as $r) fputcsv($o, [$r['id'], $r['email'], $r['coins'], $r['dep'], $r['spent'], $r['ords'], $r['refs'], $r['banned'] ? 'yes' : '', $r['created_at'], $r['last_login_at']]);
     fclose($o); exit;
 }
+// CSV export of local stock (products without a supplier): one row per stock line. Filters: pid (one product), c (category id, 0 = uncategorised), s (unsold | sold | all)
+if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'stock') {
+    $pdoS = db();
+    $w = ["(p.supplier_id IS NULL OR p.supplier_id = 0)", "(p.supplier_type IS NULL OR p.supplier_type = '')"]; $a = [];
+    if (($_GET['pid'] ?? '') !== '') { $w[] = 'p.id = ?'; $a[] = (int)$_GET['pid']; }
+    if (($_GET['c'] ?? '') !== '') { if ((int)$_GET['c'] === 0) $w[] = '(p.category_id IS NULL OR p.category_id = 0)'; else { $w[] = 'p.category_id = ?'; $a[] = (int)$_GET['c']; } }
+    $sf = $_GET['s'] ?? 'unsold';
+    if ($sf === 'unsold') $w[] = 'si.order_id IS NULL'; elseif ($sf === 'sold') $w[] = 'si.order_id IS NOT NULL'; else $sf = 'all';
+    $st = $pdoS->prepare('SELECT si.id, p.id pid, p.name, c.name cat, si.line, si.order_id, si.created_at FROM stock_items si JOIN products p ON p.id = si.product_id LEFT JOIN categories c ON c.id = p.category_id WHERE ' . implode(' AND ', $w) . ' ORDER BY p.id, si.id LIMIT 200000');
+    $st->execute($a);
+    header('Content-Type: text/csv; charset=utf-8'); header('Cache-Control: no-store');
+    header('Content-Disposition: attachment; filename="local-stock-' . $sf . '-' . date('Y-m-d') . '.csv"');
+    $o = fopen('php://output', 'w'); fwrite($o, "\xEF\xBB\xBF");
+    fputcsv($o, ['Product ID', 'Product', 'Category', 'Stock line', 'Status', 'Order ID', 'Added']);
+    foreach ($st as $r) fputcsv($o, [$r['pid'], $r['name'], $r['cat'] ?? '', $r['line'], $r['order_id'] === null ? 'Unsold' : 'Sold', $r['order_id'] ?? '', $r['created_at']]);
+    fclose($o); exit;
+}
 if (!empty($_SESSION['admin']) && ($_GET['export'] ?? '') === 'orders') {
     $pdoX = db(); acct_backfill($pdoX);
     header('Content-Type: text/csv; charset=utf-8');
@@ -652,10 +669,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pdo->prepare('UPDATE products SET name=?, description=?, price=?, category_id=?, stock=?, unit=?, popular=?, supplier_type=?, supplier_account=?, supplier_id=?, sup_auto_name=?, sup_auto_desc=?, sup_show_dom=?, sup_auto_price=?, sup_markup=?, cost_price=?, card_style=? WHERE id=?')
                         ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], $f['style'], (int)$_POST['update_product']]);
                     $msg = 'Product saved.';
+                    $_SESSION['recent_prod'] = ['id' => (int)$_POST['update_product'], 'l' => 'Recently edited', 't' => time()];
                 } else {
                     $pdo->prepare('INSERT INTO products (name, description, price, category_id, stock, unit, popular, supplier_type, supplier_account, supplier_id, sup_auto_name, sup_auto_desc, sup_show_dom, sup_auto_price, sup_markup, cost_price, card_style) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
                         ->execute([$f['name'], $f['desc'], $f['price'], $f['cat'], $f['stock'], $f['unit'], $f['popular'], $f['sup_t'], $f['sup_a'], $f['sup_id'], $f['an'], $f['ad'], $f['sd'], $f['ap'], $f['mk'], $f['cost'], $f['style']]);
                     $msg = 'Product added.';
+                    $_SESSION['recent_prod'] = ['id' => (int)$pdo->lastInsertId(), 'l' => 'Just added', 't' => time()];
                 }
                 $syncBm = $f['src'] === 'bm'; $syncHot = $f['src'] === 'hot';
                 $syncDet = $syncBm && ($f['an'] || $f['ad'] || $f['ap']) && function_exists('bm_sync_details');
@@ -706,6 +725,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (isset($_POST['toggle_product'])) {
             $pdo->prepare('UPDATE products SET active = 1 - active WHERE id = ?')->execute([(int)$_POST['toggle_product']]);
             go('products', 'Product visibility updated.');
+
+        } elseif (isset($_POST['delete_product'])) {
+            $dpid = (int)$_POST['delete_product'];
+            $pc = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE product_id = ? AND status = 'pending'");
+            $pc->execute([$dpid]);
+            if ((int)$pc->fetchColumn() > 0) {
+                flash('err', 'This product still has pending orders. Deliver or cancel them first, or just hide the product.');
+            } else {
+                with_tx($pdo, function (PDO $pdo) use ($dpid) {
+                    $pdo->prepare('DELETE FROM stock_items WHERE product_id = ? AND order_id IS NULL')->execute([$dpid]);   // unsold stock only; delivered items stay with their orders
+                    $pdo->prepare('DELETE FROM user_discounts WHERE product_id = ?')->execute([$dpid]);
+                    $pdo->prepare('DELETE FROM products WHERE id = ?')->execute([$dpid]);
+                });
+                if (!empty($_SESSION['recent_prod']) && (int)$_SESSION['recent_prod']['id'] === $dpid) unset($_SESSION['recent_prod']);
+                if (function_exists('icon_gc')) { try { icon_gc($pdo); } catch (Throwable $ex) {} }
+                flash('ok', 'Product deleted. Past orders keep their details.');
+            }
+            go('products');
 
         } elseif (isset($_POST['supplier_deliver'])) {
             $oidS = (int)($_POST['order_id'] ?? 0);
@@ -1206,17 +1243,21 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <div class="srch grow"><?= ai('search') ?><input type="search" id="pq" placeholder="Search by name or ID" autocomplete="off"></div>
     <select id="pcat" style="width:auto;min-width:170px"><option value="">All categories</option><option value="0">Uncategorised</option>
       <?php foreach ($cats as $k): ?><option value="<?= (int)$k['id'] ?>"><?= e(trim(cat_icon_text($k['icon']) . ' ' . $k['name'])) ?></option><?php endforeach; ?></select>
+    <select id="pexs" style="width:auto" aria-label="Which stock lines to export"><option value="unsold">Unsold stock</option><option value="sold">Sold stock</option><option value="all">All stock</option></select>
+    <a class="btn ghost" id="pexa" href="/admin.php?export=stock&amp;s=unsold" title="Download the local stock lines (current category filter applies)"><?= ai('download') ?>Export stock</a>
   </div>
   <div class="tw"><table id="ptable"><thead><tr><th>Product</th><th class="hm">Category</th><th>Price</th><th class="hm">Cost</th><th class="hm">Stock</th><th>Status</th><th></th></tr></thead><tbody>
-  <?php foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null;
+  <?php $stkCnt = []; try { foreach ($pdo->query('SELECT product_id, COUNT(*) n FROM stock_items GROUP BY product_id') as $sr) $stkCnt[(int)$sr['product_id']] = (int)$sr['n']; } catch (Throwable $ex) {}
+  $rcp = $_SESSION['recent_prod'] ?? null; if ($rcp && time() - (int)$rcp['t'] > 3600) $rcp = null;
+  foreach ($products as $p): $k = $catById[(int)$p['category_id']] ?? null; $isRecent = $rcp && (int)$rcp['id'] === (int)$p['id'];
     $pj = ['id' => (int)$p['id'], 'name' => $p['name'], 'desc' => (string)$p['description'], 'price' => (string)$p['price'], 'unit' => (string)$p['unit'], 'cost' => $p['cost_price'] ?? '',
            'cat' => $p['category_id'] ?? '', 'stock' => $p['stock'] === null ? '' : (int)$p['stock'], 'pop' => (int)$p['popular'], 'cs' => (string)($p['card_style'] ?? ''),
            'src' => !empty($p['supplier_id']) ? 'bm' : (!empty($p['supplier_type']) ? 'hot' : ''),
            'sup' => !empty($p['supplier_type']) ? $p['supplier_type'] . '|' . $p['supplier_account'] : '',
            'bmid' => !empty($p['supplier_id']) ? (int)$p['supplier_id'] : '',
            'an' => (int)($p['sup_auto_name'] ?? 0), 'ad' => (int)($p['sup_auto_desc'] ?? 0), 'sd' => (int)($p['sup_show_dom'] ?? 1), 'ap' => (int)($p['sup_auto_price'] ?? 0), 'mk' => (string)($p['sup_markup'] ?? '0')]; ?>
-  <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>">
-    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if (!empty($p['supplier_id'])): ?><span class="tag">Supplier 2</span><?php elseif (!empty($p['supplier_type'])): ?><span class="tag">Supplier 1</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
+  <tr data-s="<?= e(mb_strtolower($p['name'] . ' ' . $p['id'])) ?>" data-c="<?= (int)$p['category_id'] ?>"<?= $isRecent ? ' class="p-recent" data-recent="1"' : '' ?>>
+    <td><div class="pn"><span class="ci"><?= cat_icon($k['icon'] ?? '', '1em') ?></span><div><b><?= e($p['name']) ?></b><?php if ($isRecent): ?><span class="tag p-rtag"><?= e($rcp['l']) ?></span><?php endif; ?><?php if ($p['popular']): ?><span class="tag">Popular</span><?php endif; ?><?php if (!empty($p['supplier_id'])): ?><span class="tag">Supplier 2</span><?php elseif (!empty($p['supplier_type'])): ?><span class="tag">Supplier 1</span><?php endif; ?><small>ID <?= (int)$p['id'] ?><?= $p['unit'] !== '' ? ' · per ' . e($p['unit']) : '' ?></small></div></div></td>
     <td class="hm"><?= $k ? e($k['name']) : '<small>—</small>' ?></td>
     <td class="money"><?= money($p['price']) ?></td>
     <td class="hm"><?= ($p['cost_price'] ?? null) !== null ? money($p['cost_price']) : '<small>' . (!empty($p['supplier_id']) ? 'auto' : '—') . '</small>' ?></td>
@@ -1225,6 +1266,8 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     <td class="ra"><div class="acts">
       <button type="button" class="btn sm ghost" data-edit-p="<?= e(json_encode($pj, JSON_UNESCAPED_UNICODE)) ?>"><?= ai('pencil') ?>Edit</button>
       <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm ghost" name="toggle_product" value="<?= (int)$p['id'] ?>"><?= $p['active'] ? 'Hide' : 'Show' ?></button></form>
+      <?php if (!empty($stkCnt[(int)$p['id']]) && empty($p['supplier_id']) && empty($p['supplier_type'])): ?><a class="btn sm ghost" data-pexp="<?= (int)$p['id'] ?>" href="/admin.php?export=stock&amp;pid=<?= (int)$p['id'] ?>&amp;s=unsold" title="Export this product's stock (<?= (int)$stkCnt[(int)$p['id']] ?> lines)" aria-label="Export stock"><?= ai('download') ?></a><?php endif; ?>
+      <form method="post" class="inl"><?= csrf_field() ?><button class="btn sm red" name="delete_product" value="<?= (int)$p['id'] ?>" onclick="return confirm('Delete this product for good? Unsold stock lines are removed too. Past orders keep their details. (Use Hide if you only want it off the shop.)')" aria-label="Delete product" title="Delete product"><?= ai('trash') ?></button></form>
     </div></td>
   </tr>
   <?php endforeach; ?></tbody></table></div>
@@ -1303,6 +1346,8 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
 <style>
 .um-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;margin-top:18px}
 .um-g .card h3{margin-top:0}.um-note{font-size:.82rem;color:#6b7280;margin:6px 0}
+.p-recent{background:rgba(79,70,229,.07)}.p-recent td:first-child{box-shadow:inset 3px 0 0 #6366f1}
+.tag.p-rtag{background:#e0e7ff;color:#3730a3;font-weight:600}
 .badge.ban{background:#fee2e2;color:#b91c1c}.um-flag{display:inline-block;padding:2px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:.74rem;margin:2px 4px 2px 0}
 .um-pg{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}.um-pos{color:#16a34a}.um-neg{color:#dc2626}
 /* avatar + status pill */
@@ -1928,7 +1973,7 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
     var n=s&&s.name; if(!n) return;
     var row;
     if(n==='deliver'||n==='cancel_order'){ row=f.closest('.ord'); if(row) row.style.display='none'; }
-    else if(n==='del_expense'||n==='pm_delete'||n==='delete_category'||n==='u_disc_del'){ row=f.closest('tr,.mini'); if(row) row.style.display='none'; }
+    else if(n==='del_expense'||n==='pm_delete'||n==='delete_category'||n==='u_disc_del'||n==='delete_product'){ row=f.closest('tr,.mini'); if(row) row.style.display='none'; }
     else if(n==='toggle_product'||n==='pm_toggle'||n==='toggle_category'){ var t=(s.textContent||'').trim(); if(t==='Hide') s.textContent='Show'; else if(t==='Show') s.textContent='Hide'; }
   };
 
@@ -2046,7 +2091,20 @@ body.ld::after{content:"";position:fixed;top:0;left:-40%;height:3px;width:40%;ba
       rows.forEach(function(r){ var ok=(!t||r.dataset.s.indexOf(t)>-1)&&(cv===''||r.dataset.c===cv); r.style.display=ok?'':'none'; if(ok)n++; });
       none.textContent='No products match your search.'; none.style.display = (rows.length && !n) ? '' : 'none';
     };
-    q.addEventListener('input',filt); c.addEventListener('change',filt);
+    var sx=$('#pexs'), xa=$('#pexa');
+    var exSync=function(){
+      var sv=sx.value; xa.href='/admin.php?export=stock&s='+sv+(c.value!==''?'&c='+encodeURIComponent(c.value):'');
+      $$('[data-pexp]').forEach(function(a){ a.href='/admin.php?export=stock&pid='+a.dataset.pexp+'&s='+sv; });
+    };
+    sx.addEventListener('change',exSync); c.addEventListener('change',exSync);
+    var PF='adm_pfilter', pst=null;
+    try{ pst=JSON.parse(sessionStorage.getItem(PF)||'null'); }catch(x){}
+    if(pst){ if(pst.q) q.value=pst.q; if(pst.c!==undefined&&pst.c!==null&&c.querySelector('option[value="'+pst.c+'"]')) c.value=pst.c; }
+    var keep=function(){ try{ sessionStorage.setItem(PF,JSON.stringify({q:q.value,c:c.value})); }catch(x){} };
+    q.addEventListener('input',function(){ filt(); keep(); }); c.addEventListener('change',function(){ filt(); keep(); });
+    filt(); exSync();
+    var rr=$('#ptable tr[data-recent]');
+    if(rr){ if(rr.style.display==='none'){ q.value=''; c.value=''; keep(); filt(); } try{ rr.scrollIntoView({block:'center'}); }catch(x){} }
   }
 
   /* ---------- transactions ---------- */
