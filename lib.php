@@ -557,9 +557,9 @@ html.sx-dark body .tabbar{background:rgba(15,23,42,.8);border-color:rgba(129,140
 html.sx-dark body .tabbar a{color:#94a3b8}
 html.sx-dark body .tabbar a:hover{color:#c7d2fe}
 html.sx-dark body .tabbar a.on{background:rgba(129,140,248,.16);color:#c7d2fe;box-shadow:inset 0 0 0 1px rgba(129,140,248,.22)}
-html.sx-dark body .tabbar a.dep{color:#34d399}
-html.sx-dark body .tabbar a.dep .tl{color:#34d399}
-html.sx-dark body .tabbar a.dep .ico{box-shadow:0 10px 20px -6px rgba(5,150,105,.6),0 0 0 4px rgba(15,23,42,.9)}
+html.sx-dark body .tabbar a.dep{color:#a78bfa}
+html.sx-dark body .tabbar a.dep .tl{color:#a78bfa}
+html.sx-dark body .tabbar a.dep .ico{box-shadow:0 10px 20px -6px rgba(124,58,237,.6),0 0 0 4px rgba(15,23,42,.9),0 0 0 5.5px rgba(167,139,250,.6)}
 html.sx-dark body .fab .fab-i b{background:rgba(30,41,59,.92);border-color:rgba(148,163,184,.25);box-shadow:0 8px 18px -8px rgba(0,0,0,.7)}
 
 /* Notice popup */
@@ -1024,27 +1024,20 @@ body .fab .fab-i b svg.i{width:22px;height:22px}
 body .fab .fab-i.tg b{color:#229ed9}
 body .fab .fab-i.wa b{color:#16a34a}
 
-/* Premium deposit button: emerald-gold gradient, glossy shine sweep */
-body .tabbar a.dep .ico{background:linear-gradient(145deg,#34d399 0%,#059669 55%,#047857 100%);box-shadow:0 10px 22px -6px rgba(5,150,105,.8),0 0 0 4px rgba(255,255,255,.75),0 0 0 5.5px rgba(251,191,36,.55),inset 0 1px 1px rgba(255,255,255,.55);overflow:hidden}
-body .tabbar a.dep .ico:before{content:"";position:absolute;top:-30%;left:-60%;width:40%;height:160%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.65),transparent);transform:rotate(12deg);animation:depShine 3.6s ease-in-out infinite;pointer-events:none}
+/* Deposit button: royal purple, glossy shine sweep */
+body .tabbar a.dep{color:#6d28d9}
+body .tabbar a.dep .tl{color:#5b21b6}
+body .tabbar a.dep .ico{background:linear-gradient(145deg,#a78bfa 0%,#7c3aed 55%,#5b21b6 100%);box-shadow:0 10px 22px -6px rgba(124,58,237,.75),0 0 0 4px rgba(255,255,255,.75),0 0 0 5.5px #c4b5fd,inset 0 1px 1px rgba(255,255,255,.5);overflow:hidden}
+body .tabbar a.dep .ico:after{box-shadow:0 0 0 0 rgba(124,58,237,.5)}
+body .tabbar a.dep .ico:before{content:"";position:absolute;top:-30%;left:-60%;width:40%;height:160%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.6),transparent);transform:rotate(12deg);animation:depShine 3.6s ease-in-out infinite;pointer-events:none}
 @keyframes depShine{0%,55%{left:-60%}100%{left:130%}}
+@keyframes depPulse{0%{box-shadow:0 0 0 0 rgba(124,58,237,.5)}70%,100%{box-shadow:0 0 0 12px rgba(124,58,237,0)}}
 @media(prefers-reduced-motion:reduce){body .tabbar a.dep .ico:before{animation:none}}
 
-/* Premium support button: lightning-style glowing ring + sparkle */
-body .fab .fab-main{position:relative;isolation:isolate;overflow:visible;background:linear-gradient(145deg,#818cf8 0%,#4f46e5 55%,#7c3aed 100%);border:1px solid rgba(255,255,255,.45);box-shadow:0 8px 22px -6px rgba(79,70,229,.75),inset 0 1px 1px rgba(255,255,255,.5);animation:fabPulse 2.6s ease-in-out infinite}
-body .fab .fab-main:before{content:"";position:absolute;inset:-4px;border-radius:50%;z-index:-1;background:conic-gradient(from 0deg,#22d3ee,#818cf8,#c084fc,#f0abfc,#fde68a,#22d3ee);animation:fabSpin 3.2s linear infinite;filter:blur(.4px)}
-body .fab .fab-main:after{content:"";position:absolute;inset:-8px;border-radius:50%;z-index:-2;background:conic-gradient(from 0deg,#22d3ee,#818cf8,#c084fc,#f0abfc,#fde68a,#22d3ee);animation:fabSpin 3.2s linear infinite;filter:blur(12px);opacity:.55}
-body .fab .fab-main svg.i{filter:drop-shadow(0 0 6px rgba(255,255,255,.85));stroke-width:2.2}
-@keyframes fabSpin{to{transform:rotate(360deg)}}
-@keyframes fabPulse{0%,100%{box-shadow:0 8px 22px -6px rgba(79,70,229,.75),inset 0 1px 1px rgba(255,255,255,.5)}50%{box-shadow:0 8px 30px -2px rgba(168,85,247,.85),inset 0 1px 1px rgba(255,255,255,.6)}}
-body .fab.open .fab-main{animation:none;box-shadow:0 8px 26px -4px rgba(168,85,247,.8),inset 0 1px 1px rgba(255,255,255,.6)}
-body .fab .fab-i b{position:relative;background:linear-gradient(145deg,rgba(255,255,255,.96),rgba(241,245,249,.9));border:1px solid rgba(255,255,255,.9)}
-body .fab .fab-i b:after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid currentColor;opacity:0;animation:fabRing 2.4s ease-out infinite;pointer-events:none}
-body .fab .fab-i.wa b:after{animation-delay:1.2s}
-@keyframes fabRing{0%{transform:scale(.85);opacity:.55}100%{transform:scale(1.35);opacity:0}}
-body .fab .fab-i.tg b{box-shadow:0 8px 20px -6px rgba(34,158,217,.75),0 0 14px rgba(34,158,217,.45),inset 0 1px 0 #fff}
-body .fab .fab-i.wa b{box-shadow:0 8px 20px -6px rgba(22,163,74,.75),0 0 14px rgba(34,197,94,.45),inset 0 1px 0 #fff}
-@media(prefers-reduced-motion:reduce){body .fab .fab-main,body .fab .fab-main:before,body .fab .fab-main:after,body .fab .fab-i b:after{animation:none}}
+/* Support button: soft indigo aura */
+body .fab .fab-main{animation:none;background:#4f46e5;-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid rgba(255,255,255,.3);color:#fff;box-shadow:0 0 0 5px rgba(99,102,241,.18),0 0 22px rgba(99,102,241,.55)}
+body .fab.open .fab-main{box-shadow:0 0 0 5px rgba(99,102,241,.25),0 0 26px rgba(99,102,241,.65)}
+body .fab .fab-i b{background:#fff;border:1px solid #e0e7ff;box-shadow:0 0 12px rgba(99,102,241,.25)}
 </style>
 <nav class="tabbar" aria-label="Quick navigation">
 <?php foreach ($tabs as $k => $t): ?>
