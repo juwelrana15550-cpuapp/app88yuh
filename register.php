@@ -1,4 +1,5 @@
 <?php require __DIR__ . '/lib.php';
+require __DIR__ . '/auth_ui.php';
 if (current_user()) { header('Location: /dashboard.php'); exit; }
 $err = ''; $ref = trim($_GET['ref'] ?? '');
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -33,24 +34,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$err) $err = 'Something went wrong. Try again.';
     }
 }
-header_html('Register', null, 'auth'); ?>
-<div class="card">
-<?= logo_html('✨') ?>
+auth_start('Register', 'reg'); ?>
 <h2>Create Account</h2>
 <p class="sub">Join in less than a minute</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
-<label>Email Address</label><input type="email" name="email" required autocomplete="email" placeholder="you@example.com" value="<?= e($_POST['email'] ?? '') ?>">
-<label>Password</label>
-<div class="pw"><input type="password" id="p1" name="password" required minlength="8" autocomplete="new-password"><button type="button" data-toggle="#p1">Show</button></div>
-<small>Must be at least 8 characters</small>
-<label>Confirm Password</label>
-<div class="pw"><input type="password" id="p2" name="confirm" required autocomplete="new-password"><button type="button" data-toggle="#p2">Show</button></div>
-<label>Referral Code (Optional)</label><input type="text" name="referral" value="<?= e($ref) ?>">
-<small>Get bonus when your referrer's friend makes the first deposit!</small>
+<div class="f"><input type="email" name="email" id="re" placeholder=" " required autocomplete="email" value="<?= e($_POST['email'] ?? '') ?>"><label for="re">Email Address</label></div>
+<div class="f"><input type="password" id="rp" name="password" placeholder=" " required minlength="8" autocomplete="new-password"><label for="rp">Password</label><button type="button" class="eye" data-t="#rp">Show</button></div>
+<div class="meter"><b></b></div><div class="hint">Must be at least 8 characters</div>
+<div class="f"><input type="password" id="rp2" name="confirm" placeholder=" " required autocomplete="new-password"><label for="rp2">Confirm Password</label><button type="button" class="eye" data-t="#rp2">Show</button></div>
+<div class="f"><input type="text" name="referral" id="rr" placeholder=" " value="<?= e($ref) ?>"><label for="rr">Referral Code (Optional)</label></div>
+<small class="note">Get bonus when your referrer's friend makes the first deposit!</small>
 <label class="chk"><input type="checkbox" name="terms" value="1"> <span>I agree to the Terms of Service and Privacy Policy</span></label>
-<button class="btn">Register</button>
+<button class="btn"><span>Register</span></button>
 </form>
 <p class="alt">Already have an account? <a href="/login.php">Login</a></p>
-</div>
-<?php footer_html();
+<?php auth_end();

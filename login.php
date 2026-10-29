@@ -1,4 +1,5 @@
 <?php require __DIR__ . '/lib.php';
+require __DIR__ . '/auth_ui.php';
 if (current_user()) { header('Location: /dashboard.php'); exit; }
 $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -28,18 +29,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $err = 'Wrong email or password.';
     }
 }
-header_html('Login', null, 'auth'); ?>
-<div class="card">
-<?= logo_html('🔐') ?>
+auth_start('Login', 'login'); ?>
 <h2>Welcome back</h2>
 <p class="sub">Login to your account</p>
 <?php if ($err): ?><div class="err"><?= e($err) ?></div><?php endif; ?>
 <form method="post"><?= csrf_field() ?>
-<label>Email Address</label><input type="email" name="email" required autocomplete="email" value="<?= e($_POST['email'] ?? '') ?>">
-<label>Password</label>
-<div class="pw"><input type="password" id="lp" name="password" required autocomplete="current-password"><button type="button" data-toggle="#lp">Show</button></div>
-<button class="btn">Login</button>
+<div class="f"><input type="email" name="email" id="le" placeholder=" " required autocomplete="email" value="<?= e($_POST['email'] ?? '') ?>"><label for="le">Email Address</label></div>
+<div class="f"><input type="password" id="lp" name="password" placeholder=" " required autocomplete="current-password"><label for="lp">Password</label><button type="button" class="eye" data-t="#lp">Show</button></div>
+<button class="btn"><span>Login</span></button>
 </form>
 <p class="alt">No account? <a href="/register.php">Register</a></p>
-</div>
-<?php footer_html();
+<?php auth_end();
